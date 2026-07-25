@@ -67,30 +67,69 @@ def fetch_qlc():
     raise ValueError("QLC fail")
 
 def fetch_kl8():
-    # 快乐8: 扫描全表并提取期号最大的行
+    # 快乐8: 使用结构化解析，精准提取开奖号码
     try:
         resp = SESSION.get("https://datachart.500.com/kl8/", headers=DEFAULT_HEADERS)
         resp.encoding = 'gbk'
         soup = BeautifulSoup(resp.text, "html.parser")
         all_valid_rows = []
+        
         for tr in soup.find_all("tr"):
-            txt = tr.get_text(" ", strip=True)
-            nums = re.findall(r"\b(?:0[1-9]|[1-7][0-9]|80)\b", txt)
-            if len(nums) >= 20:
-                qihao_match = re.search(r"\b\d{7,11}\b", txt)
-                if qihao_match:
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            
+            # 跳过表头和统计行
+            if len(tds) < 5 or any(skip in str(tr) for skip in ["统计", "期号", "合计"]):
+                continue
+            
+            # 第一列应该是期号
+            qihao_match = re.match(r"\d{7,11}", tds[0])
+            if not qihao_match:
+                continue
+            
+            qihao = qihao_match.group()
+            
+            # 查找开奖号码列（通常是包含空格分隔的20个1-80数字的列）
+            numbers = []
+            for td_idx in range(1, min(4, len(tds))):  # 在前几列查找
+                # 提取该单元格中的所有数字
+                potential_nums = re.findall(r"\b([0-9]{1,2})\b", tds[td_idx])
+                
+                # 严格验证：必须是20个有效的号码（01-80）
+                valid_nums = []
+                for num_str in potential_nums:
+                    try:
+                        num = int(num_str)
+                        if 1 <= num <= 80:
+                            valid_nums.append(f"{num:02d}")
+                    except:
+                        pass
+                
+                # 找到正确的号码列（恰好20个有效号码）
+                if len(valid_nums) == 20:
+                    # 查找日期
+                    date = "unknown"
+                    for td in tds:
+                        date_match = re.search(r"\d{4}-\d{2}-\d{2}", td)
+                        if date_match:
+                            date = date_match.group()
+                            break
+                    
                     all_valid_rows.append({
-                        "qihao": qihao_match.group(),
-                        "date": find_date_in_list([txt]),
-                        "numbers": nums[:20]
+                        "qihao": qihao,
+                        "date": date,
+                        "numbers": valid_nums
                     })
+                    break  # 找到号码列后跳出内层循环
+        
         if all_valid_rows:
             # 按期号降序排列，取第一个（最新的）
             latest = sorted(all_valid_rows, key=lambda x: x['qihao'], reverse=True)[0]
             if latest['date'] == "unknown":
                 latest['date'] = datetime.now().strftime("%Y-%m-%d")
             return latest
-    except: pass
+    except Exception as e:
+        print(f"KL8 解析异常: {e}")
+    
     raise ValueError("KL8 fail")
 
 def main():
