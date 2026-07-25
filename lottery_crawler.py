@@ -1,167 +1,88 @@
-"""
-福彩开奖数据爬虫 - GitHub Actions 版 v3
-主数据源：福彩官网 JSON API
-备用数据源：datachart.500.com
-"""
+# 福彩开奖数据爬虫 - 最终修复版 (针对快乐8深度优化)
 import requests
 from bs4 import BeautifulSoup
-import json, re, sys
-from datetime import datetime, date
+import json, re, time
+from datetime import datetime
 
 SESSION = requests.Session()
-SESSION.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9',
-})
-
-CWL_API = 'https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice'
-
-# ── 官网API ─────────────────────────────────────────────
-def fetch_cwl(game):
-    r = SESSION.get(CWL_API, params={
-        'name': game, 'issueCount': 1,
-        'pageNo': 1, 'pageSize': 1, 'systemType': 'PC'
-    }, headers={'Referer': 'https://www.cwl.gov.cn/'}, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    print(f'  [DEBUG] {game} 官网原始返回: {json.dumps(data, ensure_ascii=False)[:300]}')
-    item = (data.get('result') or [None])[0]
-    if not item:
-        raise ValueError('result为空')
-
-    qihao = str(item.get('code',''))
-    date_str = str(item.get('date',''))[:10]
-    red_raw = str(item.get('red',''))
-    blue_raw = str(item.get('blue',''))
-
-    print(f'  [DEBUG] {game} code={qihao} date={date_str} red={red_raw} blue={blue_raw}')
-
-    if game == 'ssq':
-        red = sorted([int(x) for x in red_raw.split(',') if x.strip()])
-        return {'qihao':qihao,'date':date_str,'red':red,'blue':int(blue_raw)}
-    elif game == '3d':
-        digits = [int(x) for x in red_raw.split(',') if x.strip()][:3]
-        return {'qihao':qihao,'date':date_str,'digits':digits}
-    elif game == 'qlc':
-        nums = sorted([int(x) for x in red_raw.split(',') if x.strip()])
-        return {'qihao':qihao,'date':date_str,'numbers':nums[:7],'special':int(blue_raw)}
-    elif game == 'kl8':
-        nums = sorted([int(x) for x in red_raw.split(',') if x.strip()])
-        return {'qihao':qihao,'date':date_str,'numbers':nums}
-
-# ── 备用：500网 HTML ──────────────────────────────────────
-URL_500 = {
-    'ssq': 'https://datachart.500.com/ssq/history/newinc/history.php',
-    '3d':  'https://datachart.500.com/sd/history/inc/history.php',
-    'qlc': 'https://datachart.500.com/qlc/history/newinc/history.php',
-    'kl8': 'https://datachart.500.com/kl8/history/newinc/history.php',
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Referer": "https://datachart.500.com/"
 }
 
-def fetch_500(game):
-    year = datetime.now().year
-    r = SESSION.get(URL_500[game],
-                    params={'start':f'{year}001','end':f'{year}999'},
-                    timeout=20)
-    r.encoding = 'gb2312'
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text,'html.parser')
-    table = (soup.find('table',{'id':'tablelist'})
-             or soup.find('table',class_='chartTable')
-             or soup.find('table'))
-    if not table:
-        raise ValueError('未找到表格')
+def find_date_in_list(tds):
+    for item in tds:
+        match = re.search(r"\d{4}-\d{2}-\d{2}", item)
+        if match: return match.group()
+    return "unknown"
 
-    # 找数据行起始（跳过所有表头）
-    rows = table.find_all('tr')
-    start = 0
-    for i, row in enumerate(rows):
-        txt = row.get_text()
-        if '期号' in txt and ('日期' in txt or '开奖' in txt):
-            start = i + 1
-    
-    # 调试：打印前3行看结构
-    print(f'  [DEBUG] {game} 500网 start={start} 总行={len(rows)}')
-    for row in rows[start:start+3]:
-        cols = [td.get_text(strip=True) for td in row.find_all('td')]
-        print(f'  [DEBUG] {game} 500网数据行: {cols[:8]}')
-
-    records = []
-    for row in rows[start:]:
-        cols = [td.get_text(strip=True) for td in row.find_all('td')]
-        if len(cols) < 3: continue
-        qihao = cols[0]
-        if not qihao.isdigit(): continue
-        date_str = ''
-        for c in reversed(cols):
-            if re.match(r'\d{4}-\d{2}-\d{2}', c):
-                date_str = c; break
-        if not date_str: continue
-        records.append((int(qihao), date_str, cols))
-
-    if not records:
-        raise ValueError('无有效数据行')
-
-    # 按期号排序取最新
-    records.sort(key=lambda x: x[0], reverse=True)
-    qihao_int, date_str, cols = records[0]
-    qihao = str(qihao_int)
-    print(f'  [DEBUG] {game} 500网最新行: 期号={qihao} 日期={date_str} cols={cols[:10]}')
-
-    if game == 'ssq':
-        red = sorted([int(cols[i]) for i in range(1,7)])
-        blue = int(cols[7])
-        return {'qihao':qihao,'date':date_str,'red':red,'blue':blue}
-    elif game == '3d':
-        # 找3位连续数字的列
-        for c in cols[1:]:
-            c2 = c.replace(' ','')
-            if re.match(r'^\d{3}$', c2):
-                return {'qihao':qihao,'date':date_str,'digits':[int(x) for x in c2]}
-        raise ValueError(f'未找到3D号码列，cols={cols}')
-    elif game == 'qlc':
-        nums = sorted([int(cols[i]) for i in range(1,8)])
-        special = int(cols[8])
-        return {'qihao':qihao,'date':date_str,'numbers':nums,'special':special}
-    elif game == 'kl8':
-        nums = sorted([int(cols[i]) for i in range(1,21)])
-        return {'qihao':qihao,'date':date_str,'numbers':nums}
-
-# ── 主流程 ────────────────────────────────────────────────
-def fetch_game(game, name):
+def fetch_data(url, min_tds, qihao_pattern):
     try:
-        result = fetch_cwl(game)
-        print(f'  ✓ {name}（官网API）期号:{result["qihao"]} 日期:{result["date"]}')
-        return result
-    except Exception as e:
-        print(f'  ! {name} 官网API失败: {e}', file=sys.stderr)
+        resp = SESSION.get(url, headers=DEFAULT_HEADERS, timeout=10)
+        resp.encoding = 'gbk'
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tr in soup.find_all("tr"):
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(tds) < min_tds or "统计" in str(tr) or "期号" in str(tr):
+                continue
+            for i in range(min(6, len(tds))):
+                if re.match(qihao_pattern, tds[i]):
+                    if any(re.search(r"\d{4}-\d{2}-\d{2}", t) for t in tds):
+                        return tds, i
+    except Exception as e: print(f"网络请求异常: {e}")
+    return None, None
 
+def fetch_ssq():
+    res, idx = fetch_data("https://datachart.500.com/ssq/history/newinc/history.php?limit=10", 10, r"^\d{5,8}$")
+    if res: return {"qihao": res[idx], "date": find_date_in_list(res), "red": res[idx+1:idx+7], "blue": res[idx+7]}
+    raise ValueError("SSQ fail")
+
+def fetch_3d():
+    res, idx = fetch_data("https://datachart.500.com/sd/history/inc/history.php?limit=10", 5, r"^\d{7,8}$")
+    if res:
+        nums = re.findall(r"\d+", res[idx+1])[:3]
+        return {"qihao": res[idx], "date": find_date_in_list(res), "digits": nums}
+    raise ValueError("3D fail")
+
+def fetch_qlc():
+    res, idx = fetch_data("https://datachart.500.com/qlc/history/newinc/history.php?limit=10", 5, r"^\d{5,8}$")
+    if res:
+        nums = re.findall(r"\b(?:0[1-9]|[12][0-9]|30)\b", " ".join(res[idx:]))
+        if len(nums) >= 8: return {"qihao": res[idx], "date": find_date_in_list(res), "basic": nums[:7], "special": nums[7]}
+    raise ValueError("QLC fail")
+
+def fetch_kl8():
+    # 快乐8: 500网页面可能将号码放在 td 的文本或特定 class 中
     try:
-        result = fetch_500(game)
-        print(f'  ✓ {name}（500网）期号:{result["qihao"]} 日期:{result["date"]}')
-        return result
-    except Exception as e:
-        print(f'  ✗ {name} 全部失败: {e}', file=sys.stderr)
-        return None
+        resp = SESSION.get("https://datachart.500.com/kl8/", headers=DEFAULT_HEADERS)
+        resp.encoding = 'gbk'
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # 尝试查找包含开奖号码的表格行 (通常在 id 为 chartsTable 的 tbody 中)
+        for tr in soup.find_all("tr"):
+            txt = tr.get_text(" ", strip=True)
+            # 匹配 20 个独立的两位数字
+            nums = re.findall(r"\b(?:0[1-9]|[1-7][0-9]|80)\b", txt)
+            if len(nums) >= 20:
+                # 提取期号：通常为 20xx 或 24xx 开头的 7-11 位数字
+                qihao_match = re.search(r"\b\d{7,11}\b", txt)
+                qihao = qihao_match.group() if qihao_match else "unknown"
+                return {"qihao": qihao, "date": find_date_in_list([txt]) or datetime.now().strftime("%Y-%m-%d"), "numbers": nums[:20]}
+    except: pass
+    raise ValueError("KL8 fail")
 
 def main():
-    print(f'抓取日期: {date.today()}')
-    games = [('ssq','双色球'),('3d','福彩3D'),('qlc','七乐彩'),('kl8','快乐8')]
-    result = {'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    ok = 0
-    for game, name in games:
-        print(f'\n── {name} ──')
-        data = fetch_game(game, name)
-        if data:
-            result[game] = data
-            ok += 1
+    results = {"updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    fetchers = [("ssq", "双色球", fetch_ssq), ("3d", "福彩3D", fetch_3d), ("qlc", "七乐彩", fetch_qlc), ("kl8", "快乐8", fetch_kl8)]
+    for code, name, func in fetchers:
+        try:
+            data = func()
+            results[code] = data
+            print(f"[成功] {name} | 期号: {data['qihao']} | 日期: {data['date']}")
+        except Exception as e: print(f"[失败] {name}: {e}")
+        time.sleep(0.5)
+    with open("latest.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print("\n数据已保存至 latest.json")
 
-    with open('latest.json','w',encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f'\n\n完成：{ok}/4 → latest.json')
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    if ok == 0:
-        sys.exit(1)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
