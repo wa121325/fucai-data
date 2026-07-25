@@ -1,10 +1,18 @@
+"""
+福彩开奖数据爬虫 - 17500.cn 版
+数据源：data.17500.cn 文本存档
+输出：latest.json (严格保持指定格式)
+"""
 import requests
 import json
-from datetime import datetime
 import sys
+from datetime import datetime
 
-# --- Configuration ---
-# Reordered as requested: SSQ, 3D, QLC, KL8
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
+# --- 17500.cn 数据源配置 ---
 URL_MAP = {
     'ssq': 'http://data.17500.cn/ssq_asc.txt',
     '3d': 'http://data.17500.cn/3d_asc.txt',
@@ -12,62 +20,64 @@ URL_MAP = {
     'kl8': 'http://data.17500.cn/kl8_asc.txt'
 }
 
-NAMES = {
-    'ssq': '双色球', '3d': '福彩3D', 'qlc': '七乐彩', 'kl8': '快乐8'
-}
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
-
-def parse_latest_line(txt, key):
-    """Parses the 17500.cn format: [Qihao] [Numbers...] [Date]"""
-    lines = [l.strip() for l in txt.strip().splitlines() if l.strip()]
+def parse_17500_line(game, text):
+    """解析 17500.cn 的文本格式并映射到指定的 JSON 结构"""
+    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
     if not lines:
-        return None
-
-    last_line = lines[-1]
-    parts = last_line.split()
-
+        raise ValueError("Empty content")
+    
+    parts = lines[-1].split()
     if len(parts) < 3:
-        return None
+        raise ValueError("Invalid format")
 
     qihao = parts[0]
     date_str = parts[-1]
-    raw_nums = parts[1:-1]
+    raw_nums = [int(x) for x in parts[1:-1] if x.isdigit()]
 
-    return {
-        'qihao': qihao,
-        'date': date_str,
-        'numbers': [int(x) if x.isdigit() else x for x in raw_nums]
-    }
+    if game == 'ssq':
+        return {'qihao': qihao, 'date': date_str, 'red': raw_nums[:6], 'blue': raw_nums[6]}
+    elif game == '3d':
+        return {'qihao': qihao, 'date': date_str, 'digits': raw_nums[:3]}
+    elif game == 'qlc':
+        return {'qihao': qihao, 'date': date_str, 'numbers': raw_nums[:7], 'special': raw_nums[7]}
+    elif game == 'kl8':
+        return {'qihao': qihao, 'date': date_str, 'numbers': raw_nums[:20]}
+    return None
+
+def fetch_game(game, name):
+    """从 17500.cn 抓取数据"""
+    try:
+        url = URL_MAP[game]
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        result = parse_17500_line(game, resp.text)
+        print(f'  ✓ {name} (17500.cn) 期号:{result["qihao"]} 日期:{result["date"]}')
+        return result
+    except Exception as e:
+        print(f'  ✗ {name} 失败: {e}', file=sys.stderr)
+        return None
 
 def main():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting data fetch for requested games from 17500.cn...")
-    final_data = {'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    count = 0
+    print(f'开始抓取 {datetime.now().strftime("%Y-%m-%d")} 最新开奖数据')
+    print(f'数据源: 乐彩网 (data.17500.cn)')
 
-    # Dictionary iteration follows the order of keys defined in URL_MAP (Python 3.7+)
-    for key, url in URL_MAP.items():
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=15)
-            if resp.status_code == 200:
-                data = parse_latest_line(resp.text, key)
-                if data:
-                    final_data[key] = data
-                    print(f"  ✓ {NAMES[key]}: 期号 {data['qihao']} ({data['date']})")
-                    count += 1
-                else:
-                    print(f"  ! {NAMES[key]}: Parsing failed.")
-            else:
-                print(f"  ✗ {NAMES[key]}: HTTP Error {resp.status_code} at {url}")
-        except Exception as e:
-            print(f"  ✗ {NAMES[key]}: Error - {e}")
+    # 严格按此顺序输出
+    games = [('ssq','双色球'), ('3d','福彩3D'), ('qlc','七乐彩'), ('kl8','快乐8')]
+    result = {'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    ok = 0
+
+    for game, name in games:
+        data = fetch_game(game, name)
+        if data:
+            result[game] = data
+            ok += 1
 
     with open('latest.json', 'w', encoding='utf-8') as f:
-        json.dump(final_data, f, ensure_ascii=False, indent=2)
+        json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"\nSuccess: {count}/{len(URL_MAP)} updated to latest.json.")
+    print(f'\n完成：{ok}/4 成功 → latest.json')
+    if ok == 0:
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
