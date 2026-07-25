@@ -1,0 +1,1402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>福彩开奖海报生成器</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;900&family=Noto+Sans+SC:wght@400;500;700&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+  :root{
+    --panel-bg:#fff;
+    --panel-border:#e3e0d8;
+    --ink:#2b2520;
+    --muted:#8a8378;
+    --accent:#b31b1b;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:"Noto Sans SC",-apple-system,sans-serif;
+    background:#f2efe8;
+    color:var(--ink);
+    padding:28px 16px 80px;
+    overflow-x:hidden;
+  }
+  .app{
+    max-width:1100px;
+    margin:0 auto;
+    display:grid;
+    grid-template-columns:340px 1fr;
+    gap:28px;
+    align-items:start;
+  }
+  .app > div{ min-width:0; }
+  @media (max-width:900px){
+    .app{grid-template-columns:1fr;}
+  }
+  h1.appTitle{
+    font-size:20px;
+    font-weight:700;
+    margin:0 0 4px;
+  }
+  p.appSub{
+    font-size:13px;
+    color:var(--muted);
+    margin:0 0 22px;
+  }
+  .panel{
+    background:var(--panel-bg);
+    border:1px solid var(--panel-border);
+    border-radius:14px;
+    padding:18px;
+    margin-bottom:16px;
+  }
+  .panel h2{
+    font-size:12px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:0 0 12px;
+    font-weight:700;
+  }
+  .pillrow{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .pill{
+    flex:1;
+    min-width:80px;
+    text-align:center;
+    padding:9px 10px;
+    border-radius:9px;
+    border:1px solid var(--panel-border);
+    background:#faf9f6;
+    font-size:13px;
+    font-weight:500;
+    cursor:pointer;
+    user-select:none;
+    transition:all .15s ease;
+  }
+  .pill:hover{border-color:#c7c0b0;}
+  .pill.active{
+    background:var(--ink);
+    color:#fff;
+    border-color:var(--ink);
+  }
+  .field{margin-bottom:12px;}
+  .field label{
+    display:block;
+    font-size:12px;
+    color:var(--muted);
+    margin-bottom:5px;
+  }
+  .field input{
+    width:100%;
+    padding:8px 10px;
+    border:1px solid var(--panel-border);
+    border-radius:8px;
+    font-size:14px;
+    font-family:inherit;
+  }
+  .ballGrid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:8px;
+  }
+  .btn{
+    width:100%;
+    padding:11px;
+    border:none;
+    border-radius:9px;
+    background:var(--accent);
+    color:#fff;
+    font-size:14px;
+    font-weight:700;
+    cursor:pointer;
+    letter-spacing:.02em;
+  }
+  .btn:disabled{opacity:.55;cursor:wait;}
+  .btn.secondary{
+    background:var(--ink);
+  }
+  .btn.ghost{
+    background:transparent;
+    border:1px solid var(--panel-border);
+    color:var(--ink);
+  }
+  .status{
+    font-size:12.5px;
+    margin-top:9px;
+    color:var(--muted);
+    line-height:1.5;
+  }
+  .status.err{color:#b31b1b;}
+  .status.ok{color:#1a7a4c;}
+
+  /* ---------- preview area ---------- */
+  .previewWrap{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:14px;
+  }
+  #stage{
+    width:100%;
+    max-width:520px;
+    display:flex;
+    justify-content:center;
+  }
+
+  /* ===================== POSTER BASE ===================== */
+  .poster{
+    width:800px;
+    height:1120px;
+    position:relative;
+    overflow:hidden;
+    transform-origin:top left;
+    font-family:"Noto Sans SC",sans-serif;
+  }
+  .scaleWrap{
+    overflow:hidden;
+    position:relative;
+    border-radius:6px;
+    box-shadow:0 18px 50px -20px rgba(0,0,0,.35);
+  }
+
+  /* ===================== FESTIVE THEME ===================== */
+  .style-fest{
+    background:
+      radial-gradient(circle at 15% 8%, rgba(212,160,23,.18), transparent 45%),
+      radial-gradient(circle at 85% 92%, rgba(212,160,23,.18), transparent 45%),
+      linear-gradient(180deg,#7a0c0c 0%,#9c1414 35%,#b31b1b 65%,#7a0c0c 100%);
+    color:#fdf6e3;
+  }
+  .style-fest .cloudPattern{
+    position:absolute;inset:0;
+    opacity:.10;
+    background-image:
+      radial-gradient(circle at 20px 20px, transparent 8px, #f1d688 9px, transparent 10px),
+      radial-gradient(circle at 60px 60px, transparent 8px, #f1d688 9px, transparent 10px);
+    background-size:80px 80px;
+  }
+  .style-fest .frame{
+    position:absolute;inset:22px;
+    border:2px solid #d4a017;
+    border-radius:10px;
+  }
+  .style-fest .frame::before,
+  .style-fest .frame::after{
+    content:"";
+    position:absolute;
+    width:34px;height:34px;
+    border:2px solid #f1d688;
+  }
+  .style-fest .frame::before{top:-3px;left:-3px;border-right:none;border-bottom:none;}
+  .style-fest .frame::after{bottom:-3px;right:-3px;border-left:none;border-top:none;}
+  .style-fest .eyebrow{
+    position:relative;z-index:2;
+    text-align:center;
+    font-size:16px;
+    letter-spacing:.35em;
+    color:#f1d688;
+    margin-top:78px;
+    font-weight:500;
+  }
+  .style-fest .gameName{
+    position:relative;z-index:2;
+    text-align:center;
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:76px;
+    margin:14px 0 6px;
+    color:#fdf6e3;
+    text-shadow:0 3px 0 #5c0808, 0 6px 18px rgba(0,0,0,.35);
+    letter-spacing:.06em;
+  }
+  .style-fest .ribbon{
+    position:relative;z-index:2;
+    margin:20px auto 0;
+    width:fit-content;
+    background:linear-gradient(180deg,#e6b93a,#c8940f);
+    color:#5c1a00;
+    padding:9px 34px;
+    border-radius:999px;
+    font-weight:700;
+    font-size:20px;
+    letter-spacing:.08em;
+    box-shadow:0 6px 14px rgba(0,0,0,.25);
+  }
+  .style-fest .metaRow{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:center;
+    gap:26px;
+    margin-top:22px;
+    font-size:18px;
+    color:#f1d688;
+    font-weight:500;
+  }
+  .style-fest .ballsRow{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:16px;
+    margin-top:70px;
+    flex-wrap:wrap;
+    padding:0 40px;
+  }
+  .style-fest .ball{
+    width:88px;height:88px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:38px;
+    color:#fff;
+    box-shadow:inset 0 -8px 14px rgba(0,0,0,.25), inset 0 6px 10px rgba(255,255,255,.35), 0 8px 16px rgba(0,0,0,.3);
+  }
+  .style-fest .ball.red{background:radial-gradient(circle at 35% 30%,#ff6b5a,#c81e1e 60%,#8f0f0f);}
+  .style-fest .ball.blue{background:radial-gradient(circle at 35% 30%,#5aa9ff,#1560c8 60%,#0a3a80);}
+  .style-fest .ball.gold{background:radial-gradient(circle at 35% 30%,#f6dd8f,#d4a017 60%,#8a6408);}
+  /* 快乐8：20个号码固定10列2行排布。用固定宽度的flex布局而不是CSS grid，
+     因为导出图片用的html2canvas对grid的支持不完整，grid在导出时可能计算错误导致超出卡片边界；
+     flex+精确的固定宽度在各种情况下都能稳定保证每行正好10个。 */
+  .kl8Row{
+    display:flex !important;
+    flex-wrap:wrap;
+    justify-content:center;
+    align-content:flex-start;
+    gap:7px;
+    width:583px;
+    max-width:100%;
+    margin:0 auto;
+  }
+  .kl8Row .ball{width:52px;height:52px;font-size:19px;flex:0 0 52px;}
+  .style-fest .sep{
+    font-size:44px;
+    font-weight:900;
+    color:#f1d688;
+    font-family:"Noto Serif SC",serif;
+  }
+  .style-fest .plaque{
+    width:110px;height:130px;
+    border-radius:14px;
+    background:linear-gradient(180deg,#f6dd8f,#d4a017);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    box-shadow:inset 0 3px 6px rgba(255,255,255,.5), inset 0 -6px 10px rgba(0,0,0,.25), 0 10px 18px rgba(0,0,0,.3);
+  }
+  .style-fest .plaque .num{
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:56px;
+    color:#5c1a00;
+    line-height:1;
+  }
+  .style-fest .plaque .lbl{
+    margin-top:6px;
+    font-size:13px;
+    color:#7a3a0a;
+    font-weight:700;
+    letter-spacing:.1em;
+  }
+  .style-fest .footer{
+    position:absolute;
+    bottom:46px;left:0;right:0;
+    z-index:2;
+    text-align:center;
+    font-size:13px;
+    color:#e8c98a;
+    letter-spacing:.04em;
+  }
+  .style-fest .footer .brand{
+    font-size:15px;
+    font-weight:700;
+    color:#f1d688;
+    margin-bottom:6px;
+  }
+
+  /* ===================== MODERN / TERMINAL THEME ===================== */
+  .style-mod{
+    background:
+      linear-gradient(180deg,#0b1220 0%,#0d1526 100%);
+    color:#e8ecf4;
+  }
+  .style-mod .gridLines{
+    position:absolute;inset:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size:40px 40px;
+  }
+  .style-mod .scanGlow{
+    position:absolute;
+    top:-120px;left:50%;
+    transform:translateX(-50%);
+    width:900px;height:500px;
+    background:radial-gradient(circle, var(--acc-glow,rgba(255,77,77,.22)), transparent 65%);
+  }
+  .style-mod .topbar{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:36px 46px 0;
+    font-family:"Rajdhani",sans-serif;
+    font-size:14px;
+    letter-spacing:.18em;
+    color:#6e7b96;
+  }
+  .style-mod .topbar .dot{
+    display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--acc,#ff4d4d);
+    margin-right:8px;
+    box-shadow:0 0 10px var(--acc,#ff4d4d);
+  }
+  .style-mod .eyebrow{
+    position:relative;z-index:2;
+    text-align:center;
+    font-size:13px;
+    letter-spacing:.3em;
+    color:#6e7b96;
+    margin-top:44px;
+  }
+  .style-mod .gameName{
+    position:relative;z-index:2;
+    text-align:center;
+    font-weight:900;
+    font-size:64px;
+    margin:10px 0 0;
+    color:#f4f6fb;
+    letter-spacing:.03em;
+    font-family:"Noto Sans SC",sans-serif;
+  }
+  .style-mod .gameName .accentbar{
+    display:block;
+    width:70px;height:5px;
+    background:var(--acc,#ff4d4d);
+    margin:18px auto 0;
+    border-radius:3px;
+  }
+  .style-mod .metaRow{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:center;
+    gap:0;
+    margin-top:26px;
+    font-family:"Rajdhani",sans-serif;
+    font-size:20px;
+    color:#a8b3c8;
+  }
+  .style-mod .metaRow span{
+    padding:0 22px;
+    border-right:1px solid #22304a;
+  }
+  .style-mod .metaRow span:last-child{border-right:none;}
+  .style-mod .panelCard{
+    position:relative;z-index:2;
+    margin:64px 60px 0;
+    background:#131b2e;
+    border:1px solid #22304a;
+    border-radius:16px;
+    padding:44px 30px 34px;
+  }
+  .style-mod .panelCard .caption{
+    position:absolute;
+    top:-13px;left:30px;
+    background:#0b1220;
+    padding:0 10px;
+    font-family:"Rajdhani",sans-serif;
+    font-size:13px;
+    letter-spacing:.2em;
+    color:var(--acc,#ff4d4d);
+  }
+  .style-mod .ballsRow{
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:14px;
+    flex-wrap:wrap;
+  }
+  .style-mod .ball{
+    width:78px;height:96px;
+    border-radius:10px;
+    background:#0e1626;
+    border:1px solid #26344f;
+    display:flex;align-items:center;justify-content:center;
+    font-family:"Rajdhani",sans-serif;
+    font-weight:700;
+    font-size:44px;
+    color:#f4f6fb;
+  }
+  .style-mod .ball.special{
+    border-color:var(--acc,#ff4d4d);
+    color:var(--acc,#ff4d4d);
+    box-shadow:0 0 22px -4px var(--acc,#ff4d4d);
+  }
+  .style-mod .sep{
+    font-family:"Rajdhani",sans-serif;
+    font-size:34px;
+    color:#3a4a6b;
+    font-weight:700;
+  }
+  .style-mod .plaque{
+    width:96px;height:118px;
+    border-radius:10px;
+    background:#0e1626;
+    border:1px solid var(--acc,#2fd9c0);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    box-shadow:0 0 22px -6px var(--acc,#2fd9c0);
+  }
+  .style-mod .plaque .num{
+    font-family:"Rajdhani",sans-serif;
+    font-weight:700;
+    font-size:52px;
+    color:var(--acc,#2fd9c0);
+    line-height:1;
+  }
+  .style-mod .plaque .lbl{
+    margin-top:8px;
+    font-size:12px;
+    color:#6e7b96;
+    letter-spacing:.15em;
+  }
+  .style-mod .footer{
+    position:absolute;
+    bottom:44px;left:0;right:0;
+    z-index:2;
+    text-align:center;
+    font-family:"Rajdhani",sans-serif;
+    font-size:13px;
+    letter-spacing:.1em;
+    color:#4d5a75;
+  }
+  .style-mod .footer .brand{
+    font-size:14px;
+    color:#8a97b3;
+    margin-bottom:6px;
+    letter-spacing:.2em;
+  }
+
+  footer.credit{
+    text-align:center;
+    font-size:12px;
+    color:var(--muted);
+    margin-top:10px;
+  }
+
+  /* ---------------- QR block ---------------- */
+  .qrBlock{
+    position:relative;z-index:2;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    margin-top:34px;
+  }
+  .qrImg{
+    width:150px;height:150px;
+    object-fit:contain;
+    background:#fff;
+    padding:8px;
+    border-radius:12px;
+  }
+  .style-fest .qrImg{border:4px solid #d4a017;}
+  .style-fest .qrCaption{
+    margin-top:12px;
+    font-size:15px;
+    color:#f1d688;
+    font-weight:500;
+  }
+  .style-mod .qrImg{border:1px solid #26344f;}
+  .style-mod .qrCaption{
+    margin-top:12px;
+    font-family:"Rajdhani",sans-serif;
+    font-size:15px;
+    letter-spacing:.05em;
+    color:#a8b3c8;
+  }
+
+  /* ---------------- combo (四合一) sections ---------------- */
+  .comboHeader{
+    position:relative;z-index:2;
+    text-align:center;
+  }
+  .comboSections{
+    position:relative;z-index:2;
+    display:flex;
+    flex-direction:column;
+    gap:0;
+    margin-top:36px;
+  }
+  .comboSection{
+    padding:22px 46px;
+  }
+  .style-fest .comboSection + .comboSection{
+    border-top:1px dashed rgba(241,214,136,.35);
+  }
+  .style-mod .comboSection{
+    margin:0 46px;
+  }
+  .style-mod .comboSection + .comboSection{
+    border-top:1px solid #22304a;
+  }
+  .comboSection .sectionTitleRow{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    margin-bottom:14px;
+  }
+  .style-fest .comboSection .sectionName{
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:30px;
+    color:#fdf6e3;
+  }
+  .style-fest .comboSection .sectionMeta{
+    font-size:14px;
+    color:#f1d688;
+  }
+  .style-mod .comboSection .sectionName{
+    font-weight:700;
+    font-size:24px;
+    color:#f4f6fb;
+  }
+  .style-mod .comboSection .sectionMeta{
+    font-family:"Rajdhani",sans-serif;
+    font-size:14px;
+    color:#6e7b96;
+  }
+  .comboSection .ballsRow{
+    margin-top:0;
+    justify-content:flex-start;
+    gap:9px;
+  }
+  .comboSection .ball{
+    width:58px;height:58px;
+    font-size:22px;
+  }
+  .comboSection .plaque{
+    width:64px;height:78px;
+  }
+  .comboSection .plaque .num{font-size:30px;}
+  .comboSection .plaque .lbl{font-size:11px;margin-top:3px;}
+  .comboSection .sep{font-size:28px;}
+  .comboSection .kl8Row{max-width:100%;}
+
+  /* ===================== NOVA / STARRY BRIEFING THEME ===================== */
+  .style-nova{
+    background: radial-gradient(ellipse at 50% -10%, #1b2340 0%, #0a0e1c 55%, #05070f 100%);
+    color:#f5efe0;
+  }
+  .style-nova .stars{
+    position:absolute;inset:0;
+    background-image:
+      radial-gradient(1.6px 1.6px at 40px 60px, #fff, transparent),
+      radial-gradient(1.2px 1.2px at 180px 140px, #fff, transparent),
+      radial-gradient(1.6px 1.6px at 320px 240px, #fff, transparent),
+      radial-gradient(1.2px 1.2px at 460px 80px, #fff, transparent),
+      radial-gradient(1.6px 1.6px at 600px 320px,#fff,transparent),
+      radial-gradient(1.2px 1.2px at 100px 440px,#fff,transparent),
+      radial-gradient(1.6px 1.6px at 760px 180px,#fff,transparent);
+    background-repeat:repeat;
+    background-size:840px 520px;
+    opacity:.6;
+  }
+  .style-nova .novaTitle{
+    position:relative;z-index:2;
+    text-align:center;
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:46px;
+    letter-spacing:.03em;
+    margin:52px 0 34px;
+    color:#f1d688;
+    text-shadow:0 2px 0 #8a6408, 0 6px 16px rgba(0,0,0,.45);
+  }
+  .style-nova .novaSections{
+    position:relative;z-index:2;
+    display:flex;
+    flex-direction:column;
+    gap:22px;
+    padding:0 40px;
+  }
+  .style-nova .novaSection{
+    border-radius:18px;
+    border:1.5px solid rgba(212,160,23,.55);
+    padding:22px 26px 26px;
+    box-shadow:0 10px 24px -8px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  .style-nova .novaSection .sectionTitleRow{
+    display:flex;align-items:baseline;gap:14px;margin-bottom:16px;
+  }
+  .style-nova .novaSection .sectionName{
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:26px;
+    color:#f7e7b0;
+  }
+  .style-nova .novaSection .sectionMeta{
+    font-size:15px;
+    color:rgba(247,231,176,.75);
+  }
+  .style-nova .novaSection .ballsRow{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:12px;
+  }
+  .style-nova .ball{
+    width:60px;height:60px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:24px;color:#fff;
+    box-shadow:inset 0 -6px 10px rgba(0,0,0,.25), inset 0 4px 8px rgba(255,255,255,.3), 0 6px 12px rgba(0,0,0,.35);
+  }
+  .style-nova .ball.red{background:radial-gradient(circle at 35% 30%,#ff6b5a,#c81e1e 60%,#8f0f0f);}
+  .style-nova .ball.blue{background:radial-gradient(circle at 35% 30%,#5aa9ff,#1560c8 60%,#0a3a80);}
+  .style-nova .sep{font-size:30px;color:#f7e7b0;font-weight:900;}
+  .style-nova .plaque{
+    width:70px;height:80px;
+    border-radius:12px;
+    background:linear-gradient(180deg,#ff6b5a,#c81e1e);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 6px 14px rgba(0,0,0,.35);
+  }
+  .style-nova .plaque .num{font-size:34px;font-weight:900;color:#fff;}
+  .style-nova .plaque .lbl{display:none;}
+  .style-nova .novaDivider{
+    position:relative;z-index:2;
+    display:flex;align-items:center;justify-content:center;
+    gap:10px;
+  }
+  .style-nova .novaDivider .line{
+    height:1px;width:80px;
+    background:linear-gradient(90deg,transparent,rgba(212,160,23,.6),transparent);
+  }
+  .style-nova .novaDivider .diamond{
+    width:14px;height:14px;
+    background:linear-gradient(135deg,#f7e7b0,#d4a017);
+    transform:rotate(45deg);
+    box-shadow:0 0 8px rgba(212,160,23,.6);
+  }
+  .style-nova .footer{
+    position:relative;bottom:auto;
+    z-index:2;
+    margin:36px 0 40px;
+    text-align:center;
+    font-size:15px;
+    color:rgba(247,231,176,.85);
+    font-weight:500;
+    letter-spacing:.02em;
+  }
+  .style-nova .qrImg{border:3px solid #d4a017;}
+  .style-nova .qrCaption{
+    margin-top:12px;
+    font-size:15px;
+    color:#f7e7b0;
+    font-weight:500;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ===================== CONTROL PANEL ===================== -->
+  <div>
+    <h1 class="appTitle">福彩开奖海报生成器</h1>
+    <p class="appSub">下方一次性填好四种彩票的开奖号码，再选择要生成「单彩种」还是「四合一」海报即可，无需重复输入。</p>
+
+    <div class="panel">
+      <h2>海报组合</h2>
+      <div class="pillrow" id="comboRow">
+        <div class="pill" data-combo="single">单彩种海报</div>
+        <div class="pill" data-combo="combo">四合一组合海报</div>
+      </div>
+      <div class="status">只决定下方预览/下载的是哪种海报，下面的开奖信息只需填一次，两种海报共用同一份数据。</div>
+    </div>
+
+    <div class="panel" id="typePanel">
+      <h2>彩种</h2>
+      <div class="pillrow" id="typeRow">
+        <div class="pill" data-type="ssq">双色球</div>
+        <div class="pill" data-type="3d">福彩3D</div>
+        <div class="pill" data-type="qlc">七乐彩</div>
+        <div class="pill" data-type="kl8">快乐8</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>海报风格</h2>
+      <div class="pillrow" id="styleRow">
+        <div class="pill" data-style="fest">喜庆店铺风</div>
+        <div class="pill" data-style="mod">简洁现代风</div>
+        <div class="pill" data-style="nova">星空快报风</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>数据来源</h2>
+
+      <div class="field">
+        <label>GitHub 仓库地址（推荐配置，配置后每天全自动更新）</label>
+        <input type="text" id="githubRepoInput" placeholder="用户名/仓库名，例如：zhangsan/fucai-data" style="font-family:monospace;">
+      </div>
+      <div class="status" style="margin-top:-6px;margin-bottom:10px;">
+        填好仓库地址后，工具每次点「一键获取」会直接读取 GitHub 上自动爬取好的 JSON 数据，<b>无需任何 API Key，每天22点自动更新</b>。<br>
+        没有仓库？见下方"如何配置"指引，5分钟完成，一次配置永久生效。
+      </div>
+
+      <button class="btn secondary" id="fetchBtn" style="margin-bottom:10px;">⚡ 一键获取最新开奖号码</button>
+      <div class="status" id="fetchStatus">
+        获取顺序：①GitHub自动数据 → ②直连官方API → ③Claude API中转（需Key）
+      </div>
+
+      <details style="margin-top:14px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ Claude API Key（直连失败时备用）</summary>
+        <div style="margin-top:10px;">
+          <div class="field">
+            <label>Anthropic API Key</label>
+            <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
+          </div>
+          <div class="status" style="margin-top:-4px;">Key 只存内存，刷新即清。填好后再点获取按钮使用。</div>
+        </div>
+      </details>
+
+      <details style="margin-top:10px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ 如何配置 GitHub 自动抓取（5分钟，一次配置永久生效）</summary>
+        <div style="margin-top:10px;font-size:13px;line-height:1.8;color:var(--ink);">
+          <b>第一步：</b>注册 <a href="https://github.com" target="_blank">github.com</a> 账号（免费）<br>
+          <b>第二步：</b>创建新仓库，命名为 <code>fucai-data</code>（设为 Public 公开）<br>
+          <b>第三步：</b>将下方两个文件上传到仓库根目录（从本工具的下载区获取）：<br>
+          &nbsp;&nbsp;• <code>lottery_crawler.py</code> — 爬虫脚本<br>
+          &nbsp;&nbsp;• <code>.github/workflows/crawl.yml</code> — 自动执行计划<br>
+          <b>第四步：</b>仓库 Settings → Actions → General → 勾选 "Allow GitHub Actions to create and approve pull requests" 并保存<br>
+          <b>第五步：</b>回到本工具，上方填入 <code>你的用户名/fucai-data</code>，点「保存仓库地址」<br>
+          <b>之后：</b>每天北京时间22:00 GitHub 自动跑爬虫，结果存到 latest.json，本工具直接读取。
+        </div>
+      </details>
+
+      <button class="btn ghost" id="saveRepoBtn" style="margin-top:12px;">保存仓库地址</button>
+    </div>
+
+    <div class="panel" id="formPanel">
+      <h2>开奖信息</h2>
+      <div class="status ok" id="memoryHint" style="margin-bottom:12px;">正在读取本地记忆…</div>
+      <button class="btn ghost" id="openOfficialBtn" type="button" style="margin-bottom:14px;">打开中国福彩网核对最新开奖（不用AI）</button>
+      <div id="formFields"></div>
+    </div>
+
+    <div class="panel">
+      <h2>二维码（可选）</h2>
+      <div class="field">
+        <label>上传二维码图片（店铺公众号 / 官方小程序 / 门店地址等）</label>
+        <input type="file" id="qrFileInput" accept="image/*">
+      </div>
+      <div class="field">
+        <label>二维码下方说明文字</label>
+        <input type="text" id="qrCaptionInput" placeholder="例如：扫码关注门店公众号 / 扫码查看更多开奖公告">
+      </div>
+      <div class="status">
+        提示：默认没有预填"加好友""专业分析/内幕建议"这类话术——彩票开奖是随机的，任何声称能"专业分析预测号码"或引导私加好友指导投注的说法，都是常见的诈骗/非法赌博引流话术，请不要使用这类文案，也提醒身边人提高警惕。这里的二维码建议仅用于店铺公众号、官方小程序或门店信息等正常用途。
+      </div>
+    </div>
+
+    <button class="btn" id="downloadBtn">下载海报图片（PNG）</button>
+    <p class="status" id="downloadStatus"></p>
+  </div>
+
+  <!-- ===================== PREVIEW ===================== -->
+  <div class="previewWrap">
+    <div id="stage"></div>
+    <footer class="credit">预览已缩放显示，实际下载为高清尺寸</footer>
+  </div>
+</div>
+
+<script>
+const state = {
+  type: 'ssq',
+  style: 'fest',
+  posterMode: 'single', // 'single' | 'combo'
+  data: {
+    ssq: { qihao:'2026083', date:'2026-07-17', red:[3,8,12,19,24,31], blue:7 },
+    '3d': { qihao:'2026183', date:'2026-07-17', digits:[3,7,2] },
+    qlc: { qihao:'2026083', date:'2026-07-17', numbers:[2,7,11,15,22,26,29], special:9 },
+    kl8: { qihao:'2026083', date:'2026-07-17', numbers:[2,5,9,14,18,23,27,31,36,40,44,48,53,58,61,65,69,72,76,80] }
+  },
+  qr: { image:null, caption:'', show:false },
+  apiKey: ''
+};
+
+const gameOrder = ['ssq','3d','qlc','kl8'];
+const gameNames = { ssq:'双色球', '3d':'福彩3D', qlc:'七乐彩', kl8:'快乐8' };
+const accentByType = {
+  ssq:{acc:'#ff4d4d', glow:'rgba(255,77,77,.22)'},
+  '3d':{acc:'#2fd9c0', glow:'rgba(47,217,192,.22)'},
+  qlc:{acc:'#a78bfa', glow:'rgba(167,139,250,.22)'},
+  kl8:{acc:'#ffb020', glow:'rgba(255,176,32,.22)'}
+};
+
+function pad2(n){ return String(n).padStart(2,'0'); }
+
+/* ---------------- FORM RENDERING ---------------- */
+function renderForm(){
+  const box = document.getElementById('formFields');
+  // 无论当前是"单彩种"还是"四合一"展示模式，都统一填写全部四种彩票的号码，
+  // 这样切换展示模式或下载哪种海报都不需要重复输入。
+  box.innerHTML = gameOrder.map(g=> gameFormSection(g)).join('');
+  box.querySelectorAll('input').forEach(inp=>{
+    inp.addEventListener('input', onFieldChange);
+  });
+}
+
+function gameFormSection(game, showLabel){
+  const d = state.data[game];
+  const withHeader = showLabel !== false;
+  let html = withHeader ? `<div class="field" style="margin-top:18px;"><label style="font-size:13px;font-weight:700;color:var(--ink);">${gameNames[game]}</label></div>` : '';
+  html += field(game, '期号', 'qihao', d.qihao);
+  html += field(game, '开奖日期', 'date', d.date, 'date');
+
+  if(game === 'ssq'){
+    html += `<div class="field"><label>红球（6个，1-33）</label><div class="ballGrid">`;
+    for(let i=0;i<6;i++) html += `<input type="number" min="1" max="33" data-game="${game}" data-arr="red" data-idx="${i}" value="${d.red[i]}">`;
+    html += `</div></div>`;
+    html += field(game, '蓝球（1-16）', 'blue', d.blue, 'number');
+  } else if(game === '3d'){
+    html += `<div class="field"><label>开奖数字（3位，各0-9）</label><div class="ballGrid" style="grid-template-columns:repeat(3,1fr)">`;
+    for(let i=0;i<3;i++) html += `<input type="number" min="0" max="9" data-game="${game}" data-arr="digits" data-idx="${i}" value="${d.digits[i]}">`;
+    html += `</div></div>`;
+  } else if(game === 'qlc'){
+    html += `<div class="field"><label>基本号码（7个，1-30）</label><div class="ballGrid">`;
+    for(let i=0;i<7;i++) html += `<input type="number" min="1" max="30" data-game="${game}" data-arr="numbers" data-idx="${i}" value="${d.numbers[i]}">`;
+    html += `</div></div>`;
+    html += field(game, '特别号（1-30）', 'special', d.special, 'number');
+  } else if(game === 'kl8'){
+    html += `<div class="field"><label>开奖号码（20个，1-80，从小到大）</label><div class="ballGrid" style="grid-template-columns:repeat(5,1fr)">`;
+    for(let i=0;i<20;i++) html += `<input type="number" min="1" max="80" data-game="${game}" data-arr="numbers" data-idx="${i}" value="${d.numbers[i]}">`;
+    html += `</div></div>`;
+  }
+  return html;
+}
+
+function field(game, label, key, value, type='text'){
+  return `<div class="field"><label>${label}</label><input type="${type}" data-game="${game}" data-key="${key}" value="${value}"></div>`;
+}
+
+function onFieldChange(e){
+  const el = e.target;
+  const game = el.dataset.game || state.type;
+  const d = state.data[game];
+  if(el.dataset.arr){
+    d[el.dataset.arr][+el.dataset.idx] = +el.value;
+  } else {
+    const key = el.dataset.key;
+    d[key] = (key === 'blue' || key === 'special') ? +el.value : el.value;
+  }
+  saveMemory();
+  renderPoster();
+}
+
+/* ---------------- 期号/日期记忆与自动顺延 ---------------- */
+// 各彩种的每周开奖日（0=周日 ... 6=周六）。3D、快乐8每天开奖；双色球周二四日；七乐彩周一三五。
+const scheduleDays = {
+  ssq: [2,4,0],
+  '3d': [0,1,2,3,4,5,6],
+  qlc: [1,3,5],
+  kl8: [0,1,2,3,4,5,6]
+};
+const MEMORY_KEY = 'fucaiPosterMemory_v1';
+
+function toISODate(d){
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+// 从上次记录的期号/日期，按该彩种真实的开奖日规律，顺延推算到"今天"应该是第几期、哪天开奖。
+function advanceQihao(game, seedQihao, seedDateStr, today){
+  const days = scheduleDays[game];
+  let year = parseInt(String(seedQihao).slice(0,4), 10);
+  let seq = parseInt(String(seedQihao).slice(4), 10);
+  if(isNaN(year) || isNaN(seq)){ year = today.getFullYear(); seq = 1; }
+  let cursor = new Date((seedDateStr || toISODate(today)) + 'T00:00:00');
+  const target = new Date(toISODate(today) + 'T00:00:00');
+  let lastDrawDateStr = seedDateStr || toISODate(today);
+  let advanced = false;
+  while(cursor.getTime() < target.getTime()){
+    cursor.setDate(cursor.getDate()+1);
+    if(days.includes(cursor.getDay())){
+      const cy = cursor.getFullYear();
+      if(cy !== year){ year = cy; seq = 1; } else { seq += 1; }
+      lastDrawDateStr = toISODate(cursor);
+      advanced = true;
+    }
+  }
+  return { qihao: String(year) + String(seq).padStart(3,'0'), date: lastDrawDateStr, advanced };
+}
+
+function saveMemory(){
+  try{
+    const toSave = {};
+    gameOrder.forEach(g=>{ toSave[g] = { qihao: state.data[g].qihao, date: state.data[g].date }; });
+    localStorage.setItem(MEMORY_KEY, JSON.stringify(toSave));
+  } catch(e){ /* 本地存储不可用时静默忽略，不影响正常填写 */ }
+}
+
+// 页面打开时调用：读取上次记住的期号/日期，结合电脑当前系统日期，按各彩种真实开奖日规律自动顺延。
+function loadMemoryAndAdvance(){
+  let stored = {};
+  let storageOk = true;
+  try{
+    stored = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
+  } catch(e){ storageOk = false; }
+
+  const today = new Date();
+  let anyAdvanced = false;
+  gameOrder.forEach(g=>{
+    const seed = stored[g] || { qihao: state.data[g].qihao, date: state.data[g].date };
+    const result = advanceQihao(g, seed.qihao, seed.date, today);
+    state.data[g].qihao = result.qihao;
+    state.data[g].date = result.date;
+    if(result.advanced) anyAdvanced = true;
+  });
+  saveMemory();
+
+  const hint = document.getElementById('memoryHint');
+  if(hint){
+    if(!storageOk){
+      hint.textContent = '当前浏览器环境无法使用本地存储，期号/日期不会自动记忆，需要每次手动填写。';
+    } else if(anyAdvanced){
+      hint.textContent = `已根据系统日期（${toISODate(today)}）自动顺延各彩种的期号与开奖日期，只需要填写今天的开奖号码即可。`;
+    } else {
+      hint.textContent = `期号与日期已是最新（系统日期 ${toISODate(today)}），可以直接填写开奖号码。`;
+    }
+  }
+}
+
+/* ---------------- POSTER RENDERING ---------------- */
+function ballsHtmlForGame(game, isMod){
+  const d = state.data[game];
+  const acc = accentByType[game];
+  let html = '';
+  if(game === 'ssq'){
+    d.red.forEach(n=> html += `<div class="ball red" style="--acc:${acc.acc}">${pad2(n)}</div>`);
+    html += `<div class="sep">${isMod ? '/' : '+'}</div><div class="ball ${isMod?'special':'blue'}" style="--acc:${acc.acc}">${pad2(d.blue)}</div>`;
+  } else if(game === '3d'){
+    const lbls = isMod ? ['百','十','个'] : ['百位','十位','个位'];
+    d.digits.forEach((n,i)=> html += `<div class="plaque" style="--acc:${acc.acc}"><div class="num" style="--acc:${acc.acc}">${n}</div><div class="lbl">${lbls[i]}</div></div>`);
+  } else if(game === 'qlc'){
+    d.numbers.forEach(n=> html += `<div class="ball red" style="--acc:${acc.acc}">${pad2(n)}</div>`);
+    html += `<div class="sep">${isMod ? '/' : '+'}</div><div class="ball ${isMod?'special':'blue'}" style="--acc:${acc.acc}">${pad2(d.special)}</div>`;
+  } else if(game === 'kl8'){
+    d.numbers.forEach(n=> html += `<div class="ball ${isMod?'':'gold'}" style="--acc:${acc.acc}">${pad2(n)}</div>`);
+  }
+  return html;
+}
+
+function ballsRowClass(game){
+  return game === 'kl8' ? 'ballsRow kl8Row' : 'ballsRow';
+}
+
+function comboSectionHtml(game, isMod){
+  const d = state.data[game];
+  return `<div class="comboSection">
+    <div class="sectionTitleRow">
+      <span class="sectionName">${gameNames[game]}</span>
+      <span class="sectionMeta">第 ${d.qihao} 期 · ${formatDate(d.date)}</span>
+    </div>
+    <div class="${ballsRowClass(game)}">${ballsHtmlForGame(game, isMod)}</div>
+  </div>`;
+}
+
+const novaPanelColors = {
+  kl8: 'linear-gradient(160deg,#7a1233,#4a0a1f)',
+  ssq: 'linear-gradient(160deg,#123a66,#0b2440)',
+  '3d': 'linear-gradient(160deg,#0e6b57,#083f34)',
+  qlc: 'linear-gradient(160deg,#5a2170,#33123f)'
+};
+const novaDividerHtml = `<div class="novaDivider"><span class="line"></span><span class="diamond"></span><span class="line"></span></div>`;
+
+function novaSectionHtml(game){
+  const d = state.data[game];
+  return `<div class="novaSection" style="background:${novaPanelColors[game]}">
+    <div class="sectionTitleRow">
+      <span class="sectionName">${gameNames[game]}</span>
+      <span class="sectionMeta">第${d.qihao}期开奖号码</span>
+    </div>
+    <div class="${ballsRowClass(game)}">${ballsHtmlForGame(game, false)}</div>
+  </div>`;
+}
+
+function qrBlockHtml(){
+  if(!state.qr.show || !state.qr.image) return '';
+  const cap = state.qr.caption ? `<div class="qrCaption">${escapeHtml(state.qr.caption)}</div>` : '';
+  return `<div class="qrBlock"><img class="qrImg" src="${state.qr.image}">${cap}</div>`;
+}
+
+function escapeHtml(str){
+  return str.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function getPosterHeight(){
+  const hasQr = state.qr.show && state.qr.image;
+  if(state.style === 'nova'){
+    let h;
+    if(state.posterMode === 'combo') h = 1300;
+    else h = state.type === 'kl8' ? 660 : 560;
+    if(hasQr) h += 260;
+    return h;
+  }
+  let h = state.posterMode === 'combo' ? 1480 : 1120;
+  if(hasQr) h += 240;
+  return h;
+}
+
+function computeScale(){
+  const wrap = document.querySelector('.previewWrap');
+  const avail = wrap ? wrap.clientWidth : 340;
+  return Math.max(0.24, Math.min(0.65, (avail - 16) / 800));
+}
+
+function renderPoster(){
+  const posterH = getPosterHeight();
+  let inner = '';
+
+  if(state.posterMode === 'combo'){
+    if(state.style === 'fest'){
+      inner += `<div class="cloudPattern"></div><div class="frame"></div>`;
+      inner += `<div class="comboHeader"><div class="eyebrow" style="margin-top:70px;font-size:26px;letter-spacing:.3em;">中 国 福 利 彩 票</div><div class="gameName" style="font-size:52px;">综合开奖公告</div><div class="ribbon">四合一开奖速览</div></div>`;
+      inner += `<div class="comboSections">` + gameOrder.map(g=>comboSectionHtml(g,false)).join('') + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer" style="position:relative;bottom:auto;margin-top:34px;"><div class="brand">祝彩民朋友好运连连</div>开奖信息以中国福利彩票官方网站 www.cwl.gov.cn 公布为准</div>`;
+    } else if(state.style === 'nova'){
+      inner += `<div class="stars"></div>`;
+      inner += `<div class="novaTitle">中国福利彩票开奖快报</div>`;
+      inner += `<div class="novaSections">` + gameOrder.map(g=>novaSectionHtml(g)).join(novaDividerHtml) + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer">数据源自官方开奖，仅供参考。祝您好运！</div>`;
+    } else {
+      const acc = accentByType.ssq;
+      inner += `<div class="gridLines"></div><div class="scanGlow" style="--acc-glow:${acc.glow}"></div>`;
+      inner += `<div class="topbar"><span><span class="dot" style="background:${acc.acc};box-shadow:0 0 10px ${acc.acc}"></span>DRAW TERMINAL</span><span>CWL · OFFICIAL</span></div>`;
+      inner += `<div class="comboHeader"><div class="eyebrow" style="font-size:16px;letter-spacing:.25em;">中国福利彩票 · 开奖终端</div><div class="gameName" style="font-size:44px;">综合开奖公告<span class="accentbar" style="background:${acc.acc}"></span></div></div>`;
+      inner += `<div class="comboSections">` + gameOrder.map(g=>comboSectionHtml(g,true)).join('') + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer" style="position:relative;bottom:auto;margin-top:34px;"><div class="brand">CHINA WELFARE LOTTERY</div>数据来源 www.cwl.gov.cn，最终以官方公告为准</div>`;
+    }
+  } else {
+    const d = state.data[state.type];
+    const name = gameNames[state.type];
+    const acc = accentByType[state.type];
+
+    if(state.style === 'fest'){
+      inner += `<div class="cloudPattern"></div><div class="frame"></div>`;
+      inner += `<div class="eyebrow">中 国 福 利 彩 票</div>`;
+      inner += `<div class="gameName">${name}</div>`;
+      inner += `<div class="ribbon">开奖公告</div>`;
+      inner += `<div class="metaRow"><span>第 ${d.qihao} 期</span><span>${formatDate(d.date)} 开奖</span></div>`;
+      inner += `<div class="${ballsRowClass(state.type)}">${ballsHtmlForGame(state.type, false)}</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer"><div class="brand">祝彩民朋友好运连连</div>开奖信息以中国福利彩票官方网站 www.cwl.gov.cn 公布为准</div>`;
+    } else if(state.style === 'nova'){
+      inner += `<div class="stars"></div>`;
+      inner += `<div class="novaTitle" style="font-size:38px;margin:56px 0 30px;">中国福利彩票开奖快报</div>`;
+      inner += `<div class="novaSections" style="padding:0 50px;">` + novaSectionHtml(state.type) + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer">数据源自官方开奖，仅供参考。祝您好运！</div>`;
+    } else {
+      inner += `<div class="gridLines"></div><div class="scanGlow" style="--acc-glow:${acc.glow}"></div>`;
+      inner += `<div class="topbar"><span><span class="dot" style="background:${acc.acc};box-shadow:0 0 10px ${acc.acc}"></span>DRAW TERMINAL</span><span>CWL · OFFICIAL</span></div>`;
+      inner += `<div class="eyebrow">中国福利彩票 · 开奖终端</div>`;
+      inner += `<div class="gameName">${name}<span class="accentbar" style="background:${acc.acc}"></span></div>`;
+      inner += `<div class="metaRow"><span>期号 ${d.qihao}</span><span>${formatDate(d.date)}</span></div>`;
+      inner += `<div class="panelCard" style="--acc:${acc.acc}"><div class="caption" style="--acc:${acc.acc}">RESULT</div><div class="${ballsRowClass(state.type)}" style="--acc:${acc.acc}">${ballsHtmlForGame(state.type, true)}</div></div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer"><div class="brand">CHINA WELFARE LOTTERY</div>数据来源 www.cwl.gov.cn，最终以官方公告为准</div>`;
+    }
+  }
+
+  const stage = document.getElementById('stage');
+  const scale = computeScale();
+  stage.innerHTML = `<div class="scaleWrap" style="width:${800*scale}px;height:${posterH*scale}px;"><div id="posterEl" class="poster style-${state.style}" style="height:${posterH}px;transform:scale(${scale});">${inner}</div></div>`;
+}
+
+window.addEventListener('resize', ()=>{ renderPoster(); });
+
+function formatDate(str){
+  if(!str) return '';
+  const parts = str.split('-');
+  if(parts.length !== 3) return str;
+  return `${parts[0]}年${parts[1]}月${parts[2]}日`;
+}
+
+/* ---------------- PILL SELECTORS ---------------- */
+function setupPills(rowId, attr, onPick){
+  const row = document.getElementById(rowId);
+  row.querySelectorAll('.pill').forEach(p=>{
+    p.addEventListener('click', ()=>{
+      row.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
+      p.classList.add('active');
+      onPick(p.dataset[attr]);
+    });
+  });
+}
+
+setupPills('typeRow','type', v=>{ state.type=v; renderPoster(); });
+setupPills('styleRow','style', v=>{ state.style=v; renderPoster(); });
+setupPills('comboRow','combo', v=>{
+  state.posterMode = v;
+  document.getElementById('typePanel').style.display = v==='combo' ? 'none' : 'block';
+  renderPoster();
+});
+
+// default active states
+document.querySelector('[data-type="ssq"]').classList.add('active');
+document.querySelector('[data-style="fest"]').classList.add('active');
+document.querySelector('[data-combo="single"]').classList.add('active');
+
+/* ---------------- QR CODE ---------------- */
+document.getElementById('qrFileInput').addEventListener('change', e=>{
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ev=>{
+    state.qr.image = ev.target.result;
+    state.qr.show = true;
+    renderPoster();
+  };
+  reader.readAsDataURL(file);
+});
+document.getElementById('qrCaptionInput').addEventListener('input', e=>{
+  state.qr.caption = e.target.value;
+  renderPoster();
+});
+
+/* ---------------- AI AUTO-FETCH ---------------- */
+const schemas = {
+  ssq: '{"qihao":"期号字符串","date":"YYYY-MM-DD","red":[6个1-33的整数,从小到大排列],"blue":1个1-16的整数}',
+  '3d': '{"qihao":"期号字符串","date":"YYYY-MM-DD","digits":[3个0-9的整数,按百十个位顺序]}',
+  qlc: '{"qihao":"期号字符串","date":"YYYY-MM-DD","numbers":[7个1-30的整数,从小到大排列],"special":1个1-30的整数}',
+  kl8: '{"qihao":"期号字符串","date":"YYYY-MM-DD","numbers":[20个1-80的整数,从小到大排列]}'
+};
+
+document.getElementById('fetchBtn').addEventListener('click', fetchLatestDraw);
+
+const cwlNames = { ssq:'ssq', '3d':'3d', qlc:'qlc', kl8:'kl8' };
+const cwlApiBase = 'https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice';
+
+// ── 方式一：读 GitHub raw JSON（每天22:00自动更新，无CORS问题）──
+// 用户需在设置里填自己的GitHub用户名和仓库名，格式: "username/reponame"
+function getGithubUrl(){
+  const repo = (localStorage.getItem('fucaiGithubRepo') || '').trim();
+  if(!repo) return null;
+  return `https://raw.githubusercontent.com/${repo}/main/latest.json`;
+}
+
+async function tryGithub(){
+  const url = getGithubUrl();
+  if(!url) throw new Error('未配置GitHub仓库');
+  const resp = await fetch(url + '?t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
+  if(!resp.ok) throw new Error('GitHub HTTP ' + resp.status);
+  const json = await resp.json();
+  if(!json.ssq && !json['3d'] && !json.qlc && !json.kl8) throw new Error('JSON格式不对');
+  return json; // 直接返回整个对象，包含所有4种彩票
+}
+
+// ── 方式二：官方API直连 ──
+function parseCwlResult(game, item){
+  const obj = { qihao: String(item.code), date: (item.date||'').slice(0,10) };
+  if(game === 'ssq'){
+    obj.red = (item.red||'').split(',').map(Number);
+    obj.blue = Number(item.blue);
+  } else if(game === '3d'){
+    obj.digits = (item.red||'').split(',').map(Number).slice(0,3);
+  } else if(game === 'qlc'){
+    const parts = (item.red||'').split(',').map(Number);
+    obj.numbers = parts.slice(0,7);
+    obj.special = Number(item.blue || 0);
+  } else if(game === 'kl8'){
+    obj.numbers = (item.red||'').split(',').map(Number);
+  }
+  return obj;
+}
+
+async function tryDirectOne(game){
+  const url = `${cwlApiBase}?name=${cwlNames[game]}&issueCount=1&pageNo=1&pageSize=1&systemType=PC`;
+  const resp = await fetch(url, { headers:{ 'Referer':'https://www.cwl.gov.cn/' }, signal: AbortSignal.timeout(6000) });
+  if(!resp.ok) throw new Error('HTTP ' + resp.status);
+  const json = await resp.json();
+  const item = json.result?.[0];
+  if(!item) throw new Error('无数据');
+  return parseCwlResult(game, item);
+}
+
+// ── 方式三：Claude API中转（需Key）──
+async function tryClaude(game, apiKey){
+  const schemas_map = schemas; // 已在上方定义
+  const url = `${cwlApiBase}?name=${cwlNames[game]}&issueCount=1&pageNo=1&pageSize=1&systemType=PC`;
+  const prompt = `用web_search工具搜索"福彩${gameNames[game]}最新开奖"或直接访问 ${url}，获取最新一期开奖结果。
+只返回JSON，不加任何说明或代码块标记：${schemas_map[game]}`;
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'x-api-key':apiKey, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+    body: JSON.stringify({ model:'claude-sonnet-4-6', max_tokens:500, messages:[{role:'user',content:prompt}], tools:[{type:'web_search_20250305',name:'web_search'}] })
+  });
+  if(!resp.ok) throw new Error('Claude API ' + resp.status);
+  const data = await resp.json();
+  const text = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  const match = text.replace(/```json|```/g,'').match(/\{[\s\S]*?\}/);
+  if(!match) throw new Error('无法解析');
+  const parsed = JSON.parse(match[0]);
+  if(!parsed.qihao) throw new Error('期号缺失');
+  return parsed;
+}
+
+async function fetchLatestDraw(){
+  const btn = document.getElementById('fetchBtn');
+  const statusEl = document.getElementById('fetchStatus');
+  const keyInput = document.getElementById('apiKeyInput');
+  state.apiKey = (keyInput.value||'').trim();
+
+  btn.disabled = true;
+
+  // ── 尝试方式一：GitHub JSON（一次拿全部4种）──
+  try{
+    statusEl.className = 'status';
+    statusEl.textContent = '正在读取 GitHub 自动更新的开奖数据…';
+    const allData = await tryGithub();
+    gameOrder.forEach(g=>{ if(allData[g]) applyFetchedData(allData[g], g); });
+    saveMemory();
+    renderForm();
+    renderPoster();
+    const upd = allData.updated_at || '未知时间';
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ 成功！数据来自 GitHub 自动抓取（更新于 ${upd}）。请核对号码后下载海报。`;
+    btn.disabled = false;
+    return;
+  } catch(e1){
+    statusEl.textContent = `GitHub 读取失败（${e1.message}），改用逐项直连官方接口…`;
+  }
+
+  // ── 尝试方式二：直连官方API逐项获取 ──
+  const results = {}, failed = [];
+  for(const game of gameOrder){
+    try{
+      statusEl.textContent = `直连官方接口获取 ${gameNames[game]}…`;
+      results[game] = await tryDirectOne(game);
+    } catch(e2){
+      // 方式三：Claude中转
+      if(state.apiKey){
+        try{
+          statusEl.textContent = `直连失败，Claude中转获取 ${gameNames[game]}…`;
+          results[game] = await tryClaude(game, state.apiKey);
+        } catch(e3){
+          failed.push(`${gameNames[game]}`);
+        }
+      } else {
+        failed.push(`${gameNames[game]}`);
+      }
+    }
+  }
+
+  const ok = Object.keys(results).length;
+  if(ok > 0){
+    Object.entries(results).forEach(([g,d])=> applyFetchedData(d,g));
+    saveMemory(); renderForm(); renderPoster();
+    if(failed.length === 0){
+      statusEl.className = 'status ok';
+      statusEl.textContent = `✓ 全部获取成功！建议配置 GitHub 仓库实现每日自动更新。`;
+    } else {
+      statusEl.className = 'status';
+      statusEl.textContent = `获取 ${ok}/4 成功。失败：${failed.join('、')}（请手动填写，或配置GitHub仓库后重试）。`;
+    }
+  } else {
+    statusEl.className = 'status err';
+    statusEl.textContent = `全部方式均失败。请配置下方 GitHub 仓库后重试，或手动填写号码。`;
+  }
+  btn.disabled = false;
+}
+
+function applyFetchedData(parsed, game){
+  const d = state.data[game];
+  if(parsed.qihao) d.qihao = String(parsed.qihao);
+  if(parsed.date) d.date = String(parsed.date);
+  if(game === 'ssq'){
+    if(Array.isArray(parsed.red) && parsed.red.length===6) d.red = parsed.red.map(Number);
+    if(parsed.blue !== undefined) d.blue = Number(parsed.blue);
+  } else if(game === '3d'){
+    if(Array.isArray(parsed.digits) && parsed.digits.length===3) d.digits = parsed.digits.map(Number);
+  } else if(game === 'qlc'){
+    if(Array.isArray(parsed.numbers) && parsed.numbers.length===7) d.numbers = parsed.numbers.map(Number);
+    if(parsed.special !== undefined) d.special = Number(parsed.special);
+  } else if(game === 'kl8'){
+    if(Array.isArray(parsed.numbers) && parsed.numbers.length===20) d.numbers = parsed.numbers.map(Number);
+  }
+}
+
+/* ---------------- DOWNLOAD ---------------- */
+document.getElementById('downloadBtn').addEventListener('click', async ()=>{
+  const statusEl = document.getElementById('downloadStatus');
+  statusEl.textContent = '正在生成图片…';
+  const target = document.getElementById('posterEl');
+  const posterH = getPosterHeight();
+  // render at full resolution regardless of preview scale
+  const clone = target.cloneNode(true);
+  clone.style.transform = 'none';
+  clone.style.position = 'fixed';
+  clone.style.left = '-9999px';
+  clone.style.top = '0';
+  clone.style.height = posterH + 'px';
+  document.body.appendChild(clone);
+  try{
+    const canvas = await html2canvas(clone, { backgroundColor:null, scale:2, width:800, height:posterH });
+    const link = document.createElement('a');
+    const label = state.posterMode === 'combo' ? '四合一综合' : gameNames[state.type];
+    const qihaoLabel = state.posterMode === 'combo' ? state.data.ssq.qihao : state.data[state.type].qihao;
+    link.download = `福彩开奖海报_${label}_${qihaoLabel}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    statusEl.textContent = '海报已下载。';
+  } catch(err){
+    statusEl.textContent = '生成图片失败：' + err.message;
+  } finally {
+    document.body.removeChild(clone);
+  }
+});
+
+/* init */
+// 读取已保存的GitHub仓库地址
+try{
+  const savedRepo = localStorage.getItem('fucaiGithubRepo') || '';
+  if(savedRepo) document.getElementById('githubRepoInput').value = savedRepo;
+} catch(e){}
+
+// 保存仓库地址按钮
+document.getElementById('saveRepoBtn').addEventListener('click', ()=>{
+  const val = document.getElementById('githubRepoInput').value.trim();
+  try{
+    if(val){
+      localStorage.setItem('fucaiGithubRepo', val);
+      document.getElementById('fetchStatus').className = 'status ok';
+      document.getElementById('fetchStatus').textContent = `✓ 已保存仓库地址：${val}。下次点「获取」将优先从此处读取数据。`;
+    } else {
+      localStorage.removeItem('fucaiGithubRepo');
+      document.getElementById('fetchStatus').textContent = '已清除仓库地址。';
+    }
+  } catch(e){
+    document.getElementById('fetchStatus').className = 'status err';
+    document.getElementById('fetchStatus').textContent = '保存失败（浏览器不支持本地存储）。';
+  }
+});
+
+loadMemoryAndAdvance();
+renderForm();
+renderPoster();
+
+document.getElementById('openOfficialBtn').addEventListener('click', ()=>{
+  window.open('https://www.cwl.gov.cn/', '_blank', 'noopener');
+});
+</script>
+</body>
+</html>
