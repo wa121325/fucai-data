@@ -6,7 +6,7 @@ from datetime import datetime
 
 SESSION = requests.Session()
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/50 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Referer": "https://datachart.500.com/"
 }
 
@@ -46,9 +46,24 @@ def fetch_3d():
 
 def fetch_qlc():
     res, idx = fetch_data("https://datachart.500.com/qlc/history/newinc/history.php?limit=10", 5, r"^\d{5,8}$")
-    if res:
-        nums = re.findall(r"\b(?:0[1-9]|[12][0-9]|30)\b", " ".join(res[idx:]))
-        if len(nums) >= 8: return {"qihao": res[idx], "date": find_date_in_list(res), "basic": nums[:7], "special": nums[7]}
+    if res and len(res) > idx + 1: # Ensure res[idx+1] exists, which should contain the numbers
+        numbers_raw_text = res[idx+1]
+        
+        # Find all two-digit number strings
+        potential_nums_str = re.findall(r"\d{2}", numbers_raw_text)
+        
+        # Convert to int and filter for valid QLC numbers (1-30)
+        nums = []
+        for s_num in potential_nums_str:
+            try:
+                num = int(s_num)
+                if 1 <= num <= 30:
+                    nums.append(f"{num:02d}") # Format back to two digits (e.g., 4 -> '04')
+            except ValueError:
+                continue # Skip if not a valid number
+
+        if len(nums) == 8: # Expect 7 basic + 1 special
+            return {"qihao": res[idx], "date": find_date_in_list(res), "basic": nums[:7], "special": nums[7]}
     raise ValueError("QLC fail")
 
 def fetch_kl8():
@@ -72,7 +87,7 @@ def fetch_kl8():
         if all_valid_rows:
             # 按期号降序排列，取第一个（最新的）
             latest = sorted(all_valid_rows, key=lambda x: x['qihao'], reverse=True)[0]
-            if latest['date'] == "unknown": 
+            if latest['date'] == "unknown":
                 latest['date'] = datetime.now().strftime("%Y-%m-%d")
             return latest
     except: pass
