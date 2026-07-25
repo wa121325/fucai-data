@@ -1,4 +1,4 @@
-# 福彩开奖数据爬虫 - 最终修复版 (针对快乐8深度优化)
+# 福彩开奖数据爬虫 - 最终修复版 (支持自动定位最新期号)
 import requests
 from bs4 import BeautifulSoup
 import json, re, time
@@ -52,21 +52,29 @@ def fetch_qlc():
     raise ValueError("QLC fail")
 
 def fetch_kl8():
-    # 快乐8: 500网页面可能将号码放在 td 的文本或特定 class 中
+    # 快乐8: 扫描全表并提取期号最大的行
     try:
         resp = SESSION.get("https://datachart.500.com/kl8/", headers=DEFAULT_HEADERS)
         resp.encoding = 'gbk'
         soup = BeautifulSoup(resp.text, "html.parser")
-        # 尝试查找包含开奖号码的表格行 (通常在 id 为 chartsTable 的 tbody 中)
+        all_valid_rows = []
         for tr in soup.find_all("tr"):
             txt = tr.get_text(" ", strip=True)
-            # 匹配 20 个独立的两位数字
             nums = re.findall(r"\b(?:0[1-9]|[1-7][0-9]|80)\b", txt)
             if len(nums) >= 20:
-                # 提取期号：通常为 20xx 或 24xx 开头的 7-11 位数字
                 qihao_match = re.search(r"\b\d{7,11}\b", txt)
-                qihao = qihao_match.group() if qihao_match else "unknown"
-                return {"qihao": qihao, "date": find_date_in_list([txt]) or datetime.now().strftime("%Y-%m-%d"), "numbers": nums[:20]}
+                if qihao_match:
+                    all_valid_rows.append({
+                        "qihao": qihao_match.group(),
+                        "date": find_date_in_list([txt]),
+                        "numbers": nums[:20]
+                    })
+        if all_valid_rows:
+            # 按期号降序排列，取第一个（最新的）
+            latest = sorted(all_valid_rows, key=lambda x: x['qihao'], reverse=True)[0]
+            if latest['date'] == "unknown": 
+                latest['date'] = datetime.now().strftime("%Y-%m-%d")
+            return latest
     except: pass
     raise ValueError("KL8 fail")
 
