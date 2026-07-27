@@ -488,7 +488,33 @@
     margin-top:10px;
   }
 
-  /* ---------------- QR block ---------------- */
+  /* ── 海报日期行 ── */
+  .posterDate{
+    position:relative;z-index:2;
+    text-align:center;
+    margin-top:10px;
+  }
+  .style-fest .posterDate{
+    font-size:20px;
+    color:#f1d688;
+    letter-spacing:.12em;
+    font-weight:500;
+  }
+  .style-nova .posterDate{
+    font-family:"Noto Serif SC",serif;
+    font-size:20px;
+    color:#f1d688;
+    letter-spacing:.1em;
+    opacity:.9;
+  }
+  .style-mod .posterDate{
+    font-family:"Rajdhani",sans-serif;
+    font-size:18px;
+    letter-spacing:.15em;
+    color:#a8b3c8;
+  }
+
+  /* ===================== QR block ---------------- */
   .qrBlock{
     position:relative;z-index:2;
     display:flex;
@@ -975,6 +1001,14 @@ function loadMemoryAndAdvance(){
   }
 }
 
+// 海报统一显示日期：取3D（每天开奖）的开奖日期
+// 3D和快乐8每天开奖，日期最新最准；双色球/七乐彩隔天开奖可能滞后，不用它们的日期
+function getDisplayDate(){
+  const d3date = state.data['3d'] && state.data['3d'].date;
+  if(d3date && /^\d{4}-\d{2}-\d{2}/.test(d3date)) return formatDate(d3date);
+  return '';
+}
+
 /* ---------------- POSTER RENDERING ---------------- */
 function ballsHtmlForGame(game, isMod){
   const d = state.data[game];
@@ -1066,13 +1100,14 @@ function renderPoster(){
   if(state.posterMode === 'combo'){
     if(state.style === 'fest'){
       inner += `<div class="cloudPattern"></div><div class="frame"></div>`;
-      inner += `<div class="comboHeader"><div class="eyebrow" style="margin-top:70px;font-size:26px;letter-spacing:.3em;">中 国 福 利 彩 票</div><div class="gameName" style="font-size:52px;">综合开奖公告</div><div class="ribbon">四合一开奖速览</div></div>`;
+      inner += `<div class="comboHeader"><div class="eyebrow" style="margin-top:70px;font-size:26px;letter-spacing:.3em;">中 国 福 利 彩 票</div><div class="gameName" style="font-size:52px;">综合开奖公告</div><div class="ribbon">四合一开奖速览</div>${getDisplayDate()?`<div class="posterDate">${getDisplayDate()}</div>`:''}</div>`;
       inner += `<div class="comboSections">` + gameOrder.map(g=>comboSectionHtml(g,false)).join('') + `</div>`;
       inner += qrBlockHtml();
       inner += `<div class="footer" style="position:relative;bottom:auto;margin-top:34px;"><div class="brand">祝彩民朋友好运连连</div>开奖信息以中国福利彩票官方网站 www.cwl.gov.cn 公布为准</div>`;
     } else if(state.style === 'nova'){
       inner += `<div class="stars"></div>`;
       inner += `<div class="novaTitle">中国福利彩票开奖快报</div>`;
+      if(getDisplayDate()) inner += `<div class="posterDate">${getDisplayDate()}</div>`;
       inner += `<div class="novaSections">` + gameOrder.map(g=>novaSectionHtml(g)).join(novaDividerHtml) + `</div>`;
       inner += qrBlockHtml();
       inner += `<div class="footer">数据源自官方开奖，仅供参考。祝您好运！</div>`;
@@ -1080,7 +1115,7 @@ function renderPoster(){
       const acc = accentByType.ssq;
       inner += `<div class="gridLines"></div><div class="scanGlow" style="--acc-glow:${acc.glow}"></div>`;
       inner += `<div class="topbar"><span><span class="dot" style="background:${acc.acc};box-shadow:0 0 10px ${acc.acc}"></span>DRAW TERMINAL</span><span>CWL · OFFICIAL</span></div>`;
-      inner += `<div class="comboHeader"><div class="eyebrow" style="font-size:16px;letter-spacing:.25em;">中国福利彩票 · 开奖终端</div><div class="gameName" style="font-size:44px;">综合开奖公告<span class="accentbar" style="background:${acc.acc}"></span></div></div>`;
+      inner += `<div class="comboHeader"><div class="eyebrow" style="font-size:16px;letter-spacing:.25em;">中国福利彩票 · 开奖终端</div><div class="gameName" style="font-size:44px;">综合开奖公告<span class="accentbar" style="background:${acc.acc}"></span></div>${getDisplayDate()?`<div class="posterDate">${getDisplayDate()}</div>`:''}</div>`;
       inner += `<div class="comboSections">` + gameOrder.map(g=>comboSectionHtml(g,true)).join('') + `</div>`;
       inner += qrBlockHtml();
       inner += `<div class="footer" style="position:relative;bottom:auto;margin-top:34px;"><div class="brand">CHINA WELFARE LOTTERY</div>数据来源 www.cwl.gov.cn，最终以官方公告为准</div>`;
@@ -1096,12 +1131,16 @@ function renderPoster(){
       inner += `<div class="gameName">${name}</div>`;
       inner += `<div class="ribbon">开奖公告</div>`;
       inner += `<div class="metaRow"><span>第 ${d.qihao} 期</span><span>${formatDate(d.date)} 开奖</span></div>`;
+      if(getDisplayDate() && state.type !== '3d' && state.type !== 'kl8'){
+        inner += `<div class="posterDate" style="margin-top:8px;font-size:16px;">开奖日期：${getDisplayDate()}</div>`;
+      }
       inner += `<div class="${ballsRowClass(state.type)}">${ballsHtmlForGame(state.type, false)}</div>`;
       inner += qrBlockHtml();
       inner += `<div class="footer"><div class="brand">祝彩民朋友好运连连</div>开奖信息以中国福利彩票官方网站 www.cwl.gov.cn 公布为准</div>`;
     } else if(state.style === 'nova'){
       inner += `<div class="stars"></div>`;
-      inner += `<div class="novaTitle" style="font-size:38px;margin:56px 0 30px;">中国福利彩票开奖快报</div>`;
+      inner += `<div class="novaTitle" style="font-size:38px;margin:56px 0 16px;">中国福利彩票开奖快报</div>`;
+      if(getDisplayDate()) inner += `<div class="posterDate" style="margin-bottom:20px;">${getDisplayDate()}</div>`;
       inner += `<div class="novaSections" style="padding:0 50px;">` + novaSectionHtml(state.type) + `</div>`;
       inner += qrBlockHtml();
       inner += `<div class="footer">数据源自官方开奖，仅供参考。祝您好运！</div>`;
@@ -1110,7 +1149,7 @@ function renderPoster(){
       inner += `<div class="topbar"><span><span class="dot" style="background:${acc.acc};box-shadow:0 0 10px ${acc.acc}"></span>DRAW TERMINAL</span><span>CWL · OFFICIAL</span></div>`;
       inner += `<div class="eyebrow">中国福利彩票 · 开奖终端</div>`;
       inner += `<div class="gameName">${name}<span class="accentbar" style="background:${acc.acc}"></span></div>`;
-      inner += `<div class="metaRow"><span>期号 ${d.qihao}</span><span>${formatDate(d.date)}</span></div>`;
+      inner += `<div class="metaRow"><span>期号 ${d.qihao}</span><span>${getDisplayDate() || formatDate(d.date)}</span></div>`;
       inner += `<div class="panelCard" style="--acc:${acc.acc}"><div class="caption" style="--acc:${acc.acc}">RESULT</div><div class="${ballsRowClass(state.type)}" style="--acc:${acc.acc}">${ballsHtmlForGame(state.type, true)}</div></div>`;
       inner += qrBlockHtml();
       inner += `<div class="footer"><div class="brand">CHINA WELFARE LOTTERY</div>数据来源 www.cwl.gov.cn，最终以官方公告为准</div>`;
