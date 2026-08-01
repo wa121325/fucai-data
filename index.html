@@ -488,6 +488,84 @@
     margin-top:10px;
   }
 
+  /* ── 主Tab ── */
+  .mainTabs{
+    display:flex;gap:6px;margin-bottom:18px;
+  }
+  .mainTab{
+    flex:1;text-align:center;padding:10px;
+    border-radius:10px;border:1px solid var(--panel-border);
+    background:#faf9f6;font-size:14px;font-weight:600;
+    cursor:pointer;user-select:none;transition:all .15s;
+  }
+  .mainTab:hover{border-color:#c7c0b0;}
+  .mainTab.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .tabContent{display:none;}
+  .tabContent.active{display:block;}
+
+  /* ── 走势图表格 ── */
+  #trendWrap{font-size:12px;}
+  .trendTable{
+    border-collapse:collapse;
+    table-layout:fixed;
+    background:#fff;
+    font-family:"Noto Sans SC",sans-serif;
+    font-size:12px;
+    min-width:100%;
+  }
+  .trendTable th{
+    background:#1a1a2e;color:#f1d688;
+    padding:5px 3px;text-align:center;
+    border:1px solid #333;
+    position:sticky;top:0;z-index:2;
+    font-weight:600;font-size:11px;
+    white-space:nowrap;
+  }
+  .trendTable td{
+    padding:4px 2px;text-align:center;
+    border:1px solid #ddd;
+    min-width:28px;
+  }
+  .trendTable tr:nth-child(even) td{background:#f8f6f2;}
+  .trendTable tr:hover td{background:#fff3e0;}
+  /* 号码圆点 */
+  .ballDot{
+    display:inline-block;
+    width:22px;height:22px;line-height:22px;
+    border-radius:50%;font-size:11px;font-weight:700;
+    color:#fff;text-align:center;
+  }
+  .ballDot.red{background:#c81e1e;}
+  .ballDot.blue{background:#1560c8;}
+  .ballDot.gold{background:#c8940f;}
+  /* 走势连线圆 */
+  .trendDot{
+    display:inline-block;width:20px;height:20px;
+    line-height:20px;border-radius:50%;
+    font-size:11px;font-weight:700;
+    color:#fff;background:#c81e1e;
+    position:relative;
+  }
+  .trendDot.miss{
+    background:transparent;color:#999;
+    font-size:11px;font-weight:400;
+  }
+  /* 指标色 */
+  .tag-odd{color:#c81e1e;font-weight:700;}
+  .tag-even{color:#1560c8;font-weight:700;}
+  .tag-big{color:#e87d00;font-weight:700;}
+  .tag-small{color:#1a7a4c;font-weight:700;}
+  .tag-0{color:#9b59b6;font-weight:700;}
+  .tag-1{color:#e74c3c;font-weight:700;}
+  .tag-2{color:#3498db;font-weight:700;}
+  .sectionTitle{
+    font-size:14px;font-weight:700;
+    padding:10px 0 6px;color:var(--ink);
+    border-bottom:2px solid var(--ink);
+    margin:18px 0 8px;
+  }
+  .trendScrollBox{overflow-x:auto;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1);}
+
   /* ── 海报日期行 ── */
   .posterDate{
     position:relative;z-index:2;
@@ -732,7 +810,16 @@
 <div class="app">
   <!-- ===================== CONTROL PANEL ===================== -->
   <div>
-    <h1 class="appTitle">福彩开奖海报生成器</h1>
+    <h1 class="appTitle">福彩开奖数据中心</h1>
+
+    <!-- 主Tab栏 -->
+    <div class="mainTabs">
+      <div class="mainTab active" data-tab="poster">🎨 海报生成</div>
+      <div class="mainTab" data-tab="trend">📊 走势图</div>
+    </div>
+
+    <!-- 海报Tab内容 -->
+    <div id="tabPoster" class="tabContent active">
     <p class="appSub">下方一次性填好四种彩票的开奖号码，再选择要生成「单彩种」还是「四合一」海报即可，无需重复输入。</p>
 
     <div class="panel">
@@ -832,12 +919,32 @@
 
     <button class="btn" id="downloadBtn">下载海报图片（PNG）</button>
     <p class="status" id="downloadStatus"></p>
-  </div>
+    </div><!-- end tabPoster -->
+
+    <!-- 走势图Tab内容 -->
+    <div id="tabTrend" class="tabContent">
+      <p class="appSub">数据来自 GitHub 仓库历史记录，近50期走势。需先在「数据来源」里配置好仓库地址。</p>
+      <div class="panel">
+        <h2>选择彩种</h2>
+        <div class="pillrow" id="trendTypeRow">
+          <div class="pill active" data-trend="3d">福彩3D</div>
+          <div class="pill" data-trend="ssq">双色球</div>
+          <div class="pill" data-trend="kl8">快乐8</div>
+        </div>
+      </div>
+      <button class="btn secondary" id="loadTrendBtn">加载走势图</button>
+      <div class="status" id="trendStatus" style="margin-top:8px;"></div>
+      <button class="btn" id="downloadTrendBtn" style="margin-top:10px;display:none;">下载走势图（PNG）</button>
+    </div><!-- end tabTrend -->
+
+  </div><!-- end left panel -->
 
   <!-- ===================== PREVIEW ===================== -->
   <div class="previewWrap">
     <div id="stage"></div>
-    <footer class="credit">预览已缩放显示，实际下载为高清尺寸</footer>
+    <footer class="credit" id="previewCredit">预览已缩放显示，实际下载为高清尺寸</footer>
+    <!-- 走势图容器 -->
+    <div id="trendWrap" style="display:none;width:100%;overflow-x:auto;"></div>
   </div>
 </div>
 
@@ -1378,21 +1485,41 @@ function applyFetchedData(parsed, game){
 document.getElementById('downloadBtn').addEventListener('click', async ()=>{
   const statusEl = document.getElementById('downloadStatus');
   statusEl.textContent = '正在生成图片…';
-  const target = document.getElementById('posterEl');
+
   const posterH = getPosterHeight();
-  // render at full resolution regardless of preview scale
-  const clone = target.cloneNode(true);
-  clone.style.transform = 'none';
-  clone.style.position = 'fixed';
-  clone.style.left = '-9999px';
-  clone.style.top = '0';
-  clone.style.height = posterH + 'px';
-  document.body.appendChild(clone);
+  const label = state.posterMode === 'combo' ? '四合一综合' : gameNames[state.type];
+  const qihaoLabel = state.posterMode === 'combo' ? state.data.ssq.qihao : state.data[state.type].qihao;
+
+  // 在屏幕外新建一个全尺寸poster，避免克隆已缩放元素导致宽高为0的问题
+  const wrap = document.createElement('div');
+  wrap.style.cssText = `position:fixed;left:-9999px;top:0;width:800px;height:${posterH}px;overflow:hidden;`;
+  // 把当前posterEl的内容复制进去（不克隆元素本身，只复制innerHTML）
+  const src = document.getElementById('posterEl');
+  wrap.className = src.className; // 继承风格class
+  wrap.style.width = '800px';
+  wrap.style.height = posterH + 'px';
+  wrap.style.position = 'fixed';
+  wrap.style.left = '-9999px';
+  wrap.style.top = '0';
+  wrap.style.transform = 'none';
+  wrap.style.transformOrigin = 'top left';
+  wrap.style.overflow = 'hidden';
+  wrap.innerHTML = src.innerHTML;
+  document.body.appendChild(wrap);
+
+  // 等一帧让浏览器渲染完成
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
   try{
-    const canvas = await html2canvas(clone, { backgroundColor:null, scale:2, width:800, height:posterH });
+    const canvas = await html2canvas(wrap, {
+      backgroundColor: null,
+      scale: 2,
+      width: 800,
+      height: posterH,
+      useCORS: true,
+      allowTaint: true,
+    });
     const link = document.createElement('a');
-    const label = state.posterMode === 'combo' ? '四合一综合' : gameNames[state.type];
-    const qihaoLabel = state.posterMode === 'combo' ? state.data.ssq.qihao : state.data[state.type].qihao;
     link.download = `福彩开奖海报_${label}_${qihaoLabel}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
@@ -1400,7 +1527,7 @@ document.getElementById('downloadBtn').addEventListener('click', async ()=>{
   } catch(err){
     statusEl.textContent = '生成图片失败：' + err.message;
   } finally {
-    document.body.removeChild(clone);
+    document.body.removeChild(wrap);
   }
 });
 
@@ -1436,6 +1563,339 @@ renderPoster();
 document.getElementById('openOfficialBtn').addEventListener('click', ()=>{
   window.open('https://www.cwl.gov.cn/', '_blank', 'noopener');
 });
+
+/* ═══════════════════════════════════════════════════
+   主 Tab 切换
+═══════════════════════════════════════════════════ */
+document.querySelectorAll('.mainTab').forEach(tab=>{
+  tab.addEventListener('click', ()=>{
+    document.querySelectorAll('.mainTab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.tabContent').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    const which = tab.dataset.tab;
+    document.getElementById('tab' + which.charAt(0).toUpperCase() + which.slice(1)).classList.add('active');
+    const stage = document.getElementById('stage');
+    const trendWrap = document.getElementById('trendWrap');
+    const credit = document.getElementById('previewCredit');
+    if(which === 'trend'){
+      stage.style.display = 'none';
+      trendWrap.style.display = 'block';
+      credit.style.display = 'none';
+    } else {
+      stage.style.display = '';
+      trendWrap.style.display = 'none';
+      credit.style.display = '';
+      renderPoster();
+    }
+  });
+});
+
+// 走势图彩种切换
+let trendType = '3d';
+document.querySelectorAll('[data-trend]').forEach(p=>{
+  p.addEventListener('click', ()=>{
+    document.querySelectorAll('[data-trend]').forEach(x=>x.classList.remove('active'));
+    p.classList.add('active');
+    trendType = p.dataset.trend;
+  });
+});
+
+/* ═══════════════════════════════════════════════════
+   走势图：加载 + 渲染
+═══════════════════════════════════════════════════ */
+document.getElementById('loadTrendBtn').addEventListener('click', loadTrend);
+document.getElementById('downloadTrendBtn').addEventListener('click', downloadTrend);
+
+async function loadTrend(){
+  const statusEl = document.getElementById('trendStatus');
+  const wrap = document.getElementById('trendWrap');
+  const dlBtn = document.getElementById('downloadTrendBtn');
+  const repo = (localStorage.getItem('fucaiGithubRepo') || '').trim();
+  if(!repo){
+    statusEl.className = 'status err';
+    statusEl.textContent = '请先在「数据来源」面板里填写并保存 GitHub 仓库地址。';
+    return;
+  }
+  statusEl.className = 'status';
+  statusEl.textContent = '正在加载历史数据…';
+  dlBtn.style.display = 'none';
+
+  try{
+    const url = `https://raw.githubusercontent.com/${repo}/main/history.json?t=${Date.now()}`;
+    const resp = await fetch(url);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status + '（history.json 不存在？请先触发一次 Actions）');
+    const data = await resp.json();
+    const records = data[trendType];
+    if(!records || records.length === 0) throw new Error('该彩种暂无历史数据');
+
+    const last50 = records.slice(-50);
+    wrap.innerHTML = renderTrendHTML(trendType, last50);
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ 已加载 ${last50.length} 期走势数据`;
+    dlBtn.style.display = '';
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '加载失败：' + e.message;
+  }
+}
+
+/* ── 3D 指标计算 ── */
+function calc3D(digits){
+  const [b, s, g] = digits;
+  const sum = b + s + g;
+  const span = Math.max(b,s,g) - Math.min(b,s,g);
+  const oddEven = digits.map(d => d%2===0 ? '偶' : '奇').join('');
+  const bigSmall = digits.map(d => d>=5 ? '大' : '小').join('');
+  const road = digits.map(d => d%3);
+  return { sum, span, oddEven, bigSmall, road };
+}
+
+/* ── 渲染总入口 ── */
+function renderTrendHTML(type, records){
+  if(type === '3d')  return render3DTrend(records);
+  if(type === 'ssq') return renderSSQTrend(records);
+  if(type === 'kl8') return renderKL8Trend(records);
+  return '';
+}
+
+/* ════════════════════════════
+   福彩 3D 走势图
+════════════════════════════ */
+function render3DTrend(records){
+  const digits_range = [0,1,2,3,4,5,6,7,8,9];
+  // 计算每期指标
+  const rows = records.map(r=>{
+    const m = calc3D(r.digits);
+    return {...r, ...m};
+  });
+
+  let html = `<div class="sectionTitle">福彩3D 走势图（近${records.length}期）</div>`;
+  html += '<div class="trendScrollBox"><table class="trendTable">';
+
+  // ── 表头 ──
+  html += '<thead><tr>';
+  html += '<th style="width:70px">期号</th>';
+  html += '<th style="width:58px">日期</th>';
+  html += '<th colspan="10" style="background:#8b1a1a">百位走势</th>';
+  html += '<th colspan="10" style="background:#1a3a8b">十位走势</th>';
+  html += '<th colspan="10" style="background:#1a6b1a">个位走势</th>';
+  html += '<th style="width:32px">和值</th>';
+  html += '<th style="width:32px">跨度</th>';
+  html += '<th style="width:46px">奇偶</th>';
+  html += '<th style="width:46px">大小</th>';
+  html += '<th style="width:46px">012路</th>';
+  html += '</tr>';
+  // 数字列头
+  html += '<tr>';
+  html += '<th></th><th></th>';
+  for(let col=0; col<3; col++){
+    for(let n=0; n<=9; n++){
+      const bg = col===0?'#8b1a1a':col===1?'#1a3a8b':'#1a6b1a';
+      html += `<th style="background:${bg};font-size:10px;">${n}</th>`;
+    }
+  }
+  html += '<th></th><th></th><th></th><th></th><th></th></tr></thead>';
+
+  // ── 数据行 ──
+  html += '<tbody>';
+  rows.forEach((r, ri)=>{
+    html += '<tr>';
+    // 期号（取后3位显示）
+    html += `<td style="font-size:11px;color:#666">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:10px;color:#888">${r.date.slice(5)}</td>`;
+
+    // 百十个位各10列走势
+    r.digits.forEach((digit, col)=>{
+      for(let n=0; n<=9; n++){
+        if(digit === n){
+          const cls = col===0?'red':col===1?'blue':'';
+          html += `<td><span class="trendDot" style="${col===0?'background:#c81e1e':col===1?'background:#1560c8':'background:#1a7a4c'}">${n}</span></td>`;
+        } else {
+          html += `<td><span class="trendDot miss">·</span></td>`;
+        }
+      }
+    });
+
+    // 和值
+    const sumCls = r.sum>=14?'tag-big':'tag-small';
+    html += `<td class="${sumCls}">${r.sum}</td>`;
+    // 跨度
+    html += `<td style="font-weight:700;color:#6b3a9b">${r.span}</td>`;
+    // 奇偶
+    const oe = r.oddEven;
+    html += `<td>${oe.split('').map(c=>`<span class="${c==='奇'?'tag-odd':'tag-even'}">${c}</span>`).join('')}</td>`;
+    // 大小
+    const bs = r.bigSmall;
+    html += `<td>${bs.split('').map(c=>`<span class="${c==='大'?'tag-big':'tag-small'}">${c}</span>`).join('')}</td>`;
+    // 012路
+    html += `<td>${r.road.map(v=>`<span class="tag-${v}">${v}</span>`).join('')}</td>`;
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+
+  // ── 汇总统计 ──
+  html += '<div class="sectionTitle" style="margin-top:24px">近期指标统计</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">';
+
+  // 和值分布
+  const sumGroups = {'0-9':0,'10-18':0,'19-27':0};
+  rows.forEach(r=>{
+    if(r.sum<=9) sumGroups['0-9']++;
+    else if(r.sum<=18) sumGroups['10-18']++;
+    else sumGroups['19-27']++;
+  });
+  html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`));
+
+  // 跨度分布
+  const spanCount = {};
+  rows.forEach(r=>{ spanCount[r.span] = (spanCount[r.span]||0)+1; });
+  const spanTop = Object.entries(spanCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  html += statCard('跨度频率TOP5', spanTop.map(([k,v])=>`跨度${k}: ${v}期`));
+
+  // 奇偶分布
+  const oeCount = {};
+  rows.forEach(r=>{ oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1; });
+  const oeTop = Object.entries(oeCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  html += statCard('奇偶组合TOP5', oeTop.map(([k,v])=>`${k}: ${v}期`));
+
+  html += '</div>';
+
+  // 各位号码出现频率
+  html += '<div class="sectionTitle">各位号码出现频率（近'+records.length+'期）</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">';
+  ['百位','十位','个位'].forEach((label, col)=>{
+    const cnt = {};
+    rows.forEach(r=>{ const d=r.digits[col]; cnt[d]=(cnt[d]||0)+1; });
+    const sorted = Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
+    html += statCard(label + '频率', sorted.map(([k,v])=>`号码${k}: ${v}次`), col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c');
+  });
+  html += '</div>';
+
+  return html;
+}
+
+/* ════════════════════════════
+   双色球 走势图
+════════════════════════════ */
+function renderSSQTrend(records){
+  const reds = Array.from({length:33},(_,i)=>i+1);
+  let html = `<div class="sectionTitle">双色球 走势图（近${records.length}期）</div>`;
+  html += '<div class="trendScrollBox"><table class="trendTable">';
+
+  html += '<thead><tr>';
+  html += '<th style="width:70px">期号</th>';
+  html += '<th style="width:58px">日期</th>';
+  for(let n=1; n<=33; n++) html += `<th style="background:#8b1a1a;font-size:10px;width:22px">${String(n).padStart(2,'0')}</th>`;
+  html += '<th style="background:#1a3a8b;width:26px">蓝</th>';
+  html += '</tr></thead>';
+
+  html += '<tbody>';
+  records.forEach(r=>{
+    html += '<tr>';
+    html += `<td style="font-size:11px;color:#666">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:10px;color:#888">${r.date.slice(5)}</td>`;
+    for(let n=1; n<=33; n++){
+      if(r.red.includes(n)){
+        html += `<td><span class="trendDot" style="background:#c81e1e;font-size:10px;">${String(n).padStart(2,'0')}</span></td>`;
+      } else {
+        html += `<td><span class="trendDot miss">·</span></td>`;
+      }
+    }
+    html += `<td><span class="ballDot blue" style="width:22px;height:22px;line-height:22px;font-size:10px;">${String(r.blue).padStart(2,'0')}</span></td>`;
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  // 红球频率
+  html += '<div class="sectionTitle" style="margin-top:20px">红球出现频率</div>';
+  const redCnt = {};
+  records.forEach(r=>r.red.forEach(n=>{ redCnt[n]=(redCnt[n]||0)+1; }));
+  html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;">';
+  for(let n=1; n<=33; n++){
+    const cnt = redCnt[n]||0;
+    const pct = Math.round(cnt/records.length*100);
+    const opacity = 0.3 + pct/100*0.7;
+    html += `<div style="text-align:center;width:40px">
+      <div style="background:rgba(200,30,30,${opacity});border-radius:50%;width:28px;height:28px;line-height:28px;margin:0 auto;font-size:11px;color:#fff;font-weight:700">${n}</div>
+      <div style="font-size:10px;color:#666;margin-top:2px">${cnt}次</div>
+    </div>`;
+  }
+  html += '</div>';
+
+  return html;
+}
+
+/* ════════════════════════════
+   快乐8 走势图
+════════════════════════════ */
+function renderKL8Trend(records){
+  let html = `<div class="sectionTitle">快乐8 走势图（近${records.length}期）</div>`;
+  html += '<div class="trendScrollBox"><table class="trendTable">';
+
+  html += '<thead><tr>';
+  html += '<th style="width:70px">期号</th>';
+  html += '<th style="width:58px">日期</th>';
+  for(let n=1; n<=80; n++) html += `<th style="background:#7a1233;font-size:9px;width:18px">${n}</th>`;
+  html += '</tr></thead>';
+
+  html += '<tbody>';
+  records.forEach(r=>{
+    html += '<tr>';
+    html += `<td style="font-size:11px;color:#666">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:10px;color:#888">${r.date.slice(5)}</td>`;
+    for(let n=1; n<=80; n++){
+      if(r.numbers.includes(n)){
+        html += `<td style="background:#7a1233;color:#f1d688;font-size:9px;font-weight:700">${n}</td>`;
+      } else {
+        html += `<td><span style="color:#ccc;font-size:9px">·</span></td>`;
+      }
+    }
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  // 频率统计
+  html += '<div class="sectionTitle" style="margin-top:20px">号码出现频率（热号/冷号）</div>';
+  const cnt = {};
+  records.forEach(r=>r.numbers.forEach(n=>{ cnt[n]=(cnt[n]||0)+1; }));
+  const sorted = Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
+  const hot10 = sorted.slice(0,10);
+  const cold10 = sorted.slice(-10).reverse();
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">';
+  html += statCard('🔥 热号TOP10', hot10.map(([k,v])=>`号码${k}: ${v}次`), '#c81e1e');
+  html += statCard('❄️ 冷号TOP10', cold10.map(([k,v])=>`号码${k}: ${v}次`), '#1560c8');
+  html += '</div>';
+
+  return html;
+}
+
+function statCard(title, lines, color='#2b2520'){
+  return `<div style="background:#faf9f6;border:1px solid #e3e0d8;border-radius:10px;padding:12px;">
+    <div style="font-size:12px;font-weight:700;color:${color};margin-bottom:8px;">${title}</div>
+    ${lines.map(l=>`<div style="font-size:12px;color:#555;line-height:1.8">${l}</div>`).join('')}
+  </div>`;
+}
+
+async function downloadTrend(){
+  const wrap = document.getElementById('trendWrap');
+  if(!wrap.innerHTML) return;
+  const btn = document.getElementById('downloadTrendBtn');
+  btn.textContent = '生成中…';
+  btn.disabled = true;
+  try{
+    const canvas = await html2canvas(wrap, {backgroundColor:'#f2efe8', scale:2});
+    const link = document.createElement('a');
+    link.download = `福彩走势图_${trendType}_${new Date().toISOString().slice(0,10)}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  } catch(e){
+    alert('下载失败: ' + e.message);
+  } finally{
+    btn.textContent = '下载走势图（PNG）';
+    btn.disabled = false;
+  }
+}
 </script>
 </body>
 </html>
