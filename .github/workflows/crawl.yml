@@ -2,9 +2,8 @@ name: 每日抓取福彩开奖数据
 
 on:
   schedule:
-    # 每天北京时间 22:00 运行 (UTC 14:00)，开奖一般21:30前结束
-    - cron: '0 14 * * *'
-  workflow_dispatch:  # 允许手动触发
+    - cron: '30 13 * * *'   # UTC 13:30 = 北京时间 21:30
+  workflow_dispatch:
 
 jobs:
   crawl:
@@ -19,16 +18,16 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: pip install requests beautifulsoup4
+        run: pip install requests
 
       - name: 运行爬虫
         run: python lottery_crawler.py
-        continue-on-error: true   # 即使部分失败，也继续推送已有数据
+        continue-on-error: true
 
       - name: 提交并推送结果
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add latest.json
-          git diff --cached --quiet || git commit -m "自动更新开奖数据 $(date +'%Y-%m-%d')"
+          git add latest.json history.json
+          git diff --cached --quiet || git commit -m "自动更新开奖数据 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M')"
           git push
