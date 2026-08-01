@@ -1881,17 +1881,58 @@ async function downloadTrend(){
   const wrap = document.getElementById('trendWrap');
   if(!wrap.innerHTML) return;
   const btn = document.getElementById('downloadTrendBtn');
-  btn.textContent = '生成中…';
+  btn.textContent = '生成中，请稍候…';
   btn.disabled = true;
+
+  // 克隆节点到屏幕外，去掉所有overflow/scroll限制，让html2canvas能截到完整内容
+  const clone = wrap.cloneNode(true);
+  clone.style.cssText = [
+    'position:fixed',
+    'top:0',
+    'left:-99999px',
+    'width:' + wrap.scrollWidth + 'px',   // 完整宽度（含横向滚动）
+    'height:auto',
+    'overflow:visible',
+    'background:#f2efe8',
+    'padding:16px',
+    'z-index:-1',
+  ].join(';');
+
+  // 同时把内部的滚动容器也展开
+  clone.querySelectorAll('.trendScrollBox').forEach(el=>{
+    el.style.overflow = 'visible';
+    el.style.width = 'auto';
+  });
+  clone.querySelectorAll('table').forEach(el=>{
+    el.style.minWidth = '0';
+  });
+
+  document.body.appendChild(clone);
+
+  // 等浏览器完成布局
+  await new Promise(r => setTimeout(r, 300));
+
   try{
-    const canvas = await html2canvas(wrap, {backgroundColor:'#f2efe8', scale:2});
+    const canvas = await html2canvas(clone, {
+      backgroundColor: '#f2efe8',
+      scale: 1.5,                        // 适当缩放，走势图很宽，2倍可能太大
+      width:  clone.scrollWidth,
+      height: clone.scrollHeight,
+      useCORS: true,
+      logging: false,
+      windowWidth:  clone.scrollWidth,
+      windowHeight: clone.scrollHeight,
+    });
+
     const link = document.createElement('a');
-    link.download = `福彩走势图_${trendType}_${new Date().toISOString().slice(0,10)}.png`;
+    const gameLabelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+    link.download = `福彩走势图_${gameLabelMap[trendType]||trendType}_${new Date().toISOString().slice(0,10)}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
   } catch(e){
     alert('下载失败: ' + e.message);
   } finally{
+    document.body.removeChild(clone);
     btn.textContent = '下载走势图（PNG）';
     btn.disabled = false;
   }
