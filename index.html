@@ -1652,21 +1652,28 @@ function calc3D(digits){
 
 /* ── 渲染总入口 ── */
 function renderTrendHTML(type, records){
-  let html = '';
-  if(type === '3d')  html = render3DTrend(records);
-  else if(type === 'ssq') html = renderSSQTrend(records);
-  else if(type === 'kl8') html = renderKL8Trend(records);
+  let inner = '';
+  if(type === '3d')       inner = render3DTrend(records);
+  else if(type === 'ssq') inner = renderSSQTrend(records);
+  else if(type === 'kl8') inner = renderKL8Trend(records);
 
-  // 走势图底部加二维码（如果已上传）
-  if(state.qr.show && state.qr.image){
-    const cap = state.qr.caption ? `<div style="margin-top:8px;font-size:13px;color:#666;text-align:center;">${escapeHtml(state.qr.caption)}</div>` : '';
-    html += `<div style="display:flex;flex-direction:column;align-items:center;margin-top:28px;padding-top:20px;border-top:1px dashed #ccc;">
-      <img src="${state.qr.image}" style="width:130px;height:130px;object-fit:contain;background:#fff;padding:8px;border-radius:10px;border:2px solid #d4a017;">
-      ${cap}
-    </div>`;
-  }
+  // 用相对定位容器包住，二维码绝对定位右下角
+  const qr = (state.qr.show && state.qr.image) ? `
+    <div style="position:absolute;right:16px;bottom:16px;text-align:center;z-index:10;">
+      <img src="${state.qr.image}" style="
+        width:110px;height:110px;object-fit:contain;
+        background:#fff;padding:6px;
+        border-radius:10px;border:2px solid #d4a017;
+        display:block;margin:0 auto;
+      ">
+      ${state.qr.caption ? `<div style="margin-top:5px;font-size:11px;color:#666;max-width:120px;line-height:1.4;">${escapeHtml(state.qr.caption)}</div>` : ''}
+    </div>` : '';
 
-  return html;
+  // 外层加 padding-bottom 给二维码留位置，position:relative 让绝对定位生效
+  return `<div style="position:relative;padding-bottom:${state.qr.show && state.qr.image ? '160px' : '20px'};">
+    ${inner}
+    ${qr}
+  </div>`;
 }
 
 /* ════════════════════════════
@@ -1896,84 +1903,51 @@ async function downloadTrend(){
   btn.disabled = true;
 
   try{
-    // 1. 获取走势图的完整HTML内容
     const trendHTML = wrap.innerHTML;
 
-    // 2. 获取当前页面所有CSS（包括走势图样式）
+    // 提取CSS
     let cssText = '';
     for(const sheet of document.styleSheets){
-      try{
-        for(const rule of sheet.cssRules){
-          cssText += rule.cssText + '\n';
-        }
-      } catch(e){}
+      try{ for(const rule of sheet.cssRules) cssText += rule.cssText + '\n'; }
+      catch(e){}
     }
 
-    // 3. 构建一个独立的HTML页面，不受任何overflow限制
-    const fullHTML = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  background: #f2efe8;
-  padding: 20px;
-  /* 关键：body不设置任何overflow限制 */
-  width: max-content;
-  min-width: 100%;
-}
+    // 构建完整HTML，覆盖所有overflow限制
+    const fullHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#f2efe8;padding:20px;width:max-content;min-width:100%;}
 ${cssText}
-/* 覆盖掉所有overflow限制 */
-body, .trendScrollBox, #trendWrap, .app, .previewWrap {
-  overflow: visible !important;
-  overflow-x: visible !important;
-  overflow-y: visible !important;
-  width: auto !important;
-  max-width: none !important;
+body,.trendScrollBox,#trendWrap,.app,.previewWrap{
+  overflow:visible!important;overflow-x:visible!important;
+  overflow-y:visible!important;width:auto!important;max-width:none!important;
 }
-.trendTable { min-width: 0 !important; }
-</style>
-</head>
-<body>
-${trendHTML}
-</body>
-</html>`;
+.trendTable{min-width:0!important;}
+</style></head><body>${trendHTML}</body></html>`;
 
-    // 4. 创建隐藏iframe，把完整HTML塞进去
+    // 创建 iframe
     const iframe = document.createElement('iframe');
-    iframe.style.cssText = 'position:fixed;left:-9999px;top:0;border:none;visibility:hidden;';
-    // 先给个大尺寸，后面根据内容实际大小调整
-    iframe.style.width  = '99999px';
-    iframe.style.height = '99999px';
+    iframe.style.cssText = 'position:fixed;left:-99999px;top:0;border:none;visibility:hidden;width:99999px;height:99999px;';
     document.body.appendChild(iframe);
 
-    // 5. 写入HTML并等待加载完成
-    await new Promise(resolve => {
-      iframe.onload = resolve;
-      iframe.contentDocument.open();
-      iframe.contentDocument.write(fullHTML);
-      iframe.contentDocument.close();
-    });
+    // 写入内容——用 srcdoc 或直接写，然后用 setTimeout 等布局完成
+    // 不依赖 onload（时序不可靠），改为直接写+固定等待
+    iframe.contentDocument.open();
+    iframe.contentDocument.write(fullHTML);
+    iframe.contentDocument.close();
 
-    // 6. 等待样式和布局稳定
-    await new Promise(r => setTimeout(r, 500));
+    // 等待渲染和布局稳定（字体加载+layout）
+    await new Promise(r => setTimeout(r, 800));
 
-    // 7. 读取iframe内容的真实完整尺寸
-    const iDoc  = iframe.contentDocument;
-    const iBody = iDoc.body;
-    const fullW = Math.max(iBody.scrollWidth,  iBody.offsetWidth,  2000);
-    const fullH = Math.max(iBody.scrollHeight, iBody.offsetHeight, 1000);
+    const iBody = iframe.contentDocument.body;
+    const fullW = Math.max(iBody.scrollWidth, iBody.offsetWidth, 1200);
+    const fullH = Math.max(iBody.scrollHeight, iBody.offsetHeight, 600);
 
-    // 8. 把iframe调整到精确尺寸，避免任何裁切
     iframe.style.width  = fullW + 'px';
     iframe.style.height = fullH + 'px';
 
-    // 再等一帧让布局重新计算
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 300));
 
-    // 9. 用html2canvas截取iframe的document.body（完整内容）
-    const canvas = await html2canvas(iBody, {
+    const canvas = await html2canvas(iframe.contentDocument.body, {
       backgroundColor: '#f2efe8',
       scale: 1.5,
       width:  fullW,
@@ -1981,26 +1955,23 @@ ${trendHTML}
       scrollX: 0,
       scrollY: 0,
       useCORS: true,
+      allowTaint: true,
       logging: false,
       windowWidth:  fullW,
       windowHeight: fullH,
     });
 
-    // 10. 下载
+    document.body.removeChild(iframe);
+
     const link = document.createElement('a');
-    const gameLabelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
-    link.download = `福彩走势图_${gameLabelMap[trendType]||trendType}_${new Date().toISOString().slice(0,10)}.png`;
+    const labelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+    link.download = `福彩走势图_${labelMap[trendType]||trendType}_${new Date().toISOString().slice(0,10)}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
 
-    document.body.removeChild(iframe);
-
   } catch(e){
-    alert('下载失败: ' + e.message);
-    // 清理可能残留的iframe
-    document.querySelectorAll('iframe').forEach(el => {
-      if(el.style.left === '-9999px') document.body.removeChild(el);
-    });
+    document.querySelectorAll('iframe[style*="-99999px"]').forEach(el=>el.remove());
+    alert('下载失败：' + e.message);
   } finally{
     btn.textContent = '下载走势图（PNG）';
     btn.disabled = false;
