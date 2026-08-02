@@ -506,45 +506,56 @@
   /* ── 走势图表格 ── */
   /* ── 走势图预览容器 ── */
   #trendWrap{
-    font-size:11px;
+    font-size:13px;
     width:100%;
     overflow-x:auto;
     -webkit-overflow-scrolling:touch;
+  }
+  /* 横屏建议提示条：竖屏时显示，横屏自动隐藏 */
+  .rotateHint{
+    display:none;
+    align-items:center;
+    gap:10px;
+    background:linear-gradient(135deg,#2c2c4e,#1a1a2e);
+    color:#f1d688;
+    padding:12px 16px;
+    border-radius:10px;
+    margin-bottom:14px;
+    font-size:13px;
+    line-height:1.5;
+  }
+  .rotateHint .icon{
+    font-size:26px;
+    animation: rotateHintSpin 1.8s ease-in-out infinite;
+    flex-shrink:0;
+  }
+  @keyframes rotateHintSpin{
+    0%,100%{ transform:rotate(0deg); }
+    50%{ transform:rotate(90deg); }
+  }
+  @media (max-width:900px) and (orientation:portrait){
+    .rotateHint{ display:flex; }
   }
   .trendScrollBox{
     overflow-x:auto;
     -webkit-overflow-scrolling:touch;
     border-radius:8px;
     box-shadow:0 2px 10px rgba(0,0,0,.1);
-    /* 提示用户可横向滑动 */
     position:relative;
-  }
-  /* 横向滑动提示条（仅手机可见） */
-  .trendScrollBox::after{
-    content:'← 左右滑动查看完整走势 →';
-    display:none;
-    text-align:center;
-    font-size:10px;
-    color:#999;
-    padding:4px;
-    background:#f5f0e8;
-  }
-  @media(max-width:600px){
-    .trendScrollBox::after{ display:block; }
   }
   .trendTable{
     border-collapse:collapse;
-    table-layout:fixed;
+    table-layout:auto;
     background:#fff;
     font-family:"Noto Sans SC",sans-serif;
-    font-size:11px;
+    font-size:13px;
   }
   .trendTable th{
     background:#1a1a2e;color:#f1d688;
-    padding:4px 2px;text-align:center;
+    padding:6px 5px;text-align:center;
     border:1px solid #333;
     position:sticky;top:0;z-index:2;
-    font-weight:600;font-size:10px;
+    font-weight:600;font-size:12px;
     white-space:nowrap;
   }
   /* 期号和日期列固定在左侧 */
@@ -552,15 +563,15 @@
   .trendTable td:nth-child(1){
     position:sticky;left:0;z-index:3;
     background:#2c2c4e;color:#f1d688;
-    min-width:42px;width:42px;
-    font-size:10px;
+    min-width:52px;width:52px;
+    font-size:12px;
   }
   .trendTable th:nth-child(2),
   .trendTable td:nth-child(2){
-    position:sticky;left:42px;z-index:3;
+    position:sticky;left:52px;z-index:3;
     background:#2c2c4e;color:#f1d688;
-    min-width:38px;width:38px;
-    font-size:9px;
+    min-width:52px;width:52px;
+    font-size:11px;
     box-shadow:2px 0 4px rgba(0,0,0,.15);
   }
   /* 数据行固定列背景 */
@@ -573,27 +584,27 @@
     background:#2c2c4e;
   }
   .trendTable td{
-    padding:3px 1px;text-align:center;
+    padding:5px 4px;text-align:center;
     border:1px solid #ddd;
-    min-width:22px;width:22px;
+    min-width:32px;
   }
   .trendTable tr:nth-child(even) td{background:#f8f6f2;}
   .trendTable tr:hover td{background:#fff3e0;}
-  /* 走势圆点缩小适应手机 */
+  /* 走势圆点：正常可读大小 */
   .trendDot{
-    display:inline-block;width:18px;height:18px;
-    line-height:18px;border-radius:50%;
-    font-size:10px;font-weight:700;
+    display:inline-block;width:26px;height:26px;
+    line-height:26px;border-radius:50%;
+    font-size:13px;font-weight:700;
     color:#fff;background:#c81e1e;
   }
   .trendDot.miss{
     background:transparent;color:#bbb;
-    font-size:9px;font-weight:400;
+    font-size:12px;font-weight:400;
   }
   .ballDot{
     display:inline-block;
-    width:20px;height:20px;line-height:20px;
-    border-radius:50%;font-size:10px;font-weight:700;
+    width:26px;height:26px;line-height:26px;
+    border-radius:50%;font-size:12px;font-weight:700;
     color:#fff;text-align:center;
   }
   .ballDot.red{background:#c81e1e;}
@@ -1730,63 +1741,57 @@ function render3DTrend(records){
   const rows = records.map(r=>({...r, ...calc3D(r.digits)}));
   const n = rows.length;
 
-  // 用 table-layout:fixed + width:100% 让表格撑满容器，不滚动
-  // 列数：期号+日期+30数字格+5指标 = 37列
-  // 期号日期占固定比例，其余均分
   let html = `<div class="sectionTitle">福彩3D 走势图（近${n}期）</div>`;
-  html += '<table class="trendTable" style="width:100%;table-layout:fixed;">';
+  html += rotateHintHTML();
+  html += '<div class="trendScrollBox"><table class="trendTable">';
 
   // 表头第1行
   html += '<thead><tr>';
-  html += '<th style="width:5%">期号</th>';
-  html += '<th style="width:5%">日期</th>';
-  html += '<th colspan="10" style="background:#8b1a1a;width:27%">百位</th>';
-  html += '<th colspan="10" style="background:#1a3a8b;width:27%">十位</th>';
-  html += '<th colspan="10" style="background:#1a6b1a;width:27%">个位</th>';
-  html += '<th style="width:3%">和</th>';
-  html += '<th style="width:3%">跨</th>';
-  html += '<th style="width:4%">奇偶</th>';
-  html += '<th style="width:4%">大小</th>';
-  html += '<th style="width:4%">路</th>';
+  html += '<th>期号</th>';
+  html += '<th>日期</th>';
+  html += '<th colspan="10" style="background:#8b1a1a">百位</th>';
+  html += '<th colspan="10" style="background:#1a3a8b">十位</th>';
+  html += '<th colspan="10" style="background:#1a6b1a">个位</th>';
+  html += '<th>和值</th><th>跨度</th><th>奇偶</th><th>大小</th><th>012路</th>';
   html += '</tr>';
   // 数字列头
   html += '<tr><th></th><th></th>';
   for(let col=0;col<3;col++){
     const bg=col===0?'#8b1a1a':col===1?'#1a3a8b':'#1a6b1a';
     for(let d=0;d<=9;d++){
-      html += `<th style="background:${bg};font-size:8px;padding:1px 0;">${d}</th>`;
+      html += `<th style="background:${bg};">${d}</th>`;
     }
   }
   html += '<th></th><th></th><th></th><th></th><th></th></tr></thead>';
 
   // 数据行
   html += '<tbody>';
-  rows.forEach((r,ri)=>{
+  rows.forEach((r)=>{
     html += '<tr>';
-    html += `<td style="font-size:8px;color:#555;padding:1px;">${r.qihao.slice(-3)}</td>`;
-    html += `<td style="font-size:7px;color:#888;padding:1px;">${r.date.slice(5)}</td>`;
+    html += `<td>${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:11px;color:#888;">${r.date.slice(5)}</td>`;
     r.digits.forEach((digit,col)=>{
       const color=col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c';
       for(let d=0;d<=9;d++){
         if(digit===d){
-          html += `<td style="padding:1px 0;"><span style="display:inline-block;width:14px;height:14px;line-height:14px;border-radius:50%;background:${color};color:#fff;font-size:8px;font-weight:700;">${d}</span></td>`;
+          html += `<td><span class="trendDot" style="background:${color};">${d}</span></td>`;
         } else {
-          html += `<td style="padding:1px 0;font-size:8px;color:#ccc;">·</td>`;
+          html += `<td><span class="trendDot miss">·</span></td>`;
         }
       }
     });
-    html += `<td style="font-size:8px;font-weight:700;color:${r.sum>=14?'#e87d00':'#1a7a4c'};padding:1px;">${r.sum}</td>`;
-    html += `<td style="font-size:8px;font-weight:700;color:#6b3a9b;padding:1px;">${r.span}</td>`;
-    html += `<td style="font-size:7px;padding:1px;">${r.oddEven.split('').map(c=>`<span style="color:${c==='奇'?'#c81e1e':'#1560c8'};font-weight:700">${c}</span>`).join('')}</td>`;
-    html += `<td style="font-size:7px;padding:1px;">${r.bigSmall.split('').map(c=>`<span style="color:${c==='大'?'#e87d00':'#1a7a4c'};font-weight:700">${c}</span>`).join('')}</td>`;
-    html += `<td style="font-size:7px;padding:1px;">${r.road.map(v=>`<span style="color:${['#9b59b6','#e74c3c','#3498db'][v]};font-weight:700">${v}</span>`).join('')}</td>`;
+    html += `<td style="font-weight:700;color:${r.sum>=14?'#e87d00':'#1a7a4c'};">${r.sum}</td>`;
+    html += `<td style="font-weight:700;color:#6b3a9b;">${r.span}</td>`;
+    html += `<td>${r.oddEven.split('').map(c=>`<span style="color:${c==='奇'?'#c81e1e':'#1560c8'};font-weight:700">${c}</span>`).join('')}</td>`;
+    html += `<td>${r.bigSmall.split('').map(c=>`<span style="color:${c==='大'?'#e87d00':'#1a7a4c'};font-weight:700">${c}</span>`).join('')}</td>`;
+    html += `<td>${r.road.map(v=>`<span style="color:${['#9b59b6','#e74c3c','#3498db'][v]};font-weight:700">${v}</span>`).join('')}</td>`;
     html += '</tr>';
   });
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
 
   // 汇总统计
-  html += '<div class="sectionTitle" style="margin-top:16px">近期指标统计</div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">';
+  html += '<div class="sectionTitle" style="margin-top:18px">近期指标统计</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;">';
   const sumGroups={'0-9':0,'10-18':0,'19-27':0};
   rows.forEach(r=>{ if(r.sum<=9)sumGroups['0-9']++; else if(r.sum<=18)sumGroups['10-18']++; else sumGroups['19-27']++; });
   html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`));
@@ -1799,7 +1804,7 @@ function render3DTrend(records){
   html += '</div>';
 
   html += '<div class="sectionTitle">各位号码频率</div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px;">';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">';
   ['百位','十位','个位'].forEach((label,col)=>{
     const cnt={};
     rows.forEach(r=>{ const d=r.digits[col]; cnt[d]=(cnt[d]||0)+1; });
@@ -1814,43 +1819,42 @@ function render3DTrend(records){
 ════════════════════════════ */
 function renderSSQTrend(records){
   const n = records.length;
-  // 总列数：期号+日期+33红+蓝 = 36列
   let html = `<div class="sectionTitle">双色球 走势图（近${n}期）</div>`;
-  html += '<table class="trendTable" style="width:100%;table-layout:fixed;">';
+  html += rotateHintHTML();
+  html += '<div class="trendScrollBox"><table class="trendTable">';
   html += '<thead><tr>';
-  html += '<th style="width:5%">期号</th>';
-  html += '<th style="width:5%">日期</th>';
-  for(let i=1;i<=33;i++) html += `<th style="background:#8b1a1a;font-size:7px;padding:1px 0;">${String(i).padStart(2,'0')}</th>`;
-  html += '<th style="background:#1a3a8b;font-size:8px;">蓝</th>';
+  html += '<th>期号</th><th>日期</th>';
+  for(let i=1;i<=33;i++) html += `<th style="background:#8b1a1a;">${String(i).padStart(2,'0')}</th>`;
+  html += '<th style="background:#1a3a8b;">蓝</th>';
   html += '</tr></thead><tbody>';
 
-  records.forEach((r,ri)=>{
+  records.forEach(r=>{
     html += '<tr>';
-    html += `<td style="font-size:8px;color:#555;padding:1px;">${r.qihao.slice(-3)}</td>`;
-    html += `<td style="font-size:7px;color:#888;padding:1px;">${r.date.slice(5)}</td>`;
+    html += `<td>${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:11px;color:#888;">${r.date.slice(5)}</td>`;
     for(let i=1;i<=33;i++){
       if(r.red.includes(i)){
-        html += `<td style="padding:1px 0;"><span style="display:inline-block;width:13px;height:13px;line-height:13px;border-radius:50%;background:#c81e1e;color:#fff;font-size:7px;font-weight:700;">${String(i).padStart(2,'0')}</span></td>`;
+        html += `<td><span class="trendDot" style="background:#c81e1e;">${String(i).padStart(2,'0')}</span></td>`;
       } else {
-        html += `<td style="padding:1px 0;font-size:8px;color:#ccc;">·</td>`;
+        html += `<td><span class="trendDot miss">·</span></td>`;
       }
     }
-    html += `<td style="padding:1px 0;"><span style="display:inline-block;width:15px;height:15px;line-height:15px;border-radius:50%;background:#1560c8;color:#fff;font-size:8px;font-weight:700;">${String(r.blue).padStart(2,'0')}</span></td>`;
+    html += `<td><span class="ballDot blue">${String(r.blue).padStart(2,'0')}</span></td>`;
     html += '</tr>';
   });
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
 
   // 红球频率
-  html += '<div class="sectionTitle" style="margin-top:16px">红球出现频率</div>';
+  html += '<div class="sectionTitle" style="margin-top:18px">红球出现频率</div>';
   const redCnt={};
   records.forEach(r=>r.red.forEach(i=>{ redCnt[i]=(redCnt[i]||0)+1; }));
-  html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px;">';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">';
   for(let i=1;i<=33;i++){
     const cnt=redCnt[i]||0;
     const op=0.2+cnt/records.length*0.8;
-    html += `<div style="text-align:center;width:calc(${100/11}% - 4px)">
-      <div style="background:rgba(200,30,30,${op});border-radius:50%;width:22px;height:22px;line-height:22px;margin:0 auto;font-size:9px;color:#fff;font-weight:700">${i}</div>
-      <div style="font-size:8px;color:#888;">${cnt}</div>
+    html += `<div style="text-align:center;width:44px">
+      <div style="background:rgba(200,30,30,${op});border-radius:50%;width:32px;height:32px;line-height:32px;margin:0 auto;font-size:13px;color:#fff;font-weight:700">${i}</div>
+      <div style="font-size:11px;color:#888;margin-top:2px;">${cnt}次</div>
     </div>`;
   }
   html += '</div>';
@@ -1862,46 +1866,50 @@ function renderSSQTrend(records){
 ════════════════════════════ */
 function renderKL8Trend(records){
   const n = records.length;
-  // 总列数：期号+日期+80 = 82列，格子很小但能显示完
   let html = `<div class="sectionTitle">快乐8 走势图（近${n}期）</div>`;
-  html += '<table class="trendTable" style="width:100%;table-layout:fixed;">';
+  html += rotateHintHTML();
+  html += '<div class="trendScrollBox"><table class="trendTable">';
   html += '<thead><tr>';
-  html += '<th style="width:4%">期</th>';
-  html += '<th style="width:5%">日期</th>';
-  for(let i=1;i<=80;i++) html += `<th style="background:#7a1233;font-size:6px;padding:1px 0;">${i}</th>`;
+  html += '<th>期号</th><th>日期</th>';
+  for(let i=1;i<=80;i++) html += `<th style="background:#7a1233;">${i}</th>`;
   html += '</tr></thead><tbody>';
 
-  records.forEach((r,ri)=>{
+  records.forEach(r=>{
     html += '<tr>';
-    html += `<td style="font-size:7px;color:#555;padding:1px;">${r.qihao.slice(-3)}</td>`;
-    html += `<td style="font-size:6px;color:#888;padding:1px;">${r.date.slice(5)}</td>`;
+    html += `<td>${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:11px;color:#888;">${r.date.slice(5)}</td>`;
     for(let i=1;i<=80;i++){
       if(r.numbers.includes(i)){
-        html += `<td style="background:#7a1233;color:#f1d688;font-size:6px;font-weight:700;padding:1px 0;">${i}</td>`;
+        html += `<td style="background:#7a1233;color:#f1d688;font-weight:700;">${i}</td>`;
       } else {
-        html += `<td style="font-size:6px;color:#ddd;padding:1px 0;">·</td>`;
+        html += `<td style="color:#ccc;">·</td>`;
       }
     }
     html += '</tr>';
   });
-  html += '</tbody></table>';
+  html += '</tbody></table></div>';
 
   // 热号冷号
-  html += '<div class="sectionTitle" style="margin-top:16px">热号/冷号统计</div>';
+  html += '<div class="sectionTitle" style="margin-top:18px">热号/冷号统计</div>';
   const cnt={};
   records.forEach(r=>r.numbers.forEach(i=>{ cnt[i]=(cnt[i]||0)+1; }));
   const sorted=Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">';
   html += statCard('🔥 热号TOP10', sorted.slice(0,10).map(([k,v])=>`${k}号: ${v}次`), '#c81e1e');
   html += statCard('❄️ 冷号TOP10', sorted.slice(-10).reverse().map(([k,v])=>`${k}号: ${v}次`), '#1560c8');
   html += '</div>';
   return html;
 }
 
+// 横屏建议提示条（竖屏时显示）
+function rotateHintHTML(){
+  return `<div class="rotateHint"><span class="icon">📱</span><span>数据列较多，<b>建议将手机横过来</b>查看会更清晰完整；也可以直接左右滑动表格查看。期号和日期两列会一直固定在左侧。</span></div>`;
+}
+
 function statCard(title, lines, color='#2b2520'){
-  return `<div style="background:#faf9f6;border:1px solid #e3e0d8;border-radius:8px;padding:8px;">
-    <div style="font-size:11px;font-weight:700;color:${color};margin-bottom:5px;">${title}</div>
-    ${lines.map(l=>`<div style="font-size:10px;color:#555;line-height:1.7">${l}</div>`).join('')}
+  return `<div style="background:#faf9f6;border:1px solid #e3e0d8;border-radius:8px;padding:10px;">
+    <div style="font-size:13px;font-weight:700;color:${color};margin-bottom:6px;">${title}</div>
+    ${lines.map(l=>`<div style="font-size:12px;color:#555;line-height:1.8">${l}</div>`).join('')}
   </div>`;
 }
 
