@@ -1899,83 +1899,292 @@ async function downloadTrend(){
   const wrap = document.getElementById('trendWrap');
   if(!wrap.innerHTML) return;
   const btn = document.getElementById('downloadTrendBtn');
-  btn.textContent = '正在生成完整图片，请稍候…';
+  btn.textContent = '正在生成图片…';
   btn.disabled = true;
-
   try{
-    const trendHTML = wrap.innerHTML;
-
-    // 提取CSS
-    let cssText = '';
-    for(const sheet of document.styleSheets){
-      try{ for(const rule of sheet.cssRules) cssText += rule.cssText + '\n'; }
-      catch(e){}
-    }
-
-    // 构建完整HTML，覆盖所有overflow限制
-    const fullHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:#f2efe8;padding:20px;width:max-content;min-width:100%;}
-${cssText}
-body,.trendScrollBox,#trendWrap,.app,.previewWrap{
-  overflow:visible!important;overflow-x:visible!important;
-  overflow-y:visible!important;width:auto!important;max-width:none!important;
-}
-.trendTable{min-width:0!important;}
-</style></head><body>${trendHTML}</body></html>`;
-
-    // 创建 iframe
-    const iframe = document.createElement('iframe');
-    iframe.style.cssText = 'position:fixed;left:-99999px;top:0;border:none;visibility:hidden;width:99999px;height:99999px;';
-    document.body.appendChild(iframe);
-
-    // 写入内容——用 srcdoc 或直接写，然后用 setTimeout 等布局完成
-    // 不依赖 onload（时序不可靠），改为直接写+固定等待
-    iframe.contentDocument.open();
-    iframe.contentDocument.write(fullHTML);
-    iframe.contentDocument.close();
-
-    // 等待渲染和布局稳定（字体加载+layout）
-    await new Promise(r => setTimeout(r, 800));
-
-    const iBody = iframe.contentDocument.body;
-    const fullW = Math.max(iBody.scrollWidth, iBody.offsetWidth, 1200);
-    const fullH = Math.max(iBody.scrollHeight, iBody.offsetHeight, 600);
-
-    iframe.style.width  = fullW + 'px';
-    iframe.style.height = fullH + 'px';
-
-    await new Promise(r => setTimeout(r, 300));
-
-    const canvas = await html2canvas(iframe.contentDocument.body, {
-      backgroundColor: '#f2efe8',
-      scale: 1.5,
-      width:  fullW,
-      height: fullH,
-      scrollX: 0,
-      scrollY: 0,
-      useCORS: true,
-      allowTaint: true,
-      logging: false,
-      windowWidth:  fullW,
-      windowHeight: fullH,
-    });
-
-    document.body.removeChild(iframe);
-
+    const repo = (localStorage.getItem('fucaiGithubRepo')||'').trim();
+    const url = `https://raw.githubusercontent.com/${repo}/main/history.json?t=${Date.now()}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const records = data[trendType].slice(-50);
+    const canvas = trendType==='3d'  ? draw3DCanvas(records)
+                 : trendType==='ssq' ? drawSSQCanvas(records)
+                 :                     drawKL8Canvas(records);
     const link = document.createElement('a');
     const labelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
-    link.download = `福彩走势图_${labelMap[trendType]||trendType}_${new Date().toISOString().slice(0,10)}.png`;
+    link.download = `福彩走势图_${labelMap[trendType]}_${new Date().toISOString().slice(0,10)}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
-
   } catch(e){
-    document.querySelectorAll('iframe[style*="-99999px"]').forEach(el=>el.remove());
-    alert('下载失败：' + e.message);
+    alert('下载失败：'+e.message);
   } finally{
     btn.textContent = '下载走势图（PNG）';
     btn.disabled = false;
   }
+}
+
+/* ── Canvas绘图工具函数 ── */
+function makeCanvas(w, h){
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#f2efe8';
+  ctx.fillRect(0,0,w,h);
+  return {c, ctx};
+}
+function ctxText(ctx, text, x, y, opts={}){
+  const {size=12, color='#333', bold=false, align='center', font='Noto Sans SC,Arial,sans-serif'} = opts;
+  ctx.fillStyle = color;
+  ctx.font = `${bold?'bold ':''} ${size}px ${font}`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+}
+function ctxCircle(ctx, x, y, r, fill, text, textColor='#fff', fontSize=11){
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctxText(ctx, String(text), x, y, {size:fontSize, color:textColor, bold:true});
+}
+function ctxRect(ctx, x, y, w, h, fill){
+  ctx.fillStyle = fill;
+  ctx.fillRect(x, y, w, h);
+}
+async function drawQR(ctx, canvasW, canvasH){
+  if(!state.qr.show || !state.qr.image) return;
+  return new Promise(resolve=>{
+    const img = new Image();
+    img.onload = ()=>{
+      const qrSize = 100, pad = 14;
+      const qx = canvasW - qrSize - pad, qy = canvasH - qrSize - pad - (state.qr.caption?20:0);
+      // 白底圆角框
+      ctx.fillStyle='#fff';
+      ctx.beginPath();
+      ctx.roundRect(qx-8, qy-8, qrSize+16, qrSize+16+(state.qr.caption?24:0), 10);
+      ctx.fill();
+      ctx.strokeStyle='#d4a017'; ctx.lineWidth=2;
+      ctx.stroke();
+      ctx.drawImage(img, qx, qy, qrSize, qrSize);
+      if(state.qr.caption){
+        ctxText(ctx, state.qr.caption, qx+qrSize/2, qy+qrSize+14,
+          {size:10, color:'#666', align:'center'});
+      }
+      resolve();
+    };
+    img.onerror = resolve;
+    img.src = state.qr.image;
+  });
+}
+
+/* ════════════════════════════
+   Canvas版：福彩3D走势图
+════════════════════════════ */
+function draw3DCanvas(records){
+  const rows = records.map(r=>({...r, ...calc3D(r.digits)}));
+  const n = rows.length;
+  // 列定义
+  const COL_QIHAO=60, COL_DATE=52, COL_NUM=22, COL_STAT=38;
+  const COLS_PER_POS = 10;
+  const totalCols = 2 + COLS_PER_POS*3 + 5;
+  const colWidths = [COL_QIHAO, COL_DATE,
+    ...Array(30).fill(COL_NUM),
+    COL_STAT,COL_STAT,COL_STAT,COL_STAT,COL_STAT];
+  const W = colWidths.reduce((a,b)=>a+b,0) + 40;
+  const ROW_H = 26, HEAD_H = 56, TITLE_H = 40, FOOT_H = 40;
+  const H = TITLE_H + HEAD_H + ROW_H*n + FOOT_H + 20;
+  const {c, ctx} = makeCanvas(W, H);
+  let cx = 20, cy = 0;
+
+  // 标题
+  cy += TITLE_H/2+4;
+  ctxText(ctx,'福彩3D走势图（近'+n+'期）',W/2,cy,{size:18,bold:true,color:'#1a1a2e'});
+  cy += TITLE_H/2+4;
+
+  // 表头背景
+  const headColors=['#8b1a1a','#1a3a8b','#1a6b1a'];
+  const posLabels=['百位走势','十位走势','个位走势'];
+  const statLabels=['和值','跨度','奇偶','大小','012路'];
+
+  // 第一行表头
+  let hx = cx;
+  [[COL_QIHAO,'期号','#1a1a2e'],[COL_DATE,'日期','#1a1a2e'],
+   ...posLabels.map((l,i)=>[COL_NUM*10,l,headColors[i]]),
+   ...statLabels.map(l=>[COL_STAT,l,'#4a3a1a'])
+  ].forEach(([w,label,bg])=>{
+    ctxRect(ctx,hx,cy,w,HEAD_H/2,bg);
+    ctx.strokeStyle='#fff'; ctx.lineWidth=0.5;
+    ctx.strokeRect(hx,cy,w,HEAD_H/2);
+    ctxText(ctx,label,hx+w/2,cy+HEAD_H/4,{size:11,color:'#f1d688',bold:true});
+    hx+=w;
+  });
+  cy += HEAD_H/2;
+
+  // 第二行：数字0-9
+  hx = cx;
+  ctxRect(ctx,hx,cy,COL_QIHAO,HEAD_H/2,'#1a1a2e'); hx+=COL_QIHAO;
+  ctxRect(ctx,hx,cy,COL_DATE, HEAD_H/2,'#1a1a2e'); hx+=COL_DATE;
+  for(let pos=0;pos<3;pos++){
+    for(let d=0;d<10;d++){
+      ctxRect(ctx,hx,cy,COL_NUM,HEAD_H/2,headColors[pos]);
+      ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=0.5;
+      ctx.strokeRect(hx,cy,COL_NUM,HEAD_H/2);
+      ctxText(ctx,String(d),hx+COL_NUM/2,cy+HEAD_H/4,{size:10,color:'#f1d688'});
+      hx+=COL_NUM;
+    }
+  }
+  statLabels.forEach(()=>{ ctxRect(ctx,hx,cy,COL_STAT,HEAD_H/2,'#4a3a1a'); hx+=COL_STAT; });
+  cy += HEAD_H/2;
+
+  // 数据行
+  const posColors=['#c81e1e','#1560c8','#1a7a4c'];
+  rows.forEach((r,ri)=>{
+    const bg = ri%2===0?'#ffffff':'#f5f0e8';
+    ctxRect(ctx,cx,cy,W-40,ROW_H,bg);
+    hx=cx;
+    // 期号
+    ctxText(ctx,r.qihao.slice(-3),hx+COL_QIHAO/2,cy+ROW_H/2,{size:10,color:'#666',align:'center'}); hx+=COL_QIHAO;
+    // 日期
+    ctxText(ctx,r.date.slice(5),hx+COL_DATE/2,cy+ROW_H/2,{size:9,color:'#888',align:'center'}); hx+=COL_DATE;
+    // 百十个位走势
+    r.digits.forEach((digit,pos)=>{
+      for(let d=0;d<10;d++){
+        if(digit===d){
+          ctxCircle(ctx,hx+COL_NUM/2,cy+ROW_H/2,9,posColors[pos],d,'#fff',10);
+        } else {
+          ctxText(ctx,'·',hx+COL_NUM/2,cy+ROW_H/2,{size:10,color:'#ccc',align:'center'});
+        }
+        ctx.strokeStyle='#eee'; ctx.lineWidth=0.3;
+        ctx.strokeRect(hx,cy,COL_NUM,ROW_H);
+        hx+=COL_NUM;
+      }
+    });
+    // 和值
+    ctxText(ctx,String(r.sum),hx+COL_STAT/2,cy+ROW_H/2,{size:11,bold:true,color:r.sum>=14?'#e87d00':'#1a7a4c',align:'center'}); hx+=COL_STAT;
+    // 跨度
+    ctxText(ctx,String(r.span),hx+COL_STAT/2,cy+ROW_H/2,{size:11,bold:true,color:'#6b3a9b',align:'center'}); hx+=COL_STAT;
+    // 奇偶
+    ctxText(ctx,r.oddEven,hx+COL_STAT/2,cy+ROW_H/2,{size:10,color:'#c81e1e',align:'center'}); hx+=COL_STAT;
+    // 大小
+    ctxText(ctx,r.bigSmall,hx+COL_STAT/2,cy+ROW_H/2,{size:10,color:'#1560c8',align:'center'}); hx+=COL_STAT;
+    // 012路
+    ctxText(ctx,r.road.join(''),hx+COL_STAT/2,cy+ROW_H/2,{size:10,color:'#9b59b6',align:'center'}); hx+=COL_STAT;
+    cy+=ROW_H;
+  });
+
+  // 底部说明
+  cy+=10;
+  ctxText(ctx,'数据来源: data.17500.cn  |  仅供参考，祝您好运！',W/2,cy+12,{size:11,color:'#999',align:'center'});
+
+  // 二维码（同步画，返回Promise）
+  return drawQR(ctx,W,H).then(()=>c);
+}
+
+/* ════════════════════════════
+   Canvas版：双色球走势图
+════════════════════════════ */
+function drawSSQCanvas(records){
+  const n = records.length;
+  const COL_QIHAO=60, COL_DATE=52, COL_NUM=22, COL_BLUE=28;
+  const W = COL_QIHAO + COL_DATE + COL_NUM*33 + COL_BLUE + 40;
+  const ROW_H=26, HEAD_H=32, TITLE_H=40, FOOT_H=40;
+  const H = TITLE_H + HEAD_H + ROW_H*n + FOOT_H + 20;
+  const {c,ctx} = makeCanvas(W,H);
+  let cx=20, cy=0;
+
+  cy+=TITLE_H/2+4;
+  ctxText(ctx,'双色球走势图（近'+n+'期）',W/2,cy,{size:18,bold:true,color:'#1a1a2e'});
+  cy+=TITLE_H/2+4;
+
+  // 表头
+  let hx=cx;
+  ctxRect(ctx,hx,cy,COL_QIHAO,HEAD_H,'#1a1a2e');
+  ctxText(ctx,'期号',hx+COL_QIHAO/2,cy+HEAD_H/2,{size:11,color:'#f1d688',bold:true}); hx+=COL_QIHAO;
+  ctxRect(ctx,hx,cy,COL_DATE,HEAD_H,'#1a1a2e');
+  ctxText(ctx,'日期',hx+COL_DATE/2,cy+HEAD_H/2,{size:11,color:'#f1d688',bold:true}); hx+=COL_DATE;
+  for(let n=1;n<=33;n++){
+    ctxRect(ctx,hx,cy,COL_NUM,HEAD_H,'#8b1a1a');
+    ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=0.3; ctx.strokeRect(hx,cy,COL_NUM,HEAD_H);
+    ctxText(ctx,String(n).padStart(2,'0'),hx+COL_NUM/2,cy+HEAD_H/2,{size:9,color:'#f1d688'}); hx+=COL_NUM;
+  }
+  ctxRect(ctx,hx,cy,COL_BLUE,HEAD_H,'#1a3a8b');
+  ctxText(ctx,'蓝',hx+COL_BLUE/2,cy+HEAD_H/2,{size:11,color:'#f1d688',bold:true});
+  cy+=HEAD_H;
+
+  records.forEach((r,ri)=>{
+    const bg=ri%2===0?'#fff':'#f5f0e8';
+    ctxRect(ctx,cx,cy,W-40,ROW_H,bg);
+    hx=cx;
+    ctxText(ctx,r.qihao.slice(-3),hx+COL_QIHAO/2,cy+ROW_H/2,{size:10,color:'#666'}); hx+=COL_QIHAO;
+    ctxText(ctx,r.date.slice(5),hx+COL_DATE/2,cy+ROW_H/2,{size:9,color:'#888'}); hx+=COL_DATE;
+    for(let n=1;n<=33;n++){
+      if(r.red.includes(n)){
+        ctxCircle(ctx,hx+COL_NUM/2,cy+ROW_H/2,9,'#c81e1e',String(n).padStart(2,'0'),'#fff',8);
+      } else {
+        ctxText(ctx,'·',hx+COL_NUM/2,cy+ROW_H/2,{size:10,color:'#ddd'});
+      }
+      ctx.strokeStyle='#eee'; ctx.lineWidth=0.3; ctx.strokeRect(hx,cy,COL_NUM,ROW_H);
+      hx+=COL_NUM;
+    }
+    ctxCircle(ctx,hx+COL_BLUE/2,cy+ROW_H/2,11,'#1560c8',String(r.blue).padStart(2,'0'),'#fff',9);
+    cy+=ROW_H;
+  });
+
+  cy+=10;
+  ctxText(ctx,'数据来源: data.17500.cn  |  仅供参考，祝您好运！',W/2,cy+12,{size:11,color:'#999'});
+  return drawQR(ctx,W,H).then(()=>c);
+}
+
+/* ════════════════════════════
+   Canvas版：快乐8走势图
+════════════════════════════ */
+function drawKL8Canvas(records){
+  const n=records.length;
+  const COL_QIHAO=60, COL_DATE=52, COL_NUM=20;
+  const W=COL_QIHAO+COL_DATE+COL_NUM*80+40;
+  const ROW_H=22, HEAD_H=28, TITLE_H=40, FOOT_H=40;
+  const H=TITLE_H+HEAD_H+ROW_H*n+FOOT_H+20;
+  const {c,ctx}=makeCanvas(W,H);
+  let cx=20, cy=0;
+
+  cy+=TITLE_H/2+4;
+  ctxText(ctx,'快乐8走势图（近'+n+'期）',W/2,cy,{size:18,bold:true,color:'#1a1a2e'});
+  cy+=TITLE_H/2+4;
+
+  let hx=cx;
+  ctxRect(ctx,hx,cy,COL_QIHAO,HEAD_H,'#1a1a2e');
+  ctxText(ctx,'期号',hx+COL_QIHAO/2,cy+HEAD_H/2,{size:11,color:'#f1d688',bold:true}); hx+=COL_QIHAO;
+  ctxRect(ctx,hx,cy,COL_DATE,HEAD_H,'#1a1a2e');
+  ctxText(ctx,'日期',hx+COL_DATE/2,cy+HEAD_H/2,{size:11,color:'#f1d688',bold:true}); hx+=COL_DATE;
+  for(let n=1;n<=80;n++){
+    ctxRect(ctx,hx,cy,COL_NUM,HEAD_H,'#7a1233');
+    ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.lineWidth=0.3; ctx.strokeRect(hx,cy,COL_NUM,HEAD_H);
+    ctxText(ctx,String(n),hx+COL_NUM/2,cy+HEAD_H/2,{size:8,color:'#f1d688'}); hx+=COL_NUM;
+  }
+  cy+=HEAD_H;
+
+  records.forEach((r,ri)=>{
+    const bg=ri%2===0?'#fff':'#f5f0e8';
+    ctxRect(ctx,cx,cy,W-40,ROW_H,bg);
+    hx=cx;
+    ctxText(ctx,r.qihao.slice(-3),hx+COL_QIHAO/2,cy+ROW_H/2,{size:10,color:'#666'}); hx+=COL_QIHAO;
+    ctxText(ctx,r.date.slice(5),hx+COL_DATE/2,cy+ROW_H/2,{size:9,color:'#888'}); hx+=COL_DATE;
+    for(let n=1;n<=80;n++){
+      if(r.numbers.includes(n)){
+        ctxRect(ctx,hx+1,cy+2,COL_NUM-2,ROW_H-4,'#7a1233');
+        ctxText(ctx,String(n),hx+COL_NUM/2,cy+ROW_H/2,{size:9,color:'#f1d688',bold:true});
+      } else {
+        ctxText(ctx,'·',hx+COL_NUM/2,cy+ROW_H/2,{size:9,color:'#ddd'});
+      }
+      ctx.strokeStyle='#eee'; ctx.lineWidth=0.3; ctx.strokeRect(hx,cy,COL_NUM,ROW_H);
+      hx+=COL_NUM;
+    }
+    cy+=ROW_H;
+  });
+
+  cy+=10;
+  ctxText(ctx,'数据来源: data.17500.cn  |  仅供参考，祝您好运！',W/2,cy+12,{size:11,color:'#999'});
+  return drawQR(ctx,W,H).then(()=>c);
 }
 </script>
 </body>
