@@ -1907,9 +1907,9 @@ async function downloadTrend(){
     const resp = await fetch(url);
     const data = await resp.json();
     const records = data[trendType].slice(-50);
-    const canvas = trendType==='3d'  ? draw3DCanvas(records)
-                 : trendType==='ssq' ? drawSSQCanvas(records)
-                 :                     drawKL8Canvas(records);
+    const canvas = await (trendType==='3d'  ? draw3DCanvas(records)
+                        : trendType==='ssq' ? drawSSQCanvas(records)
+                        :                    drawKL8Canvas(records));
     const link = document.createElement('a');
     const labelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
     link.download = `福彩走势图_${labelMap[trendType]}_${new Date().toISOString().slice(0,10)}.png`;
