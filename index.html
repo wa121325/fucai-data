@@ -1652,10 +1652,21 @@ function calc3D(digits){
 
 /* ── 渲染总入口 ── */
 function renderTrendHTML(type, records){
-  if(type === '3d')  return render3DTrend(records);
-  if(type === 'ssq') return renderSSQTrend(records);
-  if(type === 'kl8') return renderKL8Trend(records);
-  return '';
+  let html = '';
+  if(type === '3d')  html = render3DTrend(records);
+  else if(type === 'ssq') html = renderSSQTrend(records);
+  else if(type === 'kl8') html = renderKL8Trend(records);
+
+  // 走势图底部加二维码（如果已上传）
+  if(state.qr.show && state.qr.image){
+    const cap = state.qr.caption ? `<div style="margin-top:8px;font-size:13px;color:#666;text-align:center;">${escapeHtml(state.qr.caption)}</div>` : '';
+    html += `<div style="display:flex;flex-direction:column;align-items:center;margin-top:28px;padding-top:20px;border-top:1px dashed #ccc;">
+      <img src="${state.qr.image}" style="width:130px;height:130px;object-fit:contain;background:#fff;padding:8px;border-radius:10px;border:2px solid #d4a017;">
+      ${cap}
+    </div>`;
+  }
+
+  return html;
 }
 
 /* ════════════════════════════
