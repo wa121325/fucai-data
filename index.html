@@ -1727,116 +1727,85 @@ function renderTrendHTML(type, records){
    福彩 3D 走势图
 ════════════════════════════ */
 function render3DTrend(records){
-  const digits_range = [0,1,2,3,4,5,6,7,8,9];
-  // 计算每期指标
-  const rows = records.map(r=>{
-    const m = calc3D(r.digits);
-    return {...r, ...m};
-  });
+  const rows = records.map(r=>({...r, ...calc3D(r.digits)}));
+  const n = rows.length;
 
-  let html = `<div class="sectionTitle">福彩3D 走势图（近${records.length}期）</div>`;
-  html += '<div class="trendScrollBox"><table class="trendTable">';
+  // 用 table-layout:fixed + width:100% 让表格撑满容器，不滚动
+  // 列数：期号+日期+30数字格+5指标 = 37列
+  // 期号日期占固定比例，其余均分
+  let html = `<div class="sectionTitle">福彩3D 走势图（近${n}期）</div>`;
+  html += '<table class="trendTable" style="width:100%;table-layout:fixed;">';
 
-  // ── 表头 ──
+  // 表头第1行
   html += '<thead><tr>';
-  html += '<th style="width:42px">期号</th>';
-  html += '<th style="width:38px">日期</th>';
-  html += '<th colspan="10" style="background:#8b1a1a">百位走势</th>';
-  html += '<th colspan="10" style="background:#1a3a8b">十位走势</th>';
-  html += '<th colspan="10" style="background:#1a6b1a">个位走势</th>';
-  html += '<th style="width:32px">和值</th>';
-  html += '<th style="width:32px">跨度</th>';
-  html += '<th style="width:46px">奇偶</th>';
-  html += '<th style="width:46px">大小</th>';
-  html += '<th style="width:46px">012路</th>';
+  html += '<th style="width:5%">期号</th>';
+  html += '<th style="width:5%">日期</th>';
+  html += '<th colspan="10" style="background:#8b1a1a;width:27%">百位</th>';
+  html += '<th colspan="10" style="background:#1a3a8b;width:27%">十位</th>';
+  html += '<th colspan="10" style="background:#1a6b1a;width:27%">个位</th>';
+  html += '<th style="width:3%">和</th>';
+  html += '<th style="width:3%">跨</th>';
+  html += '<th style="width:4%">奇偶</th>';
+  html += '<th style="width:4%">大小</th>';
+  html += '<th style="width:4%">路</th>';
   html += '</tr>';
   // 数字列头
-  html += '<tr>';
-  html += '<th></th><th></th>';
-  for(let col=0; col<3; col++){
-    for(let n=0; n<=9; n++){
-      const bg = col===0?'#8b1a1a':col===1?'#1a3a8b':'#1a6b1a';
-      html += `<th style="background:${bg};font-size:10px;">${n}</th>`;
+  html += '<tr><th></th><th></th>';
+  for(let col=0;col<3;col++){
+    const bg=col===0?'#8b1a1a':col===1?'#1a3a8b':'#1a6b1a';
+    for(let d=0;d<=9;d++){
+      html += `<th style="background:${bg};font-size:8px;padding:1px 0;">${d}</th>`;
     }
   }
   html += '<th></th><th></th><th></th><th></th><th></th></tr></thead>';
 
-  // ── 数据行 ──
+  // 数据行
   html += '<tbody>';
-  rows.forEach((r, ri)=>{
+  rows.forEach((r,ri)=>{
     html += '<tr>';
-    // 期号（取后3位显示）
-    html += `<td style="font-size:11px;color:#666">${r.qihao.slice(-3)}</td>`;
-    html += `<td style="font-size:10px;color:#888">${r.date.slice(5)}</td>`;
-
-    // 百十个位各10列走势
-    r.digits.forEach((digit, col)=>{
-      for(let n=0; n<=9; n++){
-        if(digit === n){
-          const cls = col===0?'red':col===1?'blue':'';
-          html += `<td><span class="trendDot" style="${col===0?'background:#c81e1e':col===1?'background:#1560c8':'background:#1a7a4c'}">${n}</span></td>`;
+    html += `<td style="font-size:8px;color:#555;padding:1px;">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:7px;color:#888;padding:1px;">${r.date.slice(5)}</td>`;
+    r.digits.forEach((digit,col)=>{
+      const color=col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c';
+      for(let d=0;d<=9;d++){
+        if(digit===d){
+          html += `<td style="padding:1px 0;"><span style="display:inline-block;width:14px;height:14px;line-height:14px;border-radius:50%;background:${color};color:#fff;font-size:8px;font-weight:700;">${d}</span></td>`;
         } else {
-          html += `<td><span class="trendDot miss">·</span></td>`;
+          html += `<td style="padding:1px 0;font-size:8px;color:#ccc;">·</td>`;
         }
       }
     });
-
-    // 和值
-    const sumCls = r.sum>=14?'tag-big':'tag-small';
-    html += `<td class="${sumCls}">${r.sum}</td>`;
-    // 跨度
-    html += `<td style="font-weight:700;color:#6b3a9b">${r.span}</td>`;
-    // 奇偶
-    const oe = r.oddEven;
-    html += `<td>${oe.split('').map(c=>`<span class="${c==='奇'?'tag-odd':'tag-even'}">${c}</span>`).join('')}</td>`;
-    // 大小
-    const bs = r.bigSmall;
-    html += `<td>${bs.split('').map(c=>`<span class="${c==='大'?'tag-big':'tag-small'}">${c}</span>`).join('')}</td>`;
-    // 012路
-    html += `<td>${r.road.map(v=>`<span class="tag-${v}">${v}</span>`).join('')}</td>`;
+    html += `<td style="font-size:8px;font-weight:700;color:${r.sum>=14?'#e87d00':'#1a7a4c'};padding:1px;">${r.sum}</td>`;
+    html += `<td style="font-size:8px;font-weight:700;color:#6b3a9b;padding:1px;">${r.span}</td>`;
+    html += `<td style="font-size:7px;padding:1px;">${r.oddEven.split('').map(c=>`<span style="color:${c==='奇'?'#c81e1e':'#1560c8'};font-weight:700">${c}</span>`).join('')}</td>`;
+    html += `<td style="font-size:7px;padding:1px;">${r.bigSmall.split('').map(c=>`<span style="color:${c==='大'?'#e87d00':'#1a7a4c'};font-weight:700">${c}</span>`).join('')}</td>`;
+    html += `<td style="font-size:7px;padding:1px;">${r.road.map(v=>`<span style="color:${['#9b59b6','#e74c3c','#3498db'][v]};font-weight:700">${v}</span>`).join('')}</td>`;
     html += '</tr>';
   });
+  html += '</tbody></table>';
 
-  html += '</tbody></table></div>';
-
-  // ── 汇总统计 ──
-  html += '<div class="sectionTitle" style="margin-top:24px">近期指标统计</div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">';
-
-  // 和值分布
-  const sumGroups = {'0-9':0,'10-18':0,'19-27':0};
-  rows.forEach(r=>{
-    if(r.sum<=9) sumGroups['0-9']++;
-    else if(r.sum<=18) sumGroups['10-18']++;
-    else sumGroups['19-27']++;
-  });
+  // 汇总统计
+  html += '<div class="sectionTitle" style="margin-top:16px">近期指标统计</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px;">';
+  const sumGroups={'0-9':0,'10-18':0,'19-27':0};
+  rows.forEach(r=>{ if(r.sum<=9)sumGroups['0-9']++; else if(r.sum<=18)sumGroups['10-18']++; else sumGroups['19-27']++; });
   html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`));
-
-  // 跨度分布
-  const spanCount = {};
-  rows.forEach(r=>{ spanCount[r.span] = (spanCount[r.span]||0)+1; });
-  const spanTop = Object.entries(spanCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
-  html += statCard('跨度频率TOP5', spanTop.map(([k,v])=>`跨度${k}: ${v}期`));
-
-  // 奇偶分布
-  const oeCount = {};
+  const spanCount={};
+  rows.forEach(r=>{ spanCount[r.span]=(spanCount[r.span]||0)+1; });
+  html += statCard('跨度TOP5', Object.entries(spanCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`跨度${k}: ${v}期`));
+  const oeCount={};
   rows.forEach(r=>{ oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1; });
-  const oeTop = Object.entries(oeCount).sort((a,b)=>b[1]-a[1]).slice(0,5);
-  html += statCard('奇偶组合TOP5', oeTop.map(([k,v])=>`${k}: ${v}期`));
-
+  html += statCard('奇偶TOP5', Object.entries(oeCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`));
   html += '</div>';
 
-  // 各位号码出现频率
-  html += '<div class="sectionTitle">各位号码出现频率（近'+records.length+'期）</div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">';
-  ['百位','十位','个位'].forEach((label, col)=>{
-    const cnt = {};
+  html += '<div class="sectionTitle">各位号码频率</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px;">';
+  ['百位','十位','个位'].forEach((label,col)=>{
+    const cnt={};
     rows.forEach(r=>{ const d=r.digits[col]; cnt[d]=(cnt[d]||0)+1; });
-    const sorted = Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
-    html += statCard(label + '频率', sorted.map(([k,v])=>`号码${k}: ${v}次`), col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c');
+    html += statCard(label, Object.entries(cnt).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k}号: ${v}次`), col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c');
   });
   html += '</div>';
-
   return html;
 }
 
@@ -1844,50 +1813,47 @@ function render3DTrend(records){
    双色球 走势图
 ════════════════════════════ */
 function renderSSQTrend(records){
-  const reds = Array.from({length:33},(_,i)=>i+1);
-  let html = `<div class="sectionTitle">双色球 走势图（近${records.length}期）</div>`;
-  html += '<div class="trendScrollBox"><table class="trendTable">';
-
+  const n = records.length;
+  // 总列数：期号+日期+33红+蓝 = 36列
+  let html = `<div class="sectionTitle">双色球 走势图（近${n}期）</div>`;
+  html += '<table class="trendTable" style="width:100%;table-layout:fixed;">';
   html += '<thead><tr>';
-  html += '<th style="width:42px">期号</th>';
-  html += '<th style="width:38px">日期</th>';
-  for(let n=1; n<=33; n++) html += `<th style="background:#8b1a1a;font-size:10px;width:22px">${String(n).padStart(2,'0')}</th>`;
-  html += '<th style="background:#1a3a8b;width:26px">蓝</th>';
-  html += '</tr></thead>';
+  html += '<th style="width:5%">期号</th>';
+  html += '<th style="width:5%">日期</th>';
+  for(let i=1;i<=33;i++) html += `<th style="background:#8b1a1a;font-size:7px;padding:1px 0;">${String(i).padStart(2,'0')}</th>`;
+  html += '<th style="background:#1a3a8b;font-size:8px;">蓝</th>';
+  html += '</tr></thead><tbody>';
 
-  html += '<tbody>';
-  records.forEach(r=>{
+  records.forEach((r,ri)=>{
     html += '<tr>';
-    html += `<td style="font-size:11px;color:#666">${r.qihao.slice(-3)}</td>`;
-    html += `<td style="font-size:10px;color:#888">${r.date.slice(5)}</td>`;
-    for(let n=1; n<=33; n++){
-      if(r.red.includes(n)){
-        html += `<td><span class="trendDot" style="background:#c81e1e;font-size:10px;">${String(n).padStart(2,'0')}</span></td>`;
+    html += `<td style="font-size:8px;color:#555;padding:1px;">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:7px;color:#888;padding:1px;">${r.date.slice(5)}</td>`;
+    for(let i=1;i<=33;i++){
+      if(r.red.includes(i)){
+        html += `<td style="padding:1px 0;"><span style="display:inline-block;width:13px;height:13px;line-height:13px;border-radius:50%;background:#c81e1e;color:#fff;font-size:7px;font-weight:700;">${String(i).padStart(2,'0')}</span></td>`;
       } else {
-        html += `<td><span class="trendDot miss">·</span></td>`;
+        html += `<td style="padding:1px 0;font-size:8px;color:#ccc;">·</td>`;
       }
     }
-    html += `<td><span class="ballDot blue" style="width:22px;height:22px;line-height:22px;font-size:10px;">${String(r.blue).padStart(2,'0')}</span></td>`;
+    html += `<td style="padding:1px 0;"><span style="display:inline-block;width:15px;height:15px;line-height:15px;border-radius:50%;background:#1560c8;color:#fff;font-size:8px;font-weight:700;">${String(r.blue).padStart(2,'0')}</span></td>`;
     html += '</tr>';
   });
-  html += '</tbody></table></div>';
+  html += '</tbody></table>';
 
   // 红球频率
-  html += '<div class="sectionTitle" style="margin-top:20px">红球出现频率</div>';
-  const redCnt = {};
-  records.forEach(r=>r.red.forEach(n=>{ redCnt[n]=(redCnt[n]||0)+1; }));
-  html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;">';
-  for(let n=1; n<=33; n++){
-    const cnt = redCnt[n]||0;
-    const pct = Math.round(cnt/records.length*100);
-    const opacity = 0.3 + pct/100*0.7;
-    html += `<div style="text-align:center;width:40px">
-      <div style="background:rgba(200,30,30,${opacity});border-radius:50%;width:28px;height:28px;line-height:28px;margin:0 auto;font-size:11px;color:#fff;font-weight:700">${n}</div>
-      <div style="font-size:10px;color:#666;margin-top:2px">${cnt}次</div>
+  html += '<div class="sectionTitle" style="margin-top:16px">红球出现频率</div>';
+  const redCnt={};
+  records.forEach(r=>r.red.forEach(i=>{ redCnt[i]=(redCnt[i]||0)+1; }));
+  html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px;">';
+  for(let i=1;i<=33;i++){
+    const cnt=redCnt[i]||0;
+    const op=0.2+cnt/records.length*0.8;
+    html += `<div style="text-align:center;width:calc(${100/11}% - 4px)">
+      <div style="background:rgba(200,30,30,${op});border-radius:50%;width:22px;height:22px;line-height:22px;margin:0 auto;font-size:9px;color:#fff;font-weight:700">${i}</div>
+      <div style="font-size:8px;color:#888;">${cnt}</div>
     </div>`;
   }
   html += '</div>';
-
   return html;
 }
 
@@ -1895,50 +1861,47 @@ function renderSSQTrend(records){
    快乐8 走势图
 ════════════════════════════ */
 function renderKL8Trend(records){
-  let html = `<div class="sectionTitle">快乐8 走势图（近${records.length}期）</div>`;
-  html += '<div class="trendScrollBox"><table class="trendTable">';
-
+  const n = records.length;
+  // 总列数：期号+日期+80 = 82列，格子很小但能显示完
+  let html = `<div class="sectionTitle">快乐8 走势图（近${n}期）</div>`;
+  html += '<table class="trendTable" style="width:100%;table-layout:fixed;">';
   html += '<thead><tr>';
-  html += '<th style="width:42px">期号</th>';
-  html += '<th style="width:38px">日期</th>';
-  for(let n=1; n<=80; n++) html += `<th style="background:#7a1233;font-size:9px;width:18px">${n}</th>`;
-  html += '</tr></thead>';
+  html += '<th style="width:4%">期</th>';
+  html += '<th style="width:5%">日期</th>';
+  for(let i=1;i<=80;i++) html += `<th style="background:#7a1233;font-size:6px;padding:1px 0;">${i}</th>`;
+  html += '</tr></thead><tbody>';
 
-  html += '<tbody>';
-  records.forEach(r=>{
+  records.forEach((r,ri)=>{
     html += '<tr>';
-    html += `<td style="font-size:11px;color:#666">${r.qihao.slice(-3)}</td>`;
-    html += `<td style="font-size:10px;color:#888">${r.date.slice(5)}</td>`;
-    for(let n=1; n<=80; n++){
-      if(r.numbers.includes(n)){
-        html += `<td style="background:#7a1233;color:#f1d688;font-size:9px;font-weight:700">${n}</td>`;
+    html += `<td style="font-size:7px;color:#555;padding:1px;">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:6px;color:#888;padding:1px;">${r.date.slice(5)}</td>`;
+    for(let i=1;i<=80;i++){
+      if(r.numbers.includes(i)){
+        html += `<td style="background:#7a1233;color:#f1d688;font-size:6px;font-weight:700;padding:1px 0;">${i}</td>`;
       } else {
-        html += `<td><span style="color:#ccc;font-size:9px">·</span></td>`;
+        html += `<td style="font-size:6px;color:#ddd;padding:1px 0;">·</td>`;
       }
     }
     html += '</tr>';
   });
-  html += '</tbody></table></div>';
+  html += '</tbody></table>';
 
-  // 频率统计
-  html += '<div class="sectionTitle" style="margin-top:20px">号码出现频率（热号/冷号）</div>';
-  const cnt = {};
-  records.forEach(r=>r.numbers.forEach(n=>{ cnt[n]=(cnt[n]||0)+1; }));
-  const sorted = Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
-  const hot10 = sorted.slice(0,10);
-  const cold10 = sorted.slice(-10).reverse();
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">';
-  html += statCard('🔥 热号TOP10', hot10.map(([k,v])=>`号码${k}: ${v}次`), '#c81e1e');
-  html += statCard('❄️ 冷号TOP10', cold10.map(([k,v])=>`号码${k}: ${v}次`), '#1560c8');
+  // 热号冷号
+  html += '<div class="sectionTitle" style="margin-top:16px">热号/冷号统计</div>';
+  const cnt={};
+  records.forEach(r=>r.numbers.forEach(i=>{ cnt[i]=(cnt[i]||0)+1; }));
+  const sorted=Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">';
+  html += statCard('🔥 热号TOP10', sorted.slice(0,10).map(([k,v])=>`${k}号: ${v}次`), '#c81e1e');
+  html += statCard('❄️ 冷号TOP10', sorted.slice(-10).reverse().map(([k,v])=>`${k}号: ${v}次`), '#1560c8');
   html += '</div>';
-
   return html;
 }
 
 function statCard(title, lines, color='#2b2520'){
-  return `<div style="background:#faf9f6;border:1px solid #e3e0d8;border-radius:10px;padding:12px;">
-    <div style="font-size:12px;font-weight:700;color:${color};margin-bottom:8px;">${title}</div>
-    ${lines.map(l=>`<div style="font-size:12px;color:#555;line-height:1.8">${l}</div>`).join('')}
+  return `<div style="background:#faf9f6;border:1px solid #e3e0d8;border-radius:8px;padding:8px;">
+    <div style="font-size:11px;font-weight:700;color:${color};margin-bottom:5px;">${title}</div>
+    ${lines.map(l=>`<div style="font-size:10px;color:#555;line-height:1.7">${l}</div>`).join('')}
   </div>`;
 }
 
