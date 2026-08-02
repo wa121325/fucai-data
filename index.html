@@ -1881,58 +1881,116 @@ async function downloadTrend(){
   const wrap = document.getElementById('trendWrap');
   if(!wrap.innerHTML) return;
   const btn = document.getElementById('downloadTrendBtn');
-  btn.textContent = '生成中，请稍候…';
+  btn.textContent = '正在生成完整图片，请稍候…';
   btn.disabled = true;
 
-  // 克隆节点到屏幕外，去掉所有overflow/scroll限制，让html2canvas能截到完整内容
-  const clone = wrap.cloneNode(true);
-  clone.style.cssText = [
-    'position:fixed',
-    'top:0',
-    'left:-99999px',
-    'width:' + wrap.scrollWidth + 'px',   // 完整宽度（含横向滚动）
-    'height:auto',
-    'overflow:visible',
-    'background:#f2efe8',
-    'padding:16px',
-    'z-index:-1',
-  ].join(';');
-
-  // 同时把内部的滚动容器也展开
-  clone.querySelectorAll('.trendScrollBox').forEach(el=>{
-    el.style.overflow = 'visible';
-    el.style.width = 'auto';
-  });
-  clone.querySelectorAll('table').forEach(el=>{
-    el.style.minWidth = '0';
-  });
-
-  document.body.appendChild(clone);
-
-  // 等浏览器完成布局
-  await new Promise(r => setTimeout(r, 300));
-
   try{
-    const canvas = await html2canvas(clone, {
-      backgroundColor: '#f2efe8',
-      scale: 1.5,                        // 适当缩放，走势图很宽，2倍可能太大
-      width:  clone.scrollWidth,
-      height: clone.scrollHeight,
-      useCORS: true,
-      logging: false,
-      windowWidth:  clone.scrollWidth,
-      windowHeight: clone.scrollHeight,
+    // 1. 获取走势图的完整HTML内容
+    const trendHTML = wrap.innerHTML;
+
+    // 2. 获取当前页面所有CSS（包括走势图样式）
+    let cssText = '';
+    for(const sheet of document.styleSheets){
+      try{
+        for(const rule of sheet.cssRules){
+          cssText += rule.cssText + '\n';
+        }
+      } catch(e){}
+    }
+
+    // 3. 构建一个独立的HTML页面，不受任何overflow限制
+    const fullHTML = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #f2efe8;
+  padding: 20px;
+  /* 关键：body不设置任何overflow限制 */
+  width: max-content;
+  min-width: 100%;
+}
+${cssText}
+/* 覆盖掉所有overflow限制 */
+body, .trendScrollBox, #trendWrap, .app, .previewWrap {
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+  width: auto !important;
+  max-width: none !important;
+}
+.trendTable { min-width: 0 !important; }
+</style>
+</head>
+<body>
+${trendHTML}
+</body>
+</html>`;
+
+    // 4. 创建隐藏iframe，把完整HTML塞进去
+    const iframe = document.createElement('iframe');
+    iframe.style.cssText = 'position:fixed;left:-9999px;top:0;border:none;visibility:hidden;';
+    // 先给个大尺寸，后面根据内容实际大小调整
+    iframe.style.width  = '99999px';
+    iframe.style.height = '99999px';
+    document.body.appendChild(iframe);
+
+    // 5. 写入HTML并等待加载完成
+    await new Promise(resolve => {
+      iframe.onload = resolve;
+      iframe.contentDocument.open();
+      iframe.contentDocument.write(fullHTML);
+      iframe.contentDocument.close();
     });
 
+    // 6. 等待样式和布局稳定
+    await new Promise(r => setTimeout(r, 500));
+
+    // 7. 读取iframe内容的真实完整尺寸
+    const iDoc  = iframe.contentDocument;
+    const iBody = iDoc.body;
+    const fullW = Math.max(iBody.scrollWidth,  iBody.offsetWidth,  2000);
+    const fullH = Math.max(iBody.scrollHeight, iBody.offsetHeight, 1000);
+
+    // 8. 把iframe调整到精确尺寸，避免任何裁切
+    iframe.style.width  = fullW + 'px';
+    iframe.style.height = fullH + 'px';
+
+    // 再等一帧让布局重新计算
+    await new Promise(r => setTimeout(r, 200));
+
+    // 9. 用html2canvas截取iframe的document.body（完整内容）
+    const canvas = await html2canvas(iBody, {
+      backgroundColor: '#f2efe8',
+      scale: 1.5,
+      width:  fullW,
+      height: fullH,
+      scrollX: 0,
+      scrollY: 0,
+      useCORS: true,
+      logging: false,
+      windowWidth:  fullW,
+      windowHeight: fullH,
+    });
+
+    // 10. 下载
     const link = document.createElement('a');
     const gameLabelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
     link.download = `福彩走势图_${gameLabelMap[trendType]||trendType}_${new Date().toISOString().slice(0,10)}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
+
+    document.body.removeChild(iframe);
+
   } catch(e){
     alert('下载失败: ' + e.message);
+    // 清理可能残留的iframe
+    document.querySelectorAll('iframe').forEach(el => {
+      if(el.style.left === '-9999px') document.body.removeChild(el);
+    });
   } finally{
-    document.body.removeChild(clone);
     btn.textContent = '下载走势图（PNG）';
     btn.disabled = false;
   }
