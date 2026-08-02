@@ -504,53 +504,101 @@
   .tabContent.active{display:block;}
 
   /* ── 走势图表格 ── */
-  #trendWrap{font-size:12px;}
+  /* ── 走势图预览容器 ── */
+  #trendWrap{
+    font-size:11px;
+    width:100%;
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+  }
+  .trendScrollBox{
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+    border-radius:8px;
+    box-shadow:0 2px 10px rgba(0,0,0,.1);
+    /* 提示用户可横向滑动 */
+    position:relative;
+  }
+  /* 横向滑动提示条（仅手机可见） */
+  .trendScrollBox::after{
+    content:'← 左右滑动查看完整走势 →';
+    display:none;
+    text-align:center;
+    font-size:10px;
+    color:#999;
+    padding:4px;
+    background:#f5f0e8;
+  }
+  @media(max-width:600px){
+    .trendScrollBox::after{ display:block; }
+  }
   .trendTable{
     border-collapse:collapse;
     table-layout:fixed;
     background:#fff;
     font-family:"Noto Sans SC",sans-serif;
-    font-size:12px;
-    min-width:100%;
+    font-size:11px;
   }
   .trendTable th{
     background:#1a1a2e;color:#f1d688;
-    padding:5px 3px;text-align:center;
+    padding:4px 2px;text-align:center;
     border:1px solid #333;
     position:sticky;top:0;z-index:2;
-    font-weight:600;font-size:11px;
+    font-weight:600;font-size:10px;
     white-space:nowrap;
   }
+  /* 期号和日期列固定在左侧 */
+  .trendTable th:nth-child(1),
+  .trendTable td:nth-child(1){
+    position:sticky;left:0;z-index:3;
+    background:#2c2c4e;color:#f1d688;
+    min-width:42px;width:42px;
+    font-size:10px;
+  }
+  .trendTable th:nth-child(2),
+  .trendTable td:nth-child(2){
+    position:sticky;left:42px;z-index:3;
+    background:#2c2c4e;color:#f1d688;
+    min-width:38px;width:38px;
+    font-size:9px;
+    box-shadow:2px 0 4px rgba(0,0,0,.15);
+  }
+  /* 数据行固定列背景 */
+  .trendTable tr:nth-child(even) td:nth-child(1),
+  .trendTable tr:nth-child(even) td:nth-child(2){
+    background:#3a3a5e;
+  }
+  .trendTable tr:nth-child(odd) td:nth-child(1),
+  .trendTable tr:nth-child(odd) td:nth-child(2){
+    background:#2c2c4e;
+  }
   .trendTable td{
-    padding:4px 2px;text-align:center;
+    padding:3px 1px;text-align:center;
     border:1px solid #ddd;
-    min-width:28px;
+    min-width:22px;width:22px;
   }
   .trendTable tr:nth-child(even) td{background:#f8f6f2;}
   .trendTable tr:hover td{background:#fff3e0;}
-  /* 号码圆点 */
+  /* 走势圆点缩小适应手机 */
+  .trendDot{
+    display:inline-block;width:18px;height:18px;
+    line-height:18px;border-radius:50%;
+    font-size:10px;font-weight:700;
+    color:#fff;background:#c81e1e;
+  }
+  .trendDot.miss{
+    background:transparent;color:#bbb;
+    font-size:9px;font-weight:400;
+  }
   .ballDot{
     display:inline-block;
-    width:22px;height:22px;line-height:22px;
-    border-radius:50%;font-size:11px;font-weight:700;
+    width:20px;height:20px;line-height:20px;
+    border-radius:50%;font-size:10px;font-weight:700;
     color:#fff;text-align:center;
   }
   .ballDot.red{background:#c81e1e;}
   .ballDot.blue{background:#1560c8;}
   .ballDot.gold{background:#c8940f;}
-  /* 走势连线圆 */
-  .trendDot{
-    display:inline-block;width:20px;height:20px;
-    line-height:20px;border-radius:50%;
-    font-size:11px;font-weight:700;
-    color:#fff;background:#c81e1e;
-    position:relative;
-  }
-  .trendDot.miss{
-    background:transparent;color:#999;
-    font-size:11px;font-weight:400;
-  }
-  /* 指标色 */
   .tag-odd{color:#c81e1e;font-weight:700;}
   .tag-even{color:#1560c8;font-weight:700;}
   .tag-big{color:#e87d00;font-weight:700;}
@@ -559,12 +607,11 @@
   .tag-1{color:#e74c3c;font-weight:700;}
   .tag-2{color:#3498db;font-weight:700;}
   .sectionTitle{
-    font-size:14px;font-weight:700;
-    padding:10px 0 6px;color:var(--ink);
+    font-size:13px;font-weight:700;
+    padding:8px 0 5px;color:var(--ink);
     border-bottom:2px solid var(--ink);
-    margin:18px 0 8px;
+    margin:14px 0 6px;
   }
-  .trendScrollBox{overflow-x:auto;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1);}
 
   /* ── 海报日期行 ── */
   .posterDate{
@@ -1692,8 +1739,8 @@ function render3DTrend(records){
 
   // ── 表头 ──
   html += '<thead><tr>';
-  html += '<th style="width:70px">期号</th>';
-  html += '<th style="width:58px">日期</th>';
+  html += '<th style="width:42px">期号</th>';
+  html += '<th style="width:38px">日期</th>';
   html += '<th colspan="10" style="background:#8b1a1a">百位走势</th>';
   html += '<th colspan="10" style="background:#1a3a8b">十位走势</th>';
   html += '<th colspan="10" style="background:#1a6b1a">个位走势</th>';
@@ -1802,8 +1849,8 @@ function renderSSQTrend(records){
   html += '<div class="trendScrollBox"><table class="trendTable">';
 
   html += '<thead><tr>';
-  html += '<th style="width:70px">期号</th>';
-  html += '<th style="width:58px">日期</th>';
+  html += '<th style="width:42px">期号</th>';
+  html += '<th style="width:38px">日期</th>';
   for(let n=1; n<=33; n++) html += `<th style="background:#8b1a1a;font-size:10px;width:22px">${String(n).padStart(2,'0')}</th>`;
   html += '<th style="background:#1a3a8b;width:26px">蓝</th>';
   html += '</tr></thead>';
@@ -1852,8 +1899,8 @@ function renderKL8Trend(records){
   html += '<div class="trendScrollBox"><table class="trendTable">';
 
   html += '<thead><tr>';
-  html += '<th style="width:70px">期号</th>';
-  html += '<th style="width:58px">日期</th>';
+  html += '<th style="width:42px">期号</th>';
+  html += '<th style="width:38px">日期</th>';
   for(let n=1; n<=80; n++) html += `<th style="background:#7a1233;font-size:9px;width:18px">${n}</th>`;
   html += '</tr></thead>';
 
