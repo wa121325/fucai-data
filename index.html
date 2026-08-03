@@ -968,6 +968,59 @@
       <button class="btn secondary" id="loadTrendBtn">加载走势图</button>
       <div class="status" id="trendStatus" style="margin-top:8px;"></div>
       <button class="btn" id="downloadTrendBtn" style="margin-top:10px;display:none;">下载走势图（PNG）</button>
+
+      <!-- AI专家解读面板 -->
+      <div class="panel" id="aiPanel" style="margin-top:18px;display:none;">
+        <h2>🤖 AI 专家解读</h2>
+        <div class="field">
+          <label>选择 AI 服务商</label>
+          <div class="pillrow" id="aiProviderRow" style="flex-wrap:wrap;gap:6px;">
+            <div class="pill active" data-provider="claude">Claude（推荐）</div>
+            <div class="pill" data-provider="deepseek">DeepSeek（便宜）</div>
+            <div class="pill" data-provider="qwen">通义千问</div>
+            <div class="pill" data-provider="openai">OpenAI / 兼容</div>
+          </div>
+        </div>
+        <div class="field">
+          <label id="aiKeyLabel">API Key（Claude：console.anthropic.com 获取 · sk-ant-...）</label>
+          <input type="password" id="aiKeyInput" placeholder="粘贴你的 API Key">
+        </div>
+        <div class="field" id="customUrlField" style="display:none;">
+          <label>自定义接口地址（OpenAI兼容格式，留空使用官方地址）</label>
+          <input type="text" id="customUrlInput" placeholder="https://api.openai.com/v1/chat/completions">
+        </div>
+        <div class="status" style="margin-bottom:10px;">Key 只存在当前浏览器，不会上传到任何服务器。每次切换服务商会自动读取该服务商保存的 Key。</div>
+        <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
+        <div class="status" id="aiStatus" style="margin-top:8px;"></div>
+
+        <!-- 解读展示窗口 -->
+        <div id="aiResult" style="display:none;margin-top:14px;">
+          <div style="
+            background:linear-gradient(135deg,#1a1a2e 0%,#2c2c4e 100%);
+            border-radius:12px;
+            padding:18px 20px;
+            border:1px solid #f1d688;
+          ">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;border-bottom:1px solid rgba(241,214,136,.25);padding-bottom:12px;">
+              <span style="font-size:24px;">🎯</span>
+              <div>
+                <div style="font-size:14px;font-weight:700;color:#f1d688;" id="aiResultTitle">福彩专家今日解读</div>
+                <div style="font-size:11px;color:rgba(241,214,136,.6);" id="aiResultDate"></div>
+              </div>
+            </div>
+            <div id="aiResultContent" style="
+              font-size:14px;
+              color:#e8ecf4;
+              line-height:1.9;
+              white-space:pre-wrap;
+            "></div>
+            <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(241,214,136,.2);font-size:11px;color:rgba(241,214,136,.4);text-align:center;">
+              ⚠️ 以上内容由 AI 根据历史数据规律生成，仅供娱乐参考，不构成任何投注建议。彩票开奖结果完全随机，请理性购彩。
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div><!-- end tabTrend -->
 
   </div><!-- end left panel -->
@@ -1301,7 +1354,174 @@ function renderPoster(){
   stage.innerHTML = `<div class="scaleWrap" style="width:${800*scale}px;height:${posterH*scale}px;"><div id="posterEl" class="poster style-${state.style}" style="height:${posterH}px;transform:scale(${scale});">${inner}</div></div>`;
 }
 
-window.addEventListener('resize', ()=>{ renderPoster(); });
+/* ═══════════════════════════════════════════════════
+   AI 专家解读
+═══════════════════════════════════════════════════ */
+const AI_CONFIGS = {
+  openai: {
+    getUrl: ()=> (document.getElementById('customUrlInput').value.trim() || 'https://api.openai.com/v1/chat/completions'),
+    model: 'gpt-4o-mini',
+    buildBody: (model, messages)=>({ model, messages, max_tokens:1200, temperature:0.7 }),
+    buildHeaders: (key)=>({ 'Content-Type':'application/json', 'Authorization':'Bearer '+key }),
+    parseResp: (data)=> data.choices?.[0]?.message?.content || '',
+  },
+  deepseek: {
+    getUrl: ()=>'https://api.deepseek.com/v1/chat/completions',
+    model: 'deepseek-chat',
+    buildBody: (model, messages)=>({ model, messages, max_tokens:1200, temperature:0.7 }),
+    buildHeaders: (key)=>({ 'Content-Type':'application/json', 'Authorization':'Bearer '+key }),
+    parseResp: (data)=> data.choices?.[0]?.message?.content || '',
+  },
+  qwen: {
+    getUrl: ()=>'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen-plus',
+    buildBody: (model, messages)=>({ model, messages, max_tokens:1200, temperature:0.7 }),
+    buildHeaders: (key)=>({ 'Content-Type':'application/json', 'Authorization':'Bearer '+key }),
+    parseResp: (data)=> data.choices?.[0]?.message?.content || '',
+  },
+  claude: {
+    getUrl: ()=>'https://api.anthropic.com/v1/messages',
+    model: 'claude-sonnet-4-6',
+    buildBody: (model, messages)=>({
+      model, max_tokens:1200,
+      messages: messages.filter(m=>m.role!=='system'),
+      system: messages.find(m=>m.role==='system')?.content || '',
+    }),
+    buildHeaders: (key)=>({
+      'Content-Type':'application/json',
+      'x-api-key': key,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true',
+    }),
+    parseResp: (data)=> data.content?.[0]?.text || '',
+  },
+};
+
+function buildPrompt(type, records){
+  const latest = records[records.length-1];
+  const gameNames = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+  const name = gameNames[type];
+
+  let dataDesc = '';
+  if(type==='3d'){
+    const rows = records.slice(-10).map(r=>{
+      const m = calc3D(r.digits);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): ${r.digits.join('')} 和值${m.sum} 跨度${m.span} ${m.oddEven} ${m.bigSmall}`;
+    });
+    const allRows = records.map(r=>({...r,...calc3D(r.digits)}));
+    const sumAvg = (allRows.reduce((s,r)=>s+r.sum,0)/allRows.length).toFixed(1);
+    const spanCount={};
+    allRows.forEach(r=>{ spanCount[r.span]=(spanCount[r.span]||0)+1; });
+    const topSpan = Object.entries(spanCount).sort((a,b)=>b[1]-a[1])[0];
+    const oeCount={};
+    allRows.forEach(r=>{ oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1; });
+    const topOE = Object.entries(oeCount).sort((a,b)=>b[1]-a[1])[0];
+    dataDesc = `最近10期开奖：\n${rows.join('\n')}\n\n近${records.length}期统计：和值均值${sumAvg}，最频繁跨度${topSpan[0]}(${topSpan[1]}次)，最常见奇偶组合${topOE[0]}(${topOE[1]}次)`;
+  } else if(type==='ssq'){
+    const rows = records.slice(-8).map(r=>{
+      const m = calcSSQ(r.red,r.blue);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 红[${r.red.join(',')}] 蓝${r.blue} ${m.odd}奇${m.even}偶 AC值${m.ac} 连号${m.consec}`;
+    });
+    const redCnt={};
+    records.forEach(r=>r.red.forEach(n=>{ redCnt[n]=(redCnt[n]||0)+1; }));
+    const hot5 = Object.entries(redCnt).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    const cold5 = Object.entries(redCnt).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    dataDesc = `最近8期开奖：\n${rows.join('\n')}\n\n近${records.length}期红球热号：${hot5}\n冷号：${cold5}`;
+  } else if(type==='kl8'){
+    const rows = records.slice(-5).map(r=>{
+      const m = calcKL8(r.numbers);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 号码[${r.numbers.join(',')}] 区间[${m.zones.join('/')}] ${m.odd}奇${m.even}偶`;
+    });
+    const cnt={};
+    records.forEach(r=>r.numbers.forEach(n=>{ cnt[n]=(cnt[n]||0)+1; }));
+    const hot5 = Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    const cold5 = Object.entries(cnt).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    dataDesc = `最近5期开奖：\n${rows.join('\n')}\n\n近${records.length}期热号：${hot5}\n冷号：${cold5}`;
+  }
+
+  const system = `你是一位资深彩票数据分析专家，擅长从历史开奖数据中发现规律和趋势。
+请用专业、生动、有参考价值的语言进行分析，使用数据支撑观点，语气自信但客观。
+分析结构清晰，适当使用序号或分段，控制在500字以内。
+最后必须加一句提醒：彩票开奖结果完全随机，本分析仅供娱乐参考。`;
+
+  const user = `请根据以下${name}近期开奖数据，进行今日专家解读分析：
+
+${dataDesc}
+
+最新一期（${latest.date}）已开奖，请重点分析：
+1. 最近走势特征与规律
+2. 各项指标的异常或值得关注的变化
+3. 从历史数据角度看近期号码分布特点
+4. 今日简要总结
+
+请用中文回答，语言生动专业。`;
+
+  return { system, user };
+}
+
+async function generateAIReading(){
+  const btn = document.getElementById('aiReadBtn');
+  const statusEl = document.getElementById('aiStatus');
+  const key = document.getElementById('aiKeyInput').value.trim();
+  if(!key){
+    statusEl.className='status err';
+    statusEl.textContent='请先填入 API Key';
+    return;
+  }
+  if(!window._trendRecords || window._trendRecords.length===0){
+    statusEl.className='status err';
+    statusEl.textContent='请先点「加载走势图」获取数据';
+    return;
+  }
+
+  btn.disabled=true; btn.textContent='AI 分析中…';
+  statusEl.className='status'; statusEl.textContent='正在连接 AI 服务，请稍候…';
+  document.getElementById('aiResult').style.display='none';
+
+  try{
+    // 保存key
+    try{ localStorage.setItem('aiKey_'+aiProvider, key); } catch(e){}
+
+    const cfg = AI_CONFIGS[aiProvider];
+    const {system, user} = buildPrompt(window._trendType, window._trendRecords);
+    const messages = [
+      {role:'system', content:system},
+      {role:'user',   content:user},
+    ];
+
+    const resp = await fetch(cfg.getUrl(), {
+      method:'POST',
+      headers: cfg.buildHeaders(key),
+      body: JSON.stringify(cfg.buildBody(cfg.model, messages)),
+    });
+
+    if(!resp.ok){
+      const err = await resp.text().catch(()=>'');
+      throw new Error(`服务商返回 HTTP ${resp.status}：${err.slice(0,120)}`);
+    }
+    const data = await resp.json();
+    const content = cfg.parseResp(data);
+    if(!content) throw new Error('AI 返回内容为空，请检查 Key 是否正确');
+
+    // 显示结果
+    const gameNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+    const latest = window._trendRecords[window._trendRecords.length-1];
+    document.getElementById('aiResultTitle').textContent =
+      `${gameNames[window._trendType]} · AI专家今日解读`;
+    document.getElementById('aiResultDate').textContent =
+      `基于 ${latest.date} 最新开奖数据 · ${new Date().toLocaleString('zh-CN')}`;
+    document.getElementById('aiResultContent').textContent = content;
+    document.getElementById('aiResult').style.display='block';
+
+    statusEl.className='status ok';
+    statusEl.textContent='✓ 解读生成完成';
+  } catch(e){
+    statusEl.className='status err';
+    statusEl.textContent='生成失败：'+e.message;
+  } finally{
+    btn.disabled=false; btn.textContent='✨ 生成今日专家解读';
+  }
+}
 
 function formatDate(str){
   if(!str) return '';
@@ -1639,6 +1859,40 @@ document.querySelectorAll('[data-trend]').forEach(p=>{
 document.getElementById('loadTrendBtn').addEventListener('click', loadTrend);
 document.getElementById('downloadTrendBtn').addEventListener('click', downloadTrend);
 
+// AI服务商切换
+let aiProvider = 'claude';
+const aiKeyLabels = {
+  claude:   'API Key（Claude · 从 console.anthropic.com 获取 · 格式 sk-ant-...）',
+  deepseek: 'API Key（DeepSeek · 从 platform.deepseek.com 获取 · 格式 sk-...）',
+  qwen:     'API Key（通义千问 · 从 dashscope.aliyun.com 获取）',
+  openai:   'API Key（OpenAI / 兼容接口 · 格式 sk-...）',
+};
+document.querySelectorAll('[data-provider]').forEach(p=>{
+  p.addEventListener('click',()=>{
+    document.querySelectorAll('[data-provider]').forEach(x=>x.classList.remove('active'));
+    p.classList.add('active');
+    aiProvider = p.dataset.provider;
+    document.getElementById('customUrlField').style.display =
+      aiProvider==='openai' ? 'block' : 'none';
+    document.getElementById('aiKeyLabel').textContent = aiKeyLabels[aiProvider] || 'API Key';
+    // 读取已保存的Key
+    const saved = localStorage.getItem('aiKey_'+aiProvider) || '';
+    document.getElementById('aiKeyInput').value = saved;
+  });
+});
+
+document.getElementById('aiKeyInput').addEventListener('change', e=>{
+  try{ localStorage.setItem('aiKey_'+aiProvider, e.target.value.trim()); } catch(e){}
+});
+
+// 读取保存的key（默认Claude）
+try{
+  const saved = localStorage.getItem('aiKey_claude') || '';
+  if(saved) document.getElementById('aiKeyInput').value = saved;
+} catch(e){}
+
+document.getElementById('aiReadBtn').addEventListener('click', generateAIReading);
+
 async function loadTrend(){
   const statusEl = document.getElementById('trendStatus');
   const wrap = document.getElementById('trendWrap');
@@ -1666,6 +1920,10 @@ async function loadTrend(){
     statusEl.className = 'status ok';
     statusEl.textContent = `✓ 已加载 ${last50.length} 期走势数据`;
     dlBtn.style.display = '';
+    // 显示AI解读面板，并传入当前数据供解读使用
+    document.getElementById('aiPanel').style.display = 'block';
+    window._trendRecords = last50;
+    window._trendType = trendType;
   } catch(e){
     statusEl.className = 'status err';
     statusEl.textContent = '加载失败：' + e.message;
