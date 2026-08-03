@@ -973,23 +973,18 @@
       <div class="panel" id="aiPanel" style="margin-top:18px;display:none;">
         <h2>🤖 AI 专家解读</h2>
         <div class="field">
-          <label>选择 AI 服务商</label>
-          <div class="pillrow" id="aiProviderRow" style="flex-wrap:wrap;gap:6px;">
-            <div class="pill active" data-provider="claude">Claude（推荐）</div>
-            <div class="pill" data-provider="deepseek">DeepSeek（便宜）</div>
-            <div class="pill" data-provider="qwen">通义千问</div>
-            <div class="pill" data-provider="openai">OpenAI / 兼容</div>
-          </div>
+          <label>Gateway 地址</label>
+          <input type="text" id="gwUrlInput" placeholder="https://你的tunnel地址.trycloudflare.com" style="font-family:monospace;font-size:12px;">
         </div>
         <div class="field">
-          <label id="aiKeyLabel">API Key（Claude：console.anthropic.com 获取 · sk-ant-...）</label>
-          <input type="password" id="aiKeyInput" placeholder="粘贴你的 API Key">
+          <label>密钥（Secret）</label>
+          <input type="password" id="gwSecretInput" placeholder="填入你的 Gateway Secret">
         </div>
-        <div class="field" id="customUrlField" style="display:none;">
-          <label>自定义接口地址（OpenAI兼容格式，留空使用官方地址）</label>
-          <input type="text" id="customUrlInput" placeholder="https://api.openai.com/v1/chat/completions">
+        <div class="field">
+          <label>模型（留空自动选择）</label>
+          <input type="text" id="gwModelInput" placeholder="auto" value="auto" style="font-family:monospace;font-size:12px;">
         </div>
-        <div class="status" style="margin-bottom:10px;">Key 只存在当前浏览器，不会上传到任何服务器。每次切换服务商会自动读取该服务商保存的 Key。</div>
+        <div class="status" style="margin-bottom:10px;">Gateway 地址和密钥保存在本地浏览器，不会上传任何服务器。支持所有 OpenAI 兼容模型。</div>
         <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
         <div class="status" id="aiStatus" style="margin-top:8px;"></div>
 
@@ -1357,45 +1352,29 @@ function renderPoster(){
 /* ═══════════════════════════════════════════════════
    AI 专家解读
 ═══════════════════════════════════════════════════ */
-const AI_CONFIGS = {
-  openai: {
-    getUrl: ()=> (document.getElementById('customUrlInput').value.trim() || 'https://api.openai.com/v1/chat/completions'),
-    model: 'gpt-4o-mini',
-    buildBody: (model, messages)=>({ model, messages, max_tokens:1200, temperature:0.7 }),
-    buildHeaders: (key)=>({ 'Content-Type':'application/json', 'Authorization':'Bearer '+key }),
-    parseResp: (data)=> data.choices?.[0]?.message?.content || '',
-  },
-  deepseek: {
-    getUrl: ()=>'https://api.deepseek.com/v1/chat/completions',
-    model: 'deepseek-chat',
-    buildBody: (model, messages)=>({ model, messages, max_tokens:1200, temperature:0.7 }),
-    buildHeaders: (key)=>({ 'Content-Type':'application/json', 'Authorization':'Bearer '+key }),
-    parseResp: (data)=> data.choices?.[0]?.message?.content || '',
-  },
-  qwen: {
-    getUrl: ()=>'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-    model: 'qwen-plus',
-    buildBody: (model, messages)=>({ model, messages, max_tokens:1200, temperature:0.7 }),
-    buildHeaders: (key)=>({ 'Content-Type':'application/json', 'Authorization':'Bearer '+key }),
-    parseResp: (data)=> data.choices?.[0]?.message?.content || '',
-  },
-  claude: {
-    getUrl: ()=>'https://api.anthropic.com/v1/messages',
-    model: 'claude-sonnet-4-6',
-    buildBody: (model, messages)=>({
-      model, max_tokens:1200,
-      messages: messages.filter(m=>m.role!=='system'),
-      system: messages.find(m=>m.role==='system')?.content || '',
-    }),
-    buildHeaders: (key)=>({
-      'Content-Type':'application/json',
-      'x-api-key': key,
-      'anthropic-version':'2023-06-01',
-      'anthropic-dangerous-direct-browser-access':'true',
-    }),
-    parseResp: (data)=> data.content?.[0]?.text || '',
-  },
-};
+// ── AI Gateway 配置 ──────────────────────────────────
+const GW_CACHE_KEY = 'fucaiGatewayConfig';
+function saveGwConfig(){
+  try{
+    localStorage.setItem(GW_CACHE_KEY, JSON.stringify({
+      url:    document.getElementById('gwUrlInput').value.trim(),
+      secret: document.getElementById('gwSecretInput').value.trim(),
+      model:  document.getElementById('gwModelInput').value.trim() || 'auto',
+    }));
+  } catch(e){}
+}
+function loadGwConfig(){
+  try{
+    const c = JSON.parse(localStorage.getItem(GW_CACHE_KEY)||'{}');
+    if(c.url)    document.getElementById('gwUrlInput').value    = c.url;
+    if(c.secret) document.getElementById('gwSecretInput').value = c.secret;
+    if(c.model)  document.getElementById('gwModelInput').value  = c.model;
+  } catch(e){}
+}
+// 任意输入变化时自动保存
+['gwUrlInput','gwSecretInput','gwModelInput'].forEach(id=>{
+  document.getElementById(id)?.addEventListener('input', saveGwConfig);
+});
 
 function buildPrompt(type, records){
   const latest = records[records.length-1];
@@ -1459,13 +1438,32 @@ ${dataDesc}
   return { system, user };
 }
 
+// 把AI返回的纯文本渲染成带格式的HTML
+function renderAIText(text){
+  return text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong style="color:#f1d688;">$1</strong>')
+    .replace(/^(\d+)\.\s+/gm,'<span style="color:#f1d688;font-weight:700;">$1.</span> ')
+    .replace(/^#{1,3}\s+(.+)$/gm,'<div style="color:#f1d688;font-weight:700;margin:10px 0 4px;">$1</div>')
+    .replace(/\n/g,'<br>');
+}
+
 async function generateAIReading(){
   const btn = document.getElementById('aiReadBtn');
   const statusEl = document.getElementById('aiStatus');
-  const key = document.getElementById('aiKeyInput').value.trim();
-  if(!key){
+
+  const gwUrl    = document.getElementById('gwUrlInput').value.trim();
+  const gwSecret = document.getElementById('gwSecretInput').value.trim();
+  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'auto';
+
+  if(!gwUrl){
     statusEl.className='status err';
-    statusEl.textContent='请先填入 API Key';
+    statusEl.textContent='请先填入 Gateway 地址';
+    return;
+  }
+  if(!gwSecret){
+    statusEl.className='status err';
+    statusEl.textContent='请先填入 Gateway 密钥（Secret）';
     return;
   }
   if(!window._trendRecords || window._trendRecords.length===0){
@@ -1475,46 +1473,55 @@ async function generateAIReading(){
   }
 
   btn.disabled=true; btn.textContent='AI 分析中…';
-  statusEl.className='status'; statusEl.textContent='正在连接 AI 服务，请稍候…';
+  statusEl.className='status'; statusEl.textContent='正在连接 Gateway，请稍候…';
   document.getElementById('aiResult').style.display='none';
 
   try{
-    // 保存key
-    try{ localStorage.setItem('aiKey_'+aiProvider, key); } catch(e){}
+    saveGwConfig();
 
-    const cfg = AI_CONFIGS[aiProvider];
     const {system, user} = buildPrompt(window._trendType, window._trendRecords);
     const messages = [
-      {role:'system', content:system},
-      {role:'user',   content:user},
+      {role:'system', content: system},
+      {role:'user',   content: user},
     ];
 
-    const resp = await fetch(cfg.getUrl(), {
-      method:'POST',
-      headers: cfg.buildHeaders(key),
-      body: JSON.stringify(cfg.buildBody(cfg.model, messages)),
+    // 与你的 AI Gateway 完全一致的调用方式
+    const endpoint = gwUrl.replace(/\/$/, '') + '/v1/chat/completions';
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + gwSecret,
+      },
+      body: JSON.stringify({
+        model:       gwModel,
+        messages:    messages,
+        max_tokens:  1500,
+        temperature: 0.7,
+      }),
     });
 
     if(!resp.ok){
       const err = await resp.text().catch(()=>'');
-      throw new Error(`服务商返回 HTTP ${resp.status}：${err.slice(0,120)}`);
+      throw new Error(`Gateway 返回 HTTP ${resp.status}：${err.slice(0,150)}`);
     }
     const data = await resp.json();
-    const content = cfg.parseResp(data);
-    if(!content) throw new Error('AI 返回内容为空，请检查 Key 是否正确');
+    const text = data.choices?.[0]?.message?.content || '';
+    if(!text) throw new Error('AI 返回内容为空');
 
-    // 显示结果
-    const gameNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+    const usedModel    = data.model    || gwModel;
+    const usedProvider = data.provider || '';
+
+    // 渲染结果
+    const gameLabel = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'}[window._trendType] || '';
     const latest = window._trendRecords[window._trendRecords.length-1];
-    document.getElementById('aiResultTitle').textContent =
-      `${gameNames[window._trendType]} · AI专家今日解读`;
+    document.getElementById('aiResultTitle').textContent = `${gameLabel} · AI专家今日解读`;
     document.getElementById('aiResultDate').textContent =
-      `基于 ${latest.date} 最新开奖数据 · ${new Date().toLocaleString('zh-CN')}`;
-    document.getElementById('aiResultContent').textContent = content;
+      `基于 ${latest.date} 最新数据 · ${usedProvider ? usedProvider+' · ' : ''}${usedModel}`;
+    document.getElementById('aiResultContent').innerHTML = renderAIText(text);
     document.getElementById('aiResult').style.display='block';
-
     statusEl.className='status ok';
-    statusEl.textContent='✓ 解读生成完成';
+    statusEl.textContent='✓ 解读已生成';
   } catch(e){
     statusEl.className='status err';
     statusEl.textContent='生成失败：'+e.message;
@@ -1859,37 +1866,9 @@ document.querySelectorAll('[data-trend]').forEach(p=>{
 document.getElementById('loadTrendBtn').addEventListener('click', loadTrend);
 document.getElementById('downloadTrendBtn').addEventListener('click', downloadTrend);
 
-// AI服务商切换
-let aiProvider = 'claude';
-const aiKeyLabels = {
-  claude:   'API Key（Claude · 从 console.anthropic.com 获取 · 格式 sk-ant-...）',
-  deepseek: 'API Key（DeepSeek · 从 platform.deepseek.com 获取 · 格式 sk-...）',
-  qwen:     'API Key（通义千问 · 从 dashscope.aliyun.com 获取）',
-  openai:   'API Key（OpenAI / 兼容接口 · 格式 sk-...）',
-};
-document.querySelectorAll('[data-provider]').forEach(p=>{
-  p.addEventListener('click',()=>{
-    document.querySelectorAll('[data-provider]').forEach(x=>x.classList.remove('active'));
-    p.classList.add('active');
-    aiProvider = p.dataset.provider;
-    document.getElementById('customUrlField').style.display =
-      aiProvider==='openai' ? 'block' : 'none';
-    document.getElementById('aiKeyLabel').textContent = aiKeyLabels[aiProvider] || 'API Key';
-    // 读取已保存的Key
-    const saved = localStorage.getItem('aiKey_'+aiProvider) || '';
-    document.getElementById('aiKeyInput').value = saved;
-  });
-});
 
-document.getElementById('aiKeyInput').addEventListener('change', e=>{
-  try{ localStorage.setItem('aiKey_'+aiProvider, e.target.value.trim()); } catch(e){}
-});
-
-// 读取保存的key（默认Claude）
-try{
-  const saved = localStorage.getItem('aiKey_claude') || '';
-  if(saved) document.getElementById('aiKeyInput').value = saved;
-} catch(e){}
+// 初始化时读取Gateway配置
+loadGwConfig();
 
 document.getElementById('aiReadBtn').addEventListener('click', generateAIReading);
 
