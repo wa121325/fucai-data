@@ -2503,7 +2503,7 @@ async function draw3DCanvas(records){
 
   // 底部说明
   cy+=14;
-  ctxText(ctx,'数据来源：data.17500.cn  |  仅供参考，开奖以官方公布为准',
+  ctxText(ctx,'数据来源  |  仅供参考，开奖以官方公布为准',
     W0/2,cy,{size:10,color:'#aaa'});
   cy+=FOOT_H-14;
 
@@ -2567,7 +2567,7 @@ async function drawSSQCanvas(records){
   });
 
   cy+=14;
-  ctxText(ctx,'数据来源：data.17500.cn  |  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
+  ctxText(ctx,'数据来源 |  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
   cy+=36;
   await drawQR(ctx,W0,cy);
   ctx.setTransform(1,0,0,1,0,0);
@@ -2625,7 +2625,7 @@ async function drawKL8Canvas(records){
   });
 
   cy+=14;
-  ctxText(ctx,'数据来源：data.17500.cn  |  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
+  ctxText(ctx,'数据来源  |  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
   cy+=36;
   await drawQR(ctx,W0,cy);
   ctx.setTransform(1,0,0,1,0,0);
