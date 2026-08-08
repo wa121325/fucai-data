@@ -504,7 +504,48 @@
   .tabContent.active{display:block;}
 
   /* ── 走势图表格 ── */
-  /* ── 走势图预览容器 ── */
+  /* ── 预测报告 ── */
+  .pred-model-card{
+    background:#faf9f6;border:1px solid #e3e0d8;border-radius:10px;
+    padding:12px;margin-bottom:10px;
+  }
+  .pred-model-title{font-size:13px;font-weight:700;color:var(--ink);margin-bottom:8px;}
+  .pred-acc-row{display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
+  .pred-acc-badge{
+    padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700;
+    background:#1a1a2e;color:#f1d688;
+  }
+  .pred-prob-bar{margin:4px 0;}
+  .pred-prob-label{font-size:11px;color:#666;margin-bottom:2px;}
+  .pred-bar-wrap{background:#eee;border-radius:4px;height:14px;overflow:hidden;}
+  .pred-bar-fill{height:14px;border-radius:4px;background:#c81e1e;transition:width .4s;}
+  .rec-group{
+    display:inline-block;margin:4px;padding:6px 10px;
+    background:#1a1a2e;border-radius:8px;color:#f1d688;
+    font-size:13px;font-weight:700;letter-spacing:.05em;
+  }
+  .rec-group .ball-r{
+    display:inline-block;width:22px;height:22px;line-height:22px;
+    border-radius:50%;background:#c81e1e;color:#fff;
+    font-size:11px;font-weight:700;text-align:center;margin:1px;
+  }
+  .rec-group .ball-b{
+    display:inline-block;width:22px;height:22px;line-height:22px;
+    border-radius:50%;background:#1560c8;color:#fff;
+    font-size:11px;font-weight:700;text-align:center;margin:1px;
+  }
+  .rec-group .ball-g{
+    display:inline-block;width:22px;height:22px;line-height:22px;
+    border-radius:50%;background:#c8940f;color:#fff;
+    font-size:11px;font-weight:700;text-align:center;margin:1px;
+  }
+  .bt-hit{color:#1a7a4c;font-weight:700;}
+  .bt-miss{color:#aaa;}
+  .feat-imp{font-size:12px;color:#555;margin:2px 0;}
+  .bt-row{display:flex;gap:8px;margin:4px 0;font-size:12px;flex-wrap:wrap;}
+  .bt-tag{padding:2px 8px;border-radius:4px;font-size:11px;}
+  .bt-tag.hit{background:#e8f5e9;color:#1a7a4c;}
+  .bt-tag.miss{background:#fafafa;color:#aaa;}
   #trendWrap{
     font-size:13px;
     width:100%;
@@ -849,6 +890,7 @@
     <div class="mainTabs">
       <div class="mainTab active" data-tab="poster">🎨 海报生成</div>
       <div class="mainTab" data-tab="trend">📊 走势图</div>
+      <div class="mainTab" data-tab="predict">🤖 ML预测报告</div>
     </div>
 
     <!-- 海报Tab内容 -->
@@ -1017,6 +1059,47 @@
       </div>
 
     </div><!-- end tabTrend -->
+
+    <!-- ═══════════ ML预测报告 Tab ═══════════ -->
+    <div id="tabPredict" class="tabContent">
+      <p class="appSub">基于 XGBoost + 随机森林 + 时间序列回测，每日自动生成。数据来自 GitHub 仓库 prediction.json。</p>
+
+      <div class="panel">
+        <h2>加载预测报告</h2>
+        <button class="btn secondary" id="loadPredictBtn">📥 加载今日预测报告</button>
+        <div class="status" id="predictStatus" style="margin-top:8px;"></div>
+      </div>
+
+      <div id="predictContent" style="display:none;">
+        <!-- 回测报告 -->
+        <div class="panel" id="backtestPanel">
+          <h2>📋 昨日预测回测结果</h2>
+          <div id="backtestContent"></div>
+        </div>
+        <!-- 各彩种预测 -->
+        <div id="gamePredict3d" style="display:none;">
+          <div class="panel">
+            <h2>🎯 福彩3D · 今日预测</h2>
+            <div id="predict3dContent"></div>
+          </div>
+        </div>
+        <div id="gamePredictSSQ" style="display:none;">
+          <div class="panel">
+            <h2>🔴 双色球 · 今日预测</h2>
+            <div id="predictSSQContent"></div>
+          </div>
+        </div>
+        <div id="gamePredictKL8" style="display:none;">
+          <div class="panel">
+            <h2>🟡 快乐8 · 今日预测</h2>
+            <div id="predictKL8Content"></div>
+          </div>
+        </div>
+        <div class="status" style="color:#aaa;font-size:11px;margin-top:10px;padding:0 4px;">
+          ⚠️ 以上预测基于历史数据的机器学习模型，彩票开奖具有完全随机性，预测结果不具有实际意义，仅供数据分析娱乐参考，请勿作为投注依据。
+        </div>
+      </div>
+    </div><!-- end tabPredict -->
 
   </div><!-- end left panel -->
 
@@ -1989,21 +2072,174 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
     tab.classList.add('active');
     const which = tab.dataset.tab;
     document.getElementById('tab' + which.charAt(0).toUpperCase() + which.slice(1)).classList.add('active');
-    const stage = document.getElementById('stage');
+    const stage     = document.getElementById('stage');
     const trendWrap = document.getElementById('trendWrap');
-    const credit = document.getElementById('previewCredit');
+    const credit    = document.getElementById('previewCredit');
     if(which === 'trend'){
-      stage.style.display = 'none';
-      trendWrap.style.display = 'block';
-      credit.style.display = 'none';
+      stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
+    } else if(which === 'predict'){
+      stage.style.display='none'; trendWrap.style.display='none'; credit.style.display='none';
     } else {
-      stage.style.display = '';
-      trendWrap.style.display = 'none';
-      credit.style.display = '';
+      stage.style.display=''; trendWrap.style.display='none'; credit.style.display='';
       renderPoster();
     }
   });
 });
+
+/* ═══════════════════════════════════════════════════
+   ML 预测报告
+═══════════════════════════════════════════════════ */
+document.getElementById('loadPredictBtn').addEventListener('click', loadPrediction);
+
+async function loadPrediction(){
+  const statusEl = document.getElementById('predictStatus');
+  const btn = document.getElementById('loadPredictBtn');
+  const repo = (localStorage.getItem('fucaiGithubRepo')||'').trim();
+  if(!repo){
+    statusEl.className='status err';
+    statusEl.textContent='请先在「海报生成」→「数据来源」里填写并保存 GitHub 仓库地址';
+    return;
+  }
+  btn.disabled=true;
+  statusEl.className='status';
+  statusEl.textContent='正在加载预测报告…';
+  try{
+    const url=`https://raw.githubusercontent.com/${repo}/main/prediction.json?t=${Date.now()}`;
+    const resp=await fetch(url);
+    if(!resp.ok) throw new Error('HTTP '+resp.status+' — prediction.json 是否已生成？先手动触发一次 Actions');
+    const data=await resp.json();
+    renderBacktest(data.backtest||{});
+    renderGamePredict('3d',  data.predictions?.['3d']);
+    renderGamePredict('ssq', data.predictions?.ssq);
+    renderGamePredict('kl8', data.predictions?.kl8);
+    document.getElementById('predictContent').style.display='block';
+    statusEl.className='status ok';
+    statusEl.textContent=`✓ 预测报告加载成功（更新于 ${data.updated_at||'未知'}）`;
+  } catch(e){
+    statusEl.className='status err';
+    statusEl.textContent='加载失败：'+e.message;
+  }
+  btn.disabled=false;
+}
+
+function renderBacktest(bt){
+  const el=document.getElementById('backtestContent');
+  if(!bt||!bt.games||Object.keys(bt.games).length===0){
+    el.innerHTML='<div class="status">暂无回测数据（首次运行时无上期预测可对比）</div>'; return;
+  }
+  let html=`<div style="font-size:12px;color:#888;margin-bottom:10px;">回测日期：${bt.date||'未知'}</div>`;
+  const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+  for(const [game,info] of Object.entries(bt.games)){
+    html+=`<div class="pred-model-card"><div class="pred-model-title">${gNames[game]||game} 回测</div>`;
+    if(game==='3d'){
+      html+=`<div>实际开奖：<b>${(info.actual||[]).join(' ')}</b></div>`;
+      html+=`<div>完全命中：<span class="${info.hit_count>0?'bt-hit':'bt-miss'}">${info.hit_count}注</span>`;
+      html+=` 部分命中(≥2位)：<span class="${info.partial_count>0?'bt-hit':'bt-miss'}">${info.partial_count}注</span></div>`;
+    } else if(game==='ssq'){
+      html+=`<div>实际红球：<b>${(info.actual_red||[]).join(', ')}</b> 蓝球：<b>${info.actual_blue}</b></div>`;
+      html+=`<div>最佳命中红球：<span class="${(info.best_red_hit||0)>=3?'bt-hit':'bt-miss'}">${info.best_red_hit||0}个</span></div>`;
+      if(info.group_results){
+        html+='<div class="bt-row">';
+        info.group_results.forEach((g,i)=>{
+          html+=`<span class="bt-tag ${g.red_hit>=3?'hit':'miss'}">第${i+1}注 红${g.red_hit}蓝${g.blue_hit}</span>`;
+        });
+        html+='</div>';
+      }
+    } else if(game==='kl8'){
+      html+=`<div>最佳命中：<span class="${(info.best_hit||0)>=10?'bt-hit':'bt-miss'}">${info.best_hit||0}/20</span></div>`;
+      if(info.group_results){
+        html+='<div class="bt-row">';
+        info.group_results.forEach((g,i)=>{
+          html+=`<span class="bt-tag ${g.hit>=10?'hit':'miss'}">第${i+1}注 中${g.hit}个</span>`;
+        });
+        html+='</div>';
+      }
+    }
+    html+='</div>';
+  }
+  el.innerHTML=html;
+}
+
+function renderGamePredict(game, data){
+  const panelIds={'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
+  const contentIds={'3d':'predict3dContent','ssq':'predictSSQContent','kl8':'predictKL8Content'};
+  const panel=document.getElementById(panelIds[game]);
+  const contentEl=document.getElementById(contentIds[game]);
+  if(!data||!data.models){panel.style.display='none';return;}
+  panel.style.display='block';
+
+  const modelLabels={
+    bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_group:'和值区间',odd_cnt:'奇数个数',
+    blue:'蓝球号码',zone_combo:'三区组合',
+    odd_cnt_group:'奇数区间',zone_dominant:'主落区',total_group:'总和区间'
+  };
+
+  let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">近${data.data_count}期数据 · 更新：${data.updated_at}</div>`;
+
+  for(const [mname,mdata] of Object.entries(data.models)){
+    if(!mdata||!mdata.accuracy) continue;
+    const acc_rf=mdata.accuracy.random_forest;
+    const acc_xgb=mdata.accuracy.xgboost;
+    const pred=mdata.prediction||{};
+    html+=`<div class="pred-model-card">`;
+    html+=`<div class="pred-model-title">目标：${modelLabels[mname]||mname}</div>`;
+    html+=`<div class="pred-acc-row">`;
+    html+=`<span class="pred-acc-badge">随机森林 ${acc_rf}%</span>`;
+    if(acc_xgb) html+=`<span class="pred-acc-badge" style="background:#1a3a8b;">XGBoost ${acc_xgb}%</span>`;
+    html+=`</div>`;
+    if(pred.value!==undefined){
+      html+=`<div style="font-size:12px;margin-bottom:6px;">预测值：<b style="color:#c81e1e;font-size:14px;">${pred.value}</b>（置信度 ${pred.confidence}%）</div>`;
+    }
+    if(pred.probs){
+      const topProbs=Object.entries(pred.probs).sort((a,b)=>b[1]-a[1]).slice(0,6);
+      const maxV=Math.max(...topProbs.map(x=>+x[1]));
+      topProbs.forEach(([k,v])=>{
+        html+=`<div class="pred-prob-bar">`;
+        html+=`<div class="pred-prob-label">${k} — ${v}%</div>`;
+        html+=`<div class="pred-bar-wrap"><div class="pred-bar-fill" style="width:${v}%;background:${+v===maxV?'#c81e1e':'#8a97b3'}"></div></div>`;
+        html+=`</div>`;
+      });
+    }
+    if(mdata.feature_importance?.length){
+      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">关键特征：`;
+      html+=mdata.feature_importance.map(f=>`${f.name}(${(f.score*100).toFixed(1)}%)`).join(' · ');
+      html+=`</div>`;
+    }
+    if(mdata.backtest_latest?.length){
+      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">近期回测（实际→RF/XGB）：`;
+      html+=mdata.backtest_latest.slice(-5).map(b=>{
+        const hit=b.true===b.pred_rf||b.true===b.pred_xgb;
+        return `<span class="bt-tag ${hit?'hit':'miss'}">${b.true}→${b.pred_rf}/${b.pred_xgb}</span>`;
+      }).join(' ');
+      html+=`</div>`;
+    }
+    html+=`</div>`;
+  }
+
+  const rec=data.recommendation||{};
+  html+=`<div style="margin-top:16px;"><div class="sectionTitle" style="font-size:13px;">🎯 综合推荐号码</div><div style="margin:10px 0;">`;
+  if(game==='3d'){
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">预测和值区间：${rec.sum_range_pred||'—'}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">热号：百${(rec.hot_bai||[]).join('/')} 十${(rec.hot_shi||[]).join('/')} 个${(rec.hot_ge||[]).join('/')}</div>`;
+    (rec.groups||[]).forEach((g,i)=>{
+      html+=`<div class="rec-group">第${i+1}注：${g.map(n=>`<span class="ball-r">${n}</span>`).join('')}</div>`;
+    });
+  } else if(game==='ssq'){
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">蓝球推荐：${(rec.blue_recommend||[]).join('、')} · 预测奇数个：${rec.odd_cnt_pred||'—'} · 和值：${rec.sum_range_pred||'—'}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">热号：${(rec.hot_red||[]).join(' ')} · 冷号：${(rec.cold_red||[]).join(' ')}</div>`;
+    (rec.groups||[]).forEach((g,i)=>{
+      html+=`<div class="rec-group">第${i+1}注：${(g.red||[]).map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('')}<span class="ball-b">${String(g.blue||0).padStart(2,'0')}</span></div>`;
+    });
+  } else if(game==='kl8'){
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">主落区：${rec.zone_dominant_pred||'—'} · 总和区间：${rec.total_range_pred||'—'}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">热号：${(rec.hot20||[]).slice(0,10).join(' ')}</div>`;
+    (rec.groups||[]).forEach((g,i)=>{
+      html+=`<div class="rec-group" style="display:block;margin:4px 0;">第${i+1}注：${(g.numbers||[]).map(n=>`<span class="ball-g">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+    });
+  }
+  html+=`</div><div style="font-size:11px;color:#aaa;margin-top:8px;">${rec.note||''}</div></div>`;
+  contentEl.innerHTML=html;
+}
 
 // 走势图彩种切换
 let trendType = '3d';
