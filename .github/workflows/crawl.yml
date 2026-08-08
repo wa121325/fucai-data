@@ -1,12 +1,12 @@
-name: 每日抓取福彩开奖数据
+name: 每日抓取 + ML预测
 
 on:
   schedule:
     - cron: '30 13 * * *'   # UTC 13:30 = 北京时间 21:30
-  workflow_dispatch:
+  workflow_dispatch:         # 允许手动触发
 
 jobs:
-  crawl:
+  crawl-and-predict:
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
@@ -18,16 +18,22 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: pip install requests
+        run: |
+          pip install requests beautifulsoup4
+          pip install numpy scikit-learn xgboost
 
-      - name: 运行爬虫
+      - name: 第一步：抓取最新开奖数据
         run: python lottery_crawler.py
         continue-on-error: true
 
-      - name: 提交并推送结果
+      - name: 第二步：ML特征工程 + 训练 + 预测
+        run: python lottery_ml.py
+        continue-on-error: true
+
+      - name: 提交并推送所有结果
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add latest.json history.json
-          git diff --cached --quiet || git commit -m "自动更新开奖数据 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M')"
+          git add latest.json history.json prediction.json
+          git diff --cached --quiet || git commit -m "每日更新：开奖数据 + ML预测 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M')"
           git push
