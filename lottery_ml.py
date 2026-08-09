@@ -519,37 +519,156 @@ def gen_recommendation_ssq(records, models):
 
 
 def gen_recommendation_kl8(records, models):
-    """快乐8综合推荐"""
-    freq = Counter(n for r in records[-30:] for n in r['numbers'])
-    hot20  = [x[0] for x in freq.most_common(20)]
-    cold20 = [x[0] for x in freq.most_common()[-20:]]
+    """
+    快乐8综合推荐
+    快乐8实际玩法：从1-80中选1到10个号码
+    主流玩法：选四(4个)、选五(5个，含复式)、选六(6个)、选九(9个)
+    20个全中是开奖结果，玩家只选自己想押的号码
+    """
+    import random
+    random.seed(int(datetime.now().strftime('%Y%m%d')))  # 每天种子不同
 
+    # ── 基础统计 ──
+    freq_30  = Counter(n for r in records[-30:] for n in r['numbers'])
+    freq_10  = Counter(n for r in records[-10:] for n in r['numbers'])
+    freq_50  = Counter(n for r in records        for n in r['numbers'])
+
+    # 热号：最近30期高频出现
+    hot_nums  = [x[0] for x in freq_30.most_common(25)]
+    # 冷号：最近30期低频，但历史总频率正常（即近期遗漏）
+    cold_nums = [x[0] for x in freq_30.most_common()[-25:]]
+    # 近10期超热（近期爆发）
+    hot10 = [x[0] for x in freq_10.most_common(15)]
+    # 各区热号
+    zone_hot = {}
+    for zi, (lo, hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+        zone_nums = {k:v for k,v in freq_30.items() if lo<=k<=hi}
+        zone_hot[zi] = [x[0] for x in sorted(zone_nums.items(),key=lambda x:-x[1])[:8]]
+
+    # ── 模型预测参考 ──
     zone_m = models.get('zone_dominant',{})
     zone_pred = zone_m.get('prediction',{}).get('value', 1) if zone_m else 1
+    zone_probs = zone_m.get('prediction',{}).get('probs',{}) if zone_m else {}
     zone_name = {0:'1-20区',1:'21-40区',2:'41-60区',3:'61-80区'}.get(zone_pred,'21-40区')
 
     total_m = models.get('total_group',{})
-    total_label = {0:'低(<640)',1:'中(640-819)',2:'高(≥820)'}.get(
-        total_m.get('prediction',{}).get('value',1) if total_m else 1, '中(640-819)')
+    total_pred = total_m.get('prediction',{}).get('value',1) if total_m else 1
+    total_label = {0:'低(<640)',1:'中(640-819)',2:'高(≥820)'}.get(total_pred,'中(640-819)')
+    # 总和高低影响偏大号/小号倾向
+    prefer_big = total_pred == 2   # 预测总和高→偏大号
+    prefer_small = total_pred == 0 # 预测总和低→偏小号
 
-    import random
-    random.seed(42)
-    groups = []
-    for i in range(5):
-        pool = list(set(hot20[:15] + cold20[:10]))
-        if len(pool)<20:
-            extra = [n for n in range(1,81) if n not in pool]
-            pool += random.sample(extra, 20-len(pool))
-        picked = sorted(random.sample(pool, 20))
-        groups.append({'numbers': picked})
+    odd_m = models.get('odd_cnt_group',{})
+    odd_pred = odd_m.get('prediction',{}).get('value',1) if odd_m else 1  # 0=少奇,1=均衡,2=多奇
+    prefer_odd = odd_pred == 2
+
+    def smart_pool(size, prefer_zone=None):
+        """智能构建候选池：综合热号+冷号+区间偏好"""
+        pool = set()
+        # 加入预测主落区热号
+        pz = zone_pred if prefer_zone is None else prefer_zone
+        pool.update(zone_hot.get(pz,[])[:6])
+        # 加入整体热号
+        pool.update(hot_nums[:12])
+        # 加入近10期超热
+        pool.update(hot10[:6])
+        # 少量冷号（回补效应）
+        cold_pick = cold_nums[:8]
+        pool.update(cold_pick[:3])
+        # 大小号调整
+        if prefer_big:
+            pool.update([n for n in range(41,81) if freq_30.get(n,0)>0][:5])
+        elif prefer_small:
+            pool.update([n for n in range(1,41) if freq_30.get(n,0)>0][:5])
+        return sorted(pool)
+
+    def pick_balanced(n, seed_extra=0):
+        """从候选池中均衡选n个，确保四区都有覆盖"""
+        random.seed(int(datetime.now().strftime('%Y%m%d')) + seed_extra)
+        pool = smart_pool(n)
+        if len(pool) < n:
+            extra = [x for x in range(1,81) if x not in pool]
+            pool += random.sample(extra, n - len(pool))
+        # 按区间均衡：每区至少1个（选四以上）
+        if n >= 4:
+            result = []
+            zones_list = [(1,20),(21,40),(41,60),(61,80)]
+            for lo,hi in zones_list:
+                zone_pool = sorted([x for x in pool if lo<=x<=hi])
+                if zone_pool:
+                    result.append(random.choice(zone_pool))
+            remaining_pool = [x for x in pool if x not in result]
+            need = n - len(result)
+            if need > 0 and remaining_pool:
+                result += random.sample(remaining_pool, min(need, len(remaining_pool)))
+            if len(result) < n:
+                extra = [x for x in range(1,81) if x not in result]
+                result += random.sample(extra, n-len(result))
+            return sorted(result[:n])
+        else:
+            return sorted(random.sample(pool if len(pool)>=n else list(range(1,81)), n))
+
+    # ══ 各玩法推荐 ══════════════════════════════════════
+
+    # 选四（4个球，全中倍率最高，但命中难）推荐3注
+    xuan4 = []
+    for i in range(3):
+        xuan4.append(pick_balanced(4, seed_extra=i))
+
+    # 选五（5个球）推荐3注
+    xuan5 = []
+    for i in range(3):
+        xuan5.append(pick_balanced(5, seed_extra=100+i))
+
+    # 选五复式（8个球覆盖，包含多个5球组合）推荐1注
+    random.seed(int(datetime.now().strftime('%Y%m%d')) + 200)
+    pool5 = smart_pool(8)
+    if len(pool5) < 8:
+        extra = [x for x in range(1,81) if x not in pool5]
+        pool5 += random.sample(extra, 8-len(pool5))
+    xuan5_fufu = sorted(pool5[:8])  # 8个球复式=C(8,5)=56注
+
+    # 选六（6个球）推荐3注
+    xuan6 = []
+    for i in range(3):
+        xuan6.append(pick_balanced(6, seed_extra=300+i))
+
+    # 选九（9个球，高赔率，全中难度大）推荐2注
+    xuan9 = []
+    for i in range(2):
+        xuan9.append(pick_balanced(9, seed_extra=400+i))
+
+    # 选十（10个球，最高赔率）推荐1注（结合热号全覆盖）
+    random.seed(int(datetime.now().strftime('%Y%m%d')) + 500)
+    xuan10_pool = hot_nums[:16] + cold_nums[:4]
+    xuan10_pool = list(set(xuan10_pool))
+    if len(xuan10_pool) < 10:
+        extra = [x for x in range(1,81) if x not in xuan10_pool]
+        xuan10_pool += random.sample(extra, 10-len(xuan10_pool))
+    xuan10 = sorted(random.sample(xuan10_pool, 10))
 
     return {
-        'groups': groups,
-        'hot20':  hot20,
-        'cold20': cold20,
         'zone_dominant_pred': zone_name,
+        'zone_probs': {str(i): round(float(zone_probs.get(str(i),0)),1) for i in range(4)},
         'total_range_pred': total_label,
-        'note': '基于XGBoost+随机森林时序回测，仅供娱乐参考。'
+        'hot_nums':  sorted(hot_nums[:15]),
+        'cold_nums': sorted(cold_nums[:15]),
+        'hot10':     sorted(hot10[:10]),
+        'plays': {
+            'xuan4':  {'name':'选四','balls':4,'groups':xuan4,
+                       'tip':'4个球全中，赔率高，推荐直选'},
+            'xuan5':  {'name':'选五','balls':5,'groups':xuan5,
+                       'tip':'5个球全中，平衡赔率与命中率'},
+            'xuan5_fu':{'name':'选五复式','balls':8,'groups':[xuan5_fufu],
+                        'tip':f'8个球复式含C(8,5)=56注五球组合，全面覆盖'},
+            'xuan6':  {'name':'选六','balls':6,'groups':xuan6,
+                       'tip':'6个球全中，中奖率与赔率较均衡，推荐玩法'},
+            'xuan9':  {'name':'选九','balls':9,'groups':xuan9,
+                       'tip':'9个球全中，高赔率，适合小额搏奖'},
+            'xuan10': {'name':'选十','balls':10,'groups':[xuan10],
+                       'tip':'10个球全中，最高赔率，覆盖热号区域'},
+        },
+        'note': '推荐号码基于近期热号/冷号统计与ML区间预测综合生成，仅供娱乐参考，请理性购彩。'
     }
 
 
@@ -592,11 +711,30 @@ def daily_backtest_report(history, prev_prediction):
 
         elif game == 'kl8':
             actual = set(latest.get('numbers',[]))
-            groups = rec.get('groups', [])
-            hit_info_list = [{'hit': len(actual & set(g.get('numbers',[]))) } for g in groups]
-            hit_info = {'actual_count': len(actual),
-                        'group_results': hit_info_list,
-                        'best_hit': max((x['hit'] for x in hit_info_list), default=0)}
+            plays = rec.get('plays', {})
+            play_results = {}
+            for play_key, play_data in plays.items():
+                groups = play_data.get('groups', [])
+                balls  = play_data.get('balls', 0)
+                name   = play_data.get('name', play_key)
+                grp_results = []
+                for g in groups:
+                    nums = g if isinstance(g, list) else g.get('numbers', g)
+                    hit = len(actual & set(nums))
+                    # 是否中奖（全中才中奖）
+                    won = (hit == balls)
+                    grp_results.append({'nums': nums, 'hit': hit, 'balls': balls, 'won': won})
+                play_results[play_key] = {
+                    'name': name, 'balls': balls,
+                    'groups': grp_results,
+                    'any_won': any(g['won'] for g in grp_results),
+                    'best_hit': max((g['hit'] for g in grp_results), default=0),
+                }
+            hit_info = {
+                'actual': sorted(actual),
+                'play_results': play_results,
+                'best_hit': max((pr['best_hit'] for pr in play_results.values()), default=0),
+            }
 
         report['games'][game] = hit_info
     return report
