@@ -2146,19 +2146,28 @@ function renderBacktest(bt){
         html+='</div>';
       }
     } else if(game==='kl8'){
-      html+=`<div>最佳命中：<span class="${(info.best_hit||0)>=10?'bt-hit':'bt-miss'}">${info.best_hit||0}/20</span></div>`;
-      if(info.group_results){
-        html+='<div class="bt-row">';
-        info.group_results.forEach((g,i)=>{
-          html+=`<span class="bt-tag ${g.hit>=10?'hit':'miss'}">第${i+1}注 中${g.hit}个</span>`;
+      html+=`<div style="margin-bottom:6px;">实际开奖20个球（部分）：<b style="font-size:11px;">${(info.actual||[]).slice(0,10).join(' ')} …</b></div>`;
+      html+=`<div style="font-size:12px;color:#888;margin-bottom:6px;">最佳命中：<span class="${(info.best_hit||0)>=9?'bt-hit':'bt-miss'}">${info.best_hit||0}球</span>（各玩法按全中判断）</div>`;
+      const playResults = info.play_results || {};
+      const playOrder = ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'];
+      playOrder.forEach(pk=>{
+        const pr = playResults[pk];
+        if(!pr) return;
+        html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#1a1a2e;">${pr.name}（选${pr.balls}个）：</span>`;
+        html += '<div class="bt-row">';
+        (pr.groups||[]).forEach((g,i)=>{
+          const label = pr.name.includes('复式')?'复式':(`第${i+1}注`);
+          html += `<span class="bt-tag ${g.won?'hit':'miss'}">${label} 中${g.hit}/${g.balls}${g.won?' ✓':''}</span>`;
         });
-        html+='</div>';
-      }
+        html += '</div></div>';
+      });
     }
     html+='</div>';
   }
   el.innerHTML=html;
 }
+
+function factorial(n){ let r=1; for(let i=2;i<=n;i++) r*=i; return r; }
 
 function renderGamePredict(game, data){
   const panelIds={'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
@@ -2231,10 +2240,41 @@ function renderGamePredict(game, data){
       html+=`<div class="rec-group">第${i+1}注：${(g.red||[]).map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('')}<span class="ball-b">${String(g.blue||0).padStart(2,'0')}</span></div>`;
     });
   } else if(game==='kl8'){
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">主落区：${rec.zone_dominant_pred||'—'} · 总和区间：${rec.total_range_pred||'—'}</div>`;
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">热号：${(rec.hot20||[]).slice(0,10).join(' ')}</div>`;
-    (rec.groups||[]).forEach((g,i)=>{
-      html+=`<div class="rec-group" style="display:block;margin:4px 0;">第${i+1}注：${(g.numbers||[]).map(n=>`<span class="ball-g">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+    // 模型预测摘要
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">主落区预测：<b>${rec.zone_dominant_pred||'—'}</b> · 总和区间：<b>${rec.total_range_pred||'—'}</b></div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">近期热号：${(rec.hot_nums||rec.hot20||[]).slice(0,12).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#c81e1e;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:10px;">近期冷号：${(rec.cold_nums||rec.cold20||[]).slice(0,8).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#8a97b3;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+
+    // 各玩法卡片
+    const plays = rec.plays || {};
+    const playOrder = ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'];
+    const playColors = {xuan4:'#c81e1e',xuan5:'#1560c8',xuan5_fu:'#9b59b6',xuan6:'#1a7a4c',xuan9:'#e87d00',xuan10:'#7a1233'};
+
+    playOrder.forEach(pk=>{
+      const play = plays[pk];
+      if(!play) return;
+      const color = playColors[pk]||'#333';
+      html += `<div style="border:1px solid ${color};border-radius:10px;margin-bottom:10px;overflow:hidden;">`;
+      html += `<div style="background:${color};color:#fff;padding:7px 12px;font-size:13px;font-weight:700;">`;
+      html += `${play.name}（每注选${play.balls}个球）`;
+      html += `<span style="font-size:10px;font-weight:400;margin-left:8px;opacity:.85;">${play.tip||''}</span></div>`;
+      html += `<div style="padding:10px 12px;">`;
+
+      (play.groups||[]).forEach((g,i)=>{
+        const nums = Array.isArray(g) ? g : (g.numbers||g);
+        const label = play.name.includes('复式') ? `复式${nums.length}个球` : `第${i+1}注`;
+        html += `<div style="margin-bottom:6px;">`;
+        html += `<span style="font-size:11px;color:#666;margin-right:6px;">${label}：</span>`;
+        nums.forEach(n=>{
+          html += `<span style="display:inline-block;width:24px;height:24px;line-height:24px;border-radius:50%;background:${color};color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`;
+        });
+        if(play.name.includes('复式')){
+          const combos = factorial(nums.length) / (factorial(play.balls) * factorial(nums.length - play.balls));
+          html += `<span style="font-size:10px;color:#888;margin-left:6px;">= C(${nums.length},${play.balls}) = ${combos}注组合</span>`;
+        }
+        html += `</div>`;
+      });
+      html += `</div></div>`;
     });
   }
   html+=`</div><div style="font-size:11px;color:#aaa;margin-top:8px;">${rec.note||''}</div></div>`;
