@@ -1027,6 +1027,9 @@
           <input type="text" id="gwModelInput" placeholder="auto" value="auto" style="font-family:monospace;font-size:12px;">
         </div>
         <div class="status" style="margin-bottom:10px;">Gateway 地址和密钥保存在本地浏览器，不会上传任何服务器。支持所有 OpenAI 兼容模型。</div>
+        <div class="status" style="margin-bottom:8px;font-size:12px;">
+          💡 提示：先切到「🤖 ML预测报告」Tab 加载数据，再回来生成解读，AI 将同时融合走势统计 + 机器学习模型（马尔可夫/遗漏/RF/XGB/LGB）双重分析，解读更深入。
+        </div>
         <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
         <div class="status" id="aiStatus" style="margin-top:8px;"></div>
 
@@ -1095,7 +1098,10 @@
             <div id="predictKL8Content"></div>
           </div>
         </div>
-        <div class="status" style="color:#aaa;font-size:11px;margin-top:10px;padding:0 4px;">
+        <div class="status" style="color:#1a7a4c;font-size:12px;margin-top:8px;padding:8px;background:#f0fff4;border-radius:8px;border:1px solid #c3e6cb;">
+          💡 已加载ML预测数据。切换到「走势图」Tab 生成 AI 专家解读时，将自动融合机器学习的马尔可夫/遗漏/模型预测结果，解读质量更高。
+        </div>
+        <div class="status" style="color:#aaa;font-size:11px;margin-top:6px;padding:0 4px;">
           ⚠️ 以上预测基于历史数据的机器学习模型，彩票开奖具有完全随机性，预测结果不具有实际意义，仅供数据分析娱乐参考，请勿作为投注依据。
         </div>
       </div>
@@ -1459,7 +1465,7 @@ function loadGwConfig(){
   document.getElementById(id)?.addEventListener('input', saveGwConfig);
 });
 
-function buildPrompt(type, records){
+function buildPrompt(type, records, mlContext=''){
   const latest = records[records.length-1];
   const n = records.length;
   const gameNames = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
@@ -1629,39 +1635,70 @@ ${recent.join('\n')}
 • 平均连续号组数：${(consecSum/n).toFixed(1)}`;
   }
 
-  const system = `你是一位资深彩票数据分析专家，擅长从历史开奖数据中总结统计特征、冷热变化、走势规律和号码分布。
+  const system = `你是一位资深彩票数据分析专家，同时具备机器学习结果解读能力。
+你的分析结合两类数据：①人工统计走势特征 ②机器学习模型预测结果（随机森林+XGBoost+LightGBM+马尔可夫转移+遗漏分析）。
 
 要求：
-1. 使用专业、自然、生动、有参考价值的中文。
-2. 所有观点均基于提供的数据，不要虚构不存在的规律。
-3. 不要保证命中率，也不要暗示能够预测开奖结果。
-4. 结构自然流畅，避免模板化表达。
-5. 全文控制在350字以内。
-6. 最后必须附上："彩票开奖结果具有随机性，本分析仅基于历史数据统计，仅供参考。"`;
+1. 自然融合统计走势与ML模型两类信息，不要割裂成"走势部分"和"ML部分"。
+2. 提到ML预测时，用"模型分析"/"统计模型"等表述，不夸大准确性。
+3. 所有观点均基于提供的数据，不虚构规律，不保证命中率。
+4. 结构清晰，语言生动，像专业彩票资讯网站的每日深度解读。
+5. 全文400字左右。
+6. 最后必须附上免责声明："彩票开奖具有完全随机性，本分析为历史数据统计与模型演示，仅供娱乐参考，请理性购彩。"`;
 
-  const user = `请根据以下${name}近期开奖数据，撰写一篇今日专家解读分析。
+  const user = `请根据以下${name}近期开奖数据和机器学习分析结果，撰写一篇今日专家深度解读。
 
-历史数据：
+【走势历史数据】
 ${dataDesc}
 
-最新一期（${latest.date}）已开奖。
+${mlContext ? `【机器学习模型分析结果】
+${mlContext}
 
-请结合以上数据，自然完成一篇分析文章，内容需覆盖但不限于：
-- 最近走势特征与规律（和值/跨度/区间/连号/斜连/重号/总和等）
-- 各项指标值得关注的变化
-- 近期冷热、奇偶、大小、分布特点
-- 今日整体走势总结
-- 根据历史统计，列出近期值得关注的号码，然后针对性推荐五组以上参考号码组合
+` : ''}最新一期（${latest.date}）已开奖。
 
 写作要求：
-- 随机调整分析顺序，自然衔接各观点，像彩票资讯网站的每日专家解读。
-- 使用2~4个小标题（如"走势观察"、"冷热变化"、"近期焦点"、"综合判断"等）。
-- 推荐号码以"参考号码"或"关注号码"形式展示。
-- 每个观点尽量结合具体数字说明原因，避免空洞描述。
-- 语言自然、有节奏，像资深分析师撰写。
+- 自然融合走势规律与模型分析两类视角，不要分成两块各说各的。
+- 使用2~4个小标题，内容覆盖：走势规律观察、冷热遗漏变化、模型信号解读、综合号码建议。
+- 推荐号码（5组以上）结合走势+模型双重依据给出，标注是"直选"还是"复式"。
+- 每个观点结合具体数字，避免空洞表述。
+- 语言流畅自然，像资深分析师的每日解读稿。
 - 请使用中文回答。`;
 
   return { system, user };
+}
+
+// 供 generateAIReading 调用：从已加载的 prediction.json 中提取 ai_context
+function getMlContext(type){
+  try{
+    const pred = window._lastPrediction;
+    if(!pred || !pred.predictions || !pred.predictions[type]) return '';
+    const ctx = pred.predictions[type].ai_context;
+    if(!ctx) return '';
+
+    const lines = [];
+    if(type==='3d'){
+      lines.push(`数据量：${ctx.data_count}期全量训练`);
+      lines.push(`最优模型：${ctx.ml_top_accuracy}`);
+      if(ctx.markov_summary?.length) lines.push(`马尔可夫转移预测：${ctx.markov_summary.join('；')}`);
+      if(ctx.overdue_summary?.length) lines.push(`遗漏号码：${ctx.overdue_summary.join('；')}`);
+      if(ctx.sum_pred) lines.push(`ML预测和值区间：${ctx.sum_pred}`);
+      if(ctx.recommend_groups?.length) lines.push(`ML综合推荐号码：${ctx.recommend_groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
+    } else if(type==='ssq'){
+      lines.push(`数据量：${ctx.data_count}期全量训练`);
+      if(ctx.blue_recommend?.length) lines.push(`ML蓝球推荐：${ctx.blue_recommend.join('、')}`);
+      if(ctx.overdue_blue?.length) lines.push(`蓝球遗漏号：${ctx.overdue_blue.join('、')}`);
+      if(ctx.red_overdue?.length) lines.push(`红球遗漏号（回补关注）：${ctx.red_overdue.join('、')}`);
+      if(ctx.odd_pred!==undefined) lines.push(`ML预测奇数个数：${ctx.odd_pred}个`);
+      if(ctx.sum_pred) lines.push(`ML预测和值区间：${ctx.sum_pred}`);
+    } else if(type==='kl8'){
+      lines.push(`数据量：${ctx.data_count}期全量训练`);
+      if(ctx.zone_pred) lines.push(`ML预测主落区：${ctx.zone_pred}`);
+      if(ctx.total_pred) lines.push(`ML预测总和区间：${ctx.total_pred}`);
+      if(ctx.overdue_top10?.length) lines.push(`遗漏较久号码（回补关注）：${ctx.overdue_top10.join('、')}`);
+      if(ctx.hot_nums?.length) lines.push(`近期热号：${ctx.hot_nums.join('、')}`);
+    }
+    return lines.join('\n');
+  } catch(e){ return ''; }
 }
 
 // 把AI返回的纯文本渲染成带格式的HTML
@@ -1705,7 +1742,8 @@ async function generateAIReading(){
   try{
     saveGwConfig();
 
-    const {system, user} = buildPrompt(window._trendType, window._trendRecords);
+    const mlContext = getMlContext(window._trendType);
+    const {system, user} = buildPrompt(window._trendType, window._trendRecords, mlContext);
     const messages = [
       {role:'system', content: system},
       {role:'user',   content: user},
@@ -2108,6 +2146,7 @@ async function loadPrediction(){
     const resp=await fetch(url);
     if(!resp.ok) throw new Error('HTTP '+resp.status+' — prediction.json 是否已生成？先手动触发一次 Actions');
     const data=await resp.json();
+    window._lastPrediction = data;  // 供AI解读的getMlContext()使用
     renderBacktest(data.backtest||{});
     renderGamePredict('3d',  data.predictions?.['3d']);
     renderGamePredict('ssq', data.predictions?.ssq);
