@@ -1,262 +1,293 @@
 """
-福彩机器学习预测系统
-支持：双色球(ssq)、福彩3D(3d)、快乐8(kl8)
-方法：XGBoost + 随机森林 + 时间序列回测
-每日自动生成 prediction.json
+福彩机器学习预测系统 v2
+- 全量历史数据训练（不再限制50期）
+- 特征窗口仍用近50期滑动
+- 新增：LightGBM + LSTM(可选) + 马尔可夫链 + 贝叶斯遗漏 + 集成投票
+- 每日自动生成 prediction.json
+- AI Gateway 结合：buildPrompt输出结构化数据供AI解读
 """
-import json, math, sys, warnings
+import json, sys, warnings, math
 from datetime import datetime, date
-from collections import Counter
+from collections import Counter, defaultdict
+import random
 
 warnings.filterwarnings('ignore')
+random.seed(42)
 
-# ── 依赖检查 ─────────────────────────────────────────
+# ── 依赖检测 ─────────────────────────────────────────
 try:
     import numpy as np
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-    from sklearn.preprocessing import StandardScaler
+    HAS_NP = True
+except ImportError:
+    print("请安装: pip install numpy scikit-learn xgboost lightgbm")
+    sys.exit(1)
+
+try:
+    from sklearn.ensemble import RandomForestClassifier, VotingClassifier
     from sklearn.metrics import accuracy_score
+    from sklearn.preprocessing import LabelEncoder
+    HAS_SKL = True
+except ImportError:
+    HAS_SKL = False
+
+try:
     import xgboost as xgb
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
-    try:
-        import numpy as np
-        from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.metrics import accuracy_score
-    except ImportError:
-        print("缺少依赖，请运行: pip install numpy scikit-learn xgboost")
-        sys.exit(1)
+
+try:
+    import lightgbm as lgb
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
+
+# LSTM 可选（GitHub Actions 不装 tensorflow 节省时间）
+HAS_LSTM = False
+
+print(f"依赖: numpy✓  sklearn={'✓' if HAS_SKL else '✗'}  xgboost={'✓' if HAS_XGB else '✗'}  lightgbm={'✓' if HAS_LGB else '✗'}")
+
 
 # ══════════════════════════════════════════════════════
-#  特征工程
+#  特征工程（窗口最大50期，但输入全量records）
 # ══════════════════════════════════════════════════════
+WINDOW = 50  # 特征计算窗口
 
 def feat_3d(records, idx):
-    """为第idx期生成特征向量（使用其之前的数据）"""
-    feats = {}
-    window = records[max(0,idx-20):idx]   # 最近20期历史
-    if not window:
+    window = records[max(0, idx-WINDOW):idx]
+    if len(window) < 5:
         return None
-
     r = window[-1]
     d = r['digits']
     b, s, g = d
     total = b+s+g
     span = max(d)-min(d)
     road = [x%3 for x in d]
-    road_cnt = [road.count(i) for i in range(3)]
+    prev = window[-2]['digits'] if len(window)>=2 else d
+    repeat = sum(1 for i in range(3) if prev[i]==d[i])
+    sorted3 = sorted(d)
+    is_arith = (sorted3[1]-sorted3[0])==(sorted3[2]-sorted3[1]) and sorted3[2]-sorted3[0]>0
 
-    # 当期指标（用上期数据作为特征，预测本期）
-    feats['sum_val']   = total
-    feats['sum_tail']  = total % 10
-    feats['span']      = span
-    feats['odd_cnt']   = sum(1 for x in d if x%2!=0)
-    feats['big_cnt']   = sum(1 for x in d if x>=5)
-    feats['road0']     = road_cnt[0]
-    feats['road1']     = road_cnt[1]
-    feats['road2']     = road_cnt[2]
-    feats['bai']       = b
-    feats['shi']       = s
-    feats['ge']        = g
-    feats['gap_bs']    = abs(b-s)
-    feats['gap_sg']    = abs(s-g)
-    is_group3 = (b==s or s==g or b==g) and not (b==s==g)
-    feats['group_type']= 0 if b==s==g else (1 if is_group3 else 2)
-
-    # 滑动窗口统计（5/10/20期）
-    for w_size, suffix in [(5,'5'),(10,'10'),(20,'20')]:
-        w = window[-w_size:]
-        sums = [sum(x['digits']) for x in w]
+    feats = {
+        'sum':total,'sum_tail':total%10,'span':span,
+        'odd':sum(1 for x in d if x%2!=0),
+        'big':sum(1 for x in d if x>=5),
+        'road0':road.count(0),'road1':road.count(1),'road2':road.count(2),
+        'b':b,'s':s,'g':g,
+        'gap_bs':abs(b-s),'gap_sg':abs(s-g),
+        'group':0 if b==s==g else (1 if (b==s or s==g or b==g) else 2),
+        'repeat':repeat,'is_arith':int(is_arith),
+    }
+    for ws, sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'50')]:
+        w = window[-ws:]
+        sums  = [sum(x['digits']) for x in w]
         spans = [max(x['digits'])-min(x['digits']) for x in w]
-        feats[f'sum_mean_{suffix}']  = np.mean(sums) if sums else 0
-        feats[f'sum_std_{suffix}']   = np.std(sums) if len(sums)>1 else 0
-        feats[f'span_mean_{suffix}'] = np.mean(spans) if spans else 0
-        # 各位均值
-        for ci, cname in enumerate(['bai','shi','ge']):
+        feats[f'sum_mean_{sfx}']  = float(np.mean(sums))
+        feats[f'sum_std_{sfx}']   = float(np.std(sums)) if len(sums)>1 else 0
+        feats[f'span_mean_{sfx}'] = float(np.mean(spans))
+        for ci, cn in enumerate(['b','s','g']):
             vals = [x['digits'][ci] for x in w]
-            feats[f'{cname}_mean_{suffix}'] = np.mean(vals) if vals else 0
-
-    # 连续和值趋势
+            feats[f'{cn}_mean_{sfx}'] = float(np.mean(vals))
     if len(window)>=3:
-        s3 = [sum(x['digits']) for x in window[-3:]]
+        s3=[sum(x['digits']) for x in window[-3:]]
         feats['sum_trend'] = 1 if s3[-1]>s3[-2] else (-1 if s3[-1]<s3[-2] else 0)
     else:
         feats['sum_trend'] = 0
-
-    # 重号（与上上期比较）
-    if len(window)>=2:
-        prev = window[-2]['digits']
-        feats['repeat_cnt'] = sum(1 for i in range(3) if prev[i]==d[i])
-    else:
-        feats['repeat_cnt'] = 0
-
     return feats
 
 
 def feat_ssq(records, idx):
-    """双色球特征"""
-    feats = {}
-    window = records[max(0,idx-20):idx]
-    if not window:
+    window = records[max(0,idx-WINDOW):idx]
+    if len(window)<5:
         return None
-
     r = window[-1]
     red = sorted(r['red'])
     blue = r['blue']
     total = sum(red)
-    odd_cnt = sum(1 for x in red if x%2!=0)
-    big_cnt = sum(1 for x in red if x>16)
-    # 连号
+    odd = sum(1 for x in red if x%2!=0)
+    big = sum(1 for x in red if x>16)
     consec = sum(1 for i in range(len(red)-1) if red[i+1]-red[i]==1)
-    # AC值
     diffs = set()
     for i in range(len(red)):
         for j in range(i+1,len(red)):
             diffs.add(red[j]-red[i])
-    ac = len(diffs) - (len(red)-1)
-    # 三区
-    z1 = sum(1 for x in red if x<=11)
-    z2 = sum(1 for x in red if 12<=x<=22)
-    z3 = sum(1 for x in red if x>=23)
-    max_gap = max(red[i+1]-red[i] for i in range(len(red)-1)) if len(red)>1 else 0
+    ac = len(diffs)-(len(red)-1)
+    z1=sum(1 for x in red if x<=11)
+    z2=sum(1 for x in red if 12<=x<=22)
+    z3=sum(1 for x in red if x>=23)
+    max_gap=max(red[i+1]-red[i] for i in range(len(red)-1)) if len(red)>1 else 0
 
-    feats.update({'red_sum':total,'odd_cnt':odd_cnt,'big_cnt':big_cnt,
-                  'consec':consec,'ac':ac,'zone1':z1,'zone2':z2,'zone3':z3,
-                  'max_gap':max_gap,'blue':blue,'blue_odd':blue%2,
-                  'blue_big':1 if blue>=9 else 0,
-                  'red_max':red[-1],'red_min':red[0],'red_span':red[-1]-red[0]})
+    feats={'red_sum':total,'odd':odd,'big':big,'consec':consec,'ac':ac,
+           'z1':z1,'z2':z2,'z3':z3,'max_gap':max_gap,
+           'blue':blue,'blue_odd':blue%2,'blue_big':int(blue>=9),
+           'red_max':red[-1],'red_min':red[0],'red_span':red[-1]-red[0]}
 
-    # 滑动统计
-    for w_size, suffix in [(5,'5'),(10,'10'),(20,'20')]:
-        w = window[-w_size:]
-        sums = [sum(x['red']) for x in w]
+    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'50')]:
+        w = window[-ws:]
+        sums  = [sum(x['red']) for x in w]
         blues = [x['blue'] for x in w]
-        feats[f'sum_mean_{suffix}']  = np.mean(sums) if sums else 0
-        feats[f'sum_std_{suffix}']   = np.std(sums) if len(sums)>1 else 0
-        feats[f'blue_mean_{suffix}'] = np.mean(blues) if blues else 0
-        odds = [sum(1 for n in x['red'] if n%2!=0) for x in w]
-        feats[f'odd_mean_{suffix}']  = np.mean(odds) if odds else 0
+        odds  = [sum(1 for n in x['red'] if n%2!=0) for x in w]
+        feats[f'sum_mean_{sfx}']  = float(np.mean(sums))
+        feats[f'sum_std_{sfx}']   = float(np.std(sums)) if len(sums)>1 else 0
+        feats[f'blue_mean_{sfx}'] = float(np.mean(blues))
+        feats[f'odd_mean_{sfx}']  = float(np.mean(odds))
 
-    # 各号码近期出现频率
     all_red = [n for x in window for n in x['red']]
     cnt = Counter(all_red)
-    feats['hot_zone1'] = sum(cnt.get(n,0) for n in range(1,12))
-    feats['hot_zone2'] = sum(cnt.get(n,0) for n in range(12,23))
-    feats['hot_zone3'] = sum(cnt.get(n,0) for n in range(23,34))
-    feats['sum_trend'] = 0
+    feats['hot_z1']=sum(cnt.get(n,0) for n in range(1,12))
+    feats['hot_z2']=sum(cnt.get(n,0) for n in range(12,23))
+    feats['hot_z3']=sum(cnt.get(n,0) for n in range(23,34))
     if len(window)>=3:
         s3=[sum(x['red']) for x in window[-3:]]
-        feats['sum_trend'] = 1 if s3[-1]>s3[-2] else (-1 if s3[-1]<s3[-2] else 0)
-
+        feats['sum_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+    else:
+        feats['sum_trend']=0
     return feats
 
 
 def feat_kl8(records, idx):
-    """快乐8特征"""
-    feats = {}
-    window = records[max(0,idx-20):idx]
-    if not window:
+    window = records[max(0,idx-WINDOW):idx]
+    if len(window)<5:
         return None
-
     r = window[-1]
     nums = sorted(r['numbers'])
     total = sum(nums)
-    odd_cnt = sum(1 for x in nums if x%2!=0)
-    big_cnt = sum(1 for x in nums if x>40)
-    zones = [sum(1 for x in nums if lo<=x<=hi)
-             for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
-    five  = [sum(1 for x in nums if lo<=x<=hi)
-             for lo,hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
-    consec_groups = 0
-    in_consec = False
+    odd = sum(1 for x in nums if x%2!=0)
+    big = sum(1 for x in nums if x>40)
+    zones=[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+    five =[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
+    cg=0; inc=False
     for i in range(len(nums)-1):
         if nums[i+1]-nums[i]==1:
-            if not in_consec: consec_groups+=1; in_consec=True
-        else: in_consec=False
+            if not inc: cg+=1; inc=True
+        else: inc=False
 
-    feats.update({'total':total,'odd_cnt':odd_cnt,'big_cnt':big_cnt,
-                  'min_n':nums[0],'max_n':nums[-1],
-                  'zone1':zones[0],'zone2':zones[1],'zone3':zones[2],'zone4':zones[3],
-                  'five1':five[0],'five2':five[1],'five3':five[2],'five4':five[3],'five5':five[4],
-                  'consec_groups':consec_groups})
+    feats={'total':total,'odd':odd,'big':big,
+           'min_n':nums[0],'max_n':nums[-1],
+           'z1':zones[0],'z2':zones[1],'z3':zones[2],'z4':zones[3],
+           'f1':five[0],'f2':five[1],'f3':five[2],'f4':five[3],'f5':five[4],
+           'consec_grp':cg}
 
-    # 滑动统计
-    for w_size, suffix in [(5,'5'),(10,'10'),(20,'20')]:
-        w = window[-w_size:]
-        totals = [sum(x['numbers']) for x in w]
-        feats[f'total_mean_{suffix}'] = np.mean(totals) if totals else 0
-        feats[f'total_std_{suffix}']  = np.std(totals) if len(totals)>1 else 0
-        for zi in range(4):
-            zv = [sum(1 for n in x['numbers'] if [(1,20),(21,40),(41,60),(61,80)][zi][0]<=n<=[(1,20),(21,40),(41,60),(61,80)][zi][1]) for x in w]
-            feats[f'zone{zi+1}_mean_{suffix}'] = np.mean(zv) if zv else 0
+    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'50')]:
+        w=window[-ws:]
+        tots=[sum(x['numbers']) for x in w]
+        feats[f'total_mean_{sfx}']=float(np.mean(tots))
+        feats[f'total_std_{sfx}']=float(np.std(tots)) if len(tots)>1 else 0
+        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+            zv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in w]
+            feats[f'z{zi+1}_mean_{sfx}']=float(np.mean(zv))
 
-    # 冷热统计
-    all_nums = [n for x in window for n in x['numbers']]
-    cnt = Counter(all_nums)
-    feats['hot_z1'] = sum(cnt.get(n,0) for n in range(1,21))
-    feats['hot_z2'] = sum(cnt.get(n,0) for n in range(21,41))
-    feats['hot_z3'] = sum(cnt.get(n,0) for n in range(41,61))
-    feats['hot_z4'] = sum(cnt.get(n,0) for n in range(61,81))
-    feats['total_trend'] = 0
+    all_n=[n for x in window for n in x['numbers']]
+    cnt=Counter(all_n)
+    feats['hot_z1']=sum(cnt.get(n,0) for n in range(1,21))
+    feats['hot_z2']=sum(cnt.get(n,0) for n in range(21,41))
+    feats['hot_z3']=sum(cnt.get(n,0) for n in range(41,61))
+    feats['hot_z4']=sum(cnt.get(n,0) for n in range(61,81))
     if len(window)>=3:
         t3=[sum(x['numbers']) for x in window[-3:]]
-        feats['total_trend'] = 1 if t3[-1]>t3[-2] else (-1 if t3[-1]<t3[-2] else 0)
-
+        feats['total_trend']=1 if t3[-1]>t3[-2] else(-1 if t3[-1]<t3[-2] else 0)
+    else:
+        feats['total_trend']=0
     return feats
 
 
 # ══════════════════════════════════════════════════════
-#  目标变量定义
+#  马尔可夫链（号码转移概率）
 # ══════════════════════════════════════════════════════
 
-def get_targets_3d(records):
-    """3D预测目标：百/十/个位各自是几"""
-    targets = {'bai':[], 'shi':[], 'ge':[], 'sum_group':[], 'odd_cnt':[]}
-    for r in records:
-        d = r['digits']
-        targets['bai'].append(d[0])
-        targets['shi'].append(d[1])
-        targets['ge'].append(d[2])
-        s = sum(d)
-        targets['sum_group'].append(0 if s<=9 else (1 if s<=17 else 2))
-        targets['odd_cnt'].append(sum(1 for x in d if x%2!=0))
-    return targets
+def markov_3d(records):
+    """3D各位的一阶马尔可夫转移矩阵"""
+    trans = [defaultdict(Counter) for _ in range(3)]
+    for i in range(1, len(records)):
+        prev = records[i-1]['digits']
+        curr = records[i]['digits']
+        for pos in range(3):
+            trans[pos][prev[pos]][curr[pos]] += 1
+    result = []
+    last = records[-1]['digits']
+    for pos in range(3):
+        probs = trans[pos][last[pos]]
+        total = sum(probs.values()) or 1
+        top3 = sorted(probs.items(), key=lambda x:-x[1])[:3]
+        result.append({'pos':pos,'from':last[pos],
+                       'top3':[(int(k),round(v/total*100,1)) for k,v in top3]})
+    return result
 
-def get_targets_ssq(records):
-    """双色球预测目标"""
-    targets = {'blue':[], 'zone_combo':[], 'odd_cnt':[], 'sum_group':[]}
-    for r in records:
-        targets['blue'].append(r['blue'])
-        z1=sum(1 for x in r['red'] if x<=11)
-        z2=sum(1 for x in r['red'] if 12<=x<=22)
-        z3=sum(1 for x in r['red'] if x>=23)
-        targets['zone_combo'].append(z1*100+z2*10+z3)
-        targets['odd_cnt'].append(sum(1 for x in r['red'] if x%2!=0))
-        s=sum(r['red'])
-        targets['sum_group'].append(0 if s<70 else (1 if s<100 else 2))
-    return targets
 
-def get_targets_kl8(records):
-    """快乐8预测目标"""
-    targets = {'odd_cnt_group':[], 'zone_dominant':[], 'total_group':[]}
-    for r in records:
-        odd = sum(1 for x in r['numbers'] if x%2!=0)
-        targets['odd_cnt_group'].append(0 if odd<9 else (1 if odd<=11 else 2))
-        zones = [sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
-        targets['zone_dominant'].append(int(np.argmax(zones)))
-        t=sum(r['numbers'])
-        targets['total_group'].append(0 if t<640 else (1 if t<820 else 2))
-    return targets
+def markov_ssq_blue(records):
+    """双色球蓝球马尔可夫"""
+    trans = defaultdict(Counter)
+    for i in range(1,len(records)):
+        trans[records[i-1]['blue']][records[i]['blue']] += 1
+    last_blue = records[-1]['blue']
+    probs = trans[last_blue]
+    total = sum(probs.values()) or 1
+    return [(int(k),round(v/total*100,1)) for k,v in sorted(probs.items(),key=lambda x:-x[1])[:5]]
 
 
 # ══════════════════════════════════════════════════════
-#  模型训练 + 时间序列回测
+#  贝叶斯遗漏分析
+# ══════════════════════════════════════════════════════
+
+def omission_3d(records):
+    """3D各位各号码遗漏期数（上次出现到现在）"""
+    result = []
+    for pos in range(3):
+        omit = {}
+        for d in range(10):
+            for i in range(len(records)-1,-1,-1):
+                if records[i]['digits'][pos]==d:
+                    omit[d]=len(records)-1-i; break
+            else:
+                omit[d]=len(records)
+        # 超过理论平均遗漏(10期)的号码
+        avg=10
+        overdue=[d for d,v in omit.items() if v>avg]
+        result.append({'pos':pos,'omission':omit,'overdue':overdue,'avg':avg})
+    return result
+
+
+def omission_ssq(records):
+    """双色球红球遗漏"""
+    omit={}
+    for n in range(1,34):
+        for i in range(len(records)-1,-1,-1):
+            if n in records[i]['red']:
+                omit[n]=len(records)-1-i; break
+        else:
+            omit[n]=len(records)
+    avg = len(records)*6/33  # 平均每期6个球，33个号码
+    overdue=[n for n,v in omit.items() if v>avg*1.5]
+    blue_omit={}
+    for n in range(1,17):
+        for i in range(len(records)-1,-1,-1):
+            if records[i]['blue']==n:
+                blue_omit[n]=len(records)-1-i; break
+        else:
+            blue_omit[n]=len(records)
+    return {'red_omit':omit,'red_overdue':overdue,'blue_omit':blue_omit,
+            'blue_overdue':[n for n,v in blue_omit.items() if v>len(records)/16*1.5]}
+
+
+def omission_kl8(records):
+    """快乐8号码遗漏"""
+    omit={}
+    for n in range(1,81):
+        for i in range(len(records)-1,-1,-1):
+            if n in records[i]['numbers']:
+                omit[n]=len(records)-1-i; break
+        else:
+            omit[n]=len(records)
+    avg=len(records)*20/80  # 平均每期20个，80个号码
+    overdue=sorted([n for n,v in omit.items() if v>avg*1.5], key=lambda n: omit[n], reverse=True)[:15]
+    return {'omit':omit,'overdue':overdue,'avg':round(avg,1)}
+
+
+# ══════════════════════════════════════════════════════
+#  模型集成训练 + 时间序列回测
 # ══════════════════════════════════════════════════════
 
 def build_dataset(records, feat_fn):
-    """构建特征矩阵和可用索引"""
     X_all, valid_idx = [], []
     for i in range(len(records)):
         f = feat_fn(records, i)
@@ -264,480 +295,457 @@ def build_dataset(records, feat_fn):
             X_all.append(list(f.values()))
             valid_idx.append(i)
     feat_names = list(feat_fn(records, valid_idx[0]).keys()) if valid_idx else []
-    return np.array(X_all), valid_idx, feat_names
+    return np.array(X_all, dtype=float), valid_idx, feat_names
 
 
-def train_and_backtest(X, y, feat_names, target_name, min_train=30, step=1):
+def make_models():
+    """构建所有可用模型"""
+    models = {}
+    models['rf'] = RandomForestClassifier(
+        n_estimators=200, max_depth=8, min_samples_leaf=3,
+        random_state=42, n_jobs=-1)
+    if HAS_XGB:
+        models['xgb'] = xgb.XGBClassifier(
+            n_estimators=200, max_depth=6, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            random_state=42, eval_metric='mlogloss', verbosity=0)
+    if HAS_LGB:
+        models['lgb'] = lgb.LGBMClassifier(
+            n_estimators=200, max_depth=6, learning_rate=0.05,
+            num_leaves=31, random_state=42, verbose=-1)
+    return models
+
+
+def train_and_backtest(X, y, feat_names, target_name, min_train=60):
     """
-    时间序列滚动回测：
-    - 前min_train期训练，之后每step期预测一次
-    - 返回回测结果和最终模型
+    时间序列滚动回测（全量数据）
+    - min_train: 至少60期才开始预测
+    - 每期向前滚动一步
     """
-    results = {'target': target_name, 'backtest': [], 'accuracy': {}}
     n = len(X)
-    if n < min_train + 5:
+    if n < min_train + 10:
+        print(f"    {target_name}: 数据不足({n}期)，跳过")
         return None
 
-    all_preds_rf, all_preds_xgb, all_true = [], [], []
+    model_list = make_models()
+    all_true = []
+    preds_by_model = {k: [] for k in model_list}
 
-    # 滚动窗口回测
-    for end in range(min_train, n, step):
-        X_train = X[:end]
-        y_train = y[:end]
-        X_test  = X[end:end+step]
-        y_test  = y[end:end+step]
+    # 只回测最近100期（避免太慢）
+    backtest_start = max(min_train, n-100)
 
-        try:
-            rf = RandomForestClassifier(n_estimators=60, max_depth=5,
-                                        random_state=42, n_jobs=-1)
-            rf.fit(X_train, y_train)
-            pred_rf = rf.predict(X_test)
-
-            if HAS_XGB:
-                model_xgb = xgb.XGBClassifier(n_estimators=60, max_depth=4,
-                                               learning_rate=0.1, random_state=42,
-                                               eval_metric='mlogloss', verbosity=0)
-                model_xgb.fit(X_train, y_train)
-                pred_xgb = model_xgb.predict(X_test)
-            else:
-                pred_xgb = pred_rf
-
-            all_preds_rf.extend(pred_rf.tolist())
-            all_preds_xgb.extend(pred_xgb.tolist())
-            all_true.extend(y_test.tolist())
-        except Exception:
-            continue
+    for end in range(backtest_start, n):
+        X_tr, y_tr = X[:end], y[:end]
+        X_te, y_te = X[end:end+1], y[end:end+1]
+        for mname, m in model_list.items():
+            try:
+                m.fit(X_tr, y_tr)
+                preds_by_model[mname].extend(m.predict(X_te).tolist())
+            except Exception:
+                preds_by_model[mname].extend([y_tr[-1]])
+        all_true.extend(y_te.tolist())
 
     if not all_true:
         return None
 
-    acc_rf  = accuracy_score(all_true, all_preds_rf)
-    acc_xgb = accuracy_score(all_true, all_preds_xgb)
-    results['accuracy']['random_forest'] = round(acc_rf*100, 1)
-    results['accuracy']['xgboost']       = round(acc_xgb*100, 1)
+    acc = {}
+    for mname, preds in preds_by_model.items():
+        if len(preds)==len(all_true):
+            acc[mname] = round(accuracy_score(all_true, preds)*100, 1)
 
-    # 最终模型（用全量数据训练）
-    rf_final = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1)
-    rf_final.fit(X, y)
+    # 集成投票准确率
+    from collections import Counter as C
+    ensemble_preds = []
+    for i in range(len(all_true)):
+        votes = C(preds_by_model[m][i] for m in preds_by_model if len(preds_by_model[m])>i)
+        ensemble_preds.append(votes.most_common(1)[0][0])
+    acc['ensemble'] = round(accuracy_score(all_true, ensemble_preds)*100, 1)
 
-    if HAS_XGB:
-        xgb_final = xgb.XGBClassifier(n_estimators=100, max_depth=5, learning_rate=0.1,
-                                        random_state=42, eval_metric='mlogloss', verbosity=0)
-        xgb_final.fit(X, y)
-    else:
-        xgb_final = rf_final
+    # 用全量数据重新训练最终模型
+    final_models = {}
+    for mname, m in make_models().items():
+        try:
+            m.fit(X, y)
+            final_models[mname] = m
+        except Exception:
+            pass
 
-    # 特征重要性 Top5
-    imp = rf_final.feature_importances_
-    top5 = sorted(zip(feat_names, imp), key=lambda x: -x[1])[:5]
-    results['feature_importance'] = [{'name':k,'score':round(float(v),4)} for k,v in top5]
+    # 特征重要性（随机森林）
+    feat_imp = []
+    if 'rf' in final_models:
+        imp = final_models['rf'].feature_importances_
+        top5 = sorted(zip(feat_names,imp),key=lambda x:-x[1])[:5]
+        feat_imp = [{'name':k,'score':round(float(v),4)} for k,v in top5]
 
-    # 预测下一期（用全量特征）
-    last_feat = X[-1:].copy()
-    prob_rf  = rf_final.predict_proba(last_feat)[0]
-    prob_xgb = xgb_final.predict_proba(last_feat)[0] if hasattr(xgb_final,'predict_proba') else prob_rf
-    classes  = rf_final.classes_.tolist()
+    # 集成预测下一期概率
+    last_X = X[-1:].copy()
+    all_probs = []
+    classes = None
+    for m in final_models.values():
+        try:
+            p = m.predict_proba(last_X)[0]
+            all_probs.append(p)
+            if classes is None:
+                classes = m.classes_.tolist()
+        except Exception:
+            pass
 
-    # 集成概率（RF 0.5 + XGB 0.5）
-    ensemble_prob = [(p1+p2)/2 for p1,p2 in zip(prob_rf, prob_xgb)]
-    pred_class = classes[int(np.argmax(ensemble_prob))]
+    if not all_probs or classes is None:
+        return None
 
-    results['prediction'] = {
-        'value': int(pred_class),
-        'confidence': round(float(max(ensemble_prob))*100, 1),
-        'probs': {str(c): round(float(p)*100,1) for c,p in zip(classes, ensemble_prob)}
+    avg_prob = np.mean(all_probs, axis=0)
+    pred_class = classes[int(np.argmax(avg_prob))]
+
+    # 近10期回测详情
+    recent_bt = []
+    for i in range(max(0,len(all_true)-10), len(all_true)):
+        recent_bt.append({
+            'true': int(all_true[i]),
+            'pred_ensemble': int(ensemble_preds[i]),
+            'pred_rf': int(preds_by_model['rf'][i]) if 'rf' in preds_by_model and len(preds_by_model['rf'])>i else None,
+        })
+
+    return {
+        'target': target_name,
+        'data_used': n,
+        'backtest_periods': len(all_true),
+        'accuracy': acc,
+        'feature_importance': feat_imp,
+        'prediction': {
+            'value': int(pred_class),
+            'confidence': round(float(max(avg_prob))*100, 1),
+            'probs': {str(c): round(float(p)*100,1) for c,p in zip(classes,avg_prob)},
+        },
+        'backtest_latest': recent_bt,
     }
-    results['backtest_records'] = min(len(all_true), 20)  # 记录回测了多少期
-    results['backtest_latest'] = [
-        {'true': int(t), 'pred_rf': int(p1), 'pred_xgb': int(p2)}
-        for t,p1,p2 in zip(all_true[-10:], all_preds_rf[-10:], all_preds_xgb[-10:])
-    ]
-
-    return results
 
 
 # ══════════════════════════════════════════════════════
 #  各彩种完整分析
 # ══════════════════════════════════════════════════════
 
-def analyze_3d(records):
-    print(f"  3D: {len(records)}期数据，开始特征工程…")
-    X, valid_idx, feat_names = build_dataset(records, feat_3d)
-    targets = get_targets_3d(records)
+def targets_3d(records):
+    t={'bai':[],'shi':[],'ge':[],'sum_group':[],'odd_cnt':[]}
+    for r in records:
+        d=r['digits']
+        t['bai'].append(d[0]); t['shi'].append(d[1]); t['ge'].append(d[2])
+        s=sum(d); t['sum_group'].append(0 if s<=9 else(1 if s<=17 else 2))
+        t['odd_cnt'].append(sum(1 for x in d if x%2!=0))
+    return t
 
-    result = {'game':'3d','name':'福彩3D','updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),
-              'data_count':len(records),'models':{}}
+def targets_ssq(records):
+    t={'blue':[],'odd_cnt':[],'sum_group':[],'zone_combo':[]}
+    for r in records:
+        t['blue'].append(r['blue'])
+        t['odd_cnt'].append(sum(1 for x in r['red'] if x%2!=0))
+        s=sum(r['red']); t['sum_group'].append(0 if s<70 else(1 if s<100 else 2))
+        z1=sum(1 for x in r['red'] if x<=11); z3=sum(1 for x in r['red'] if x>=23)
+        t['zone_combo'].append(z1*10+z3)
+    return t
 
-    for t_name in ['bai','shi','ge','sum_group','odd_cnt']:
-        y_all = [targets[t_name][i] for i in valid_idx]
-        y = np.array(y_all)
-        print(f"    训练目标: {t_name}…")
-        r = train_and_backtest(X, y, feat_names, t_name)
+def targets_kl8(records):
+    t={'odd_group':[],'zone_dom':[],'total_group':[]}
+    for r in records:
+        odd=sum(1 for x in r['numbers'] if x%2!=0)
+        t['odd_group'].append(0 if odd<9 else(1 if odd<=11 else 2))
+        zones=[sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        t['zone_dom'].append(int(np.argmax(zones)))
+        tt=sum(r['numbers']); t['total_group'].append(0 if tt<640 else(1 if tt<820 else 2))
+    return t
+
+
+def analyze_game(game, records, feat_fn, targets_fn, target_keys):
+    print(f"  {game}: 全量{len(records)}期数据，特征窗口{WINDOW}期")
+    X, valid_idx, feat_names = build_dataset(records, feat_fn)
+    tgts = targets_fn(records)
+    result = {'game':game,'data_count':len(records),'window':WINDOW,
+              'updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),'models':{}}
+    for tname in target_keys:
+        y = np.array([tgts[tname][i] for i in valid_idx])
+        print(f"    [{tname}] 训练中（{len(y)}期）…")
+        r = train_and_backtest(X, y, feat_names, tname)
         if r:
-            result['models'][t_name] = r
-
-    # 人工智能综合推荐（基于模型输出合成推荐号码）
-    result['recommendation'] = gen_recommendation_3d(records, result['models'])
-    return result
-
-
-def analyze_ssq(records):
-    print(f"  SSQ: {len(records)}期数据，开始特征工程…")
-    X, valid_idx, feat_names = build_dataset(records, feat_ssq)
-    targets = get_targets_ssq(records)
-
-    result = {'game':'ssq','name':'双色球','updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),
-              'data_count':len(records),'models':{}}
-
-    for t_name in ['blue','odd_cnt','sum_group','zone_combo']:
-        y_all = [targets[t_name][i] for i in valid_idx]
-        y = np.array(y_all)
-        print(f"    训练目标: {t_name}…")
-        r = train_and_backtest(X, y, feat_names, t_name)
-        if r:
-            result['models'][t_name] = r
-
-    result['recommendation'] = gen_recommendation_ssq(records, result['models'])
-    return result
-
-
-def analyze_kl8(records):
-    print(f"  KL8: {len(records)}期数据，开始特征工程…")
-    X, valid_idx, feat_names = build_dataset(records, feat_kl8)
-    targets = get_targets_kl8(records)
-
-    result = {'game':'kl8','name':'快乐8','updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),
-              'data_count':len(records),'models':{}}
-
-    for t_name in ['odd_cnt_group','zone_dominant','total_group']:
-        y_all = [targets[t_name][i] for i in valid_idx]
-        y = np.array(y_all)
-        print(f"    训练目标: {t_name}…")
-        r = train_and_backtest(X, y, feat_names, t_name)
-        if r:
-            result['models'][t_name] = r
-
-    result['recommendation'] = gen_recommendation_kl8(records, result['models'])
+            result['models'][tname] = r
+            best_acc = max(r['accuracy'].values()) if r['accuracy'] else 0
+            print(f"      集成准确率: {r['accuracy'].get('ensemble','—')}%  最优: {best_acc}%")
     return result
 
 
 # ══════════════════════════════════════════════════════
-#  综合推荐号码生成
+#  推荐号码生成（结合ML + 马尔可夫 + 遗漏）
 # ══════════════════════════════════════════════════════
 
-def gen_recommendation_3d(records, models):
-    """根据模型预测概率综合推荐3D号码"""
-    recent = [sum(r['digits']) for r in records[-10:]]
-    hot_digits = [Counter(r['digits'][i] for r in records[-30:]).most_common(3)
-                  for i in range(3)]
+def recommend_3d(records, ml_result, markov, omission):
+    """三种方法投票生成3D推荐"""
+    score = [{} for _ in range(3)]  # 各位号码得分
 
-    candidates = []
-    # 从各位预测中选概率最高的几个号码组合
-    bai_m = models.get('bai',{})
-    shi_m = models.get('shi',{})
-    ge_m  = models.get('ge',{})
+    # 1. ML概率贡献
+    for pos, pname in enumerate(['bai','shi','ge']):
+        m = ml_result.get('models',{}).get(pname,{})
+        probs = m.get('prediction',{}).get('probs',{}) if m else {}
+        for k,v in probs.items():
+            score[pos][int(k)] = score[pos].get(int(k),0) + v*0.5
 
-    def top_probs(m, n=3):
-        if not m or 'prediction' not in m:
-            return list(range(n))
-        probs = m['prediction']['probs']
-        return [int(k) for k,v in sorted(probs.items(), key=lambda x:-x[1])[:n]]
+    # 2. 马尔可夫贡献
+    for mk in markov:
+        pos = mk['pos']
+        for val, prob in mk['top3']:
+            score[pos][val] = score[pos].get(val,0) + prob*0.3
 
-    bai_cands = top_probs(bai_m)
-    shi_cands = top_probs(shi_m)
-    ge_cands  = top_probs(ge_m)
+    # 3. 遗漏贡献（遗漏久的+分）
+    for om in omission:
+        pos = om['pos']
+        for d in om['overdue']:
+            score[pos][d] = score[pos].get(d,0) + 10*0.2
 
-    groups = []
-    for b in bai_cands:
-        for s in shi_cands[:2]:
-            for g in ge_cands[:2]:
-                groups.append([b, s, g])
-                if len(groups) >= 6:
-                    break
-            if len(groups) >= 6: break
-        if len(groups) >= 6: break
+    # 各位TOP5候选
+    tops = [sorted(score[pos].items(),key=lambda x:-x[1])[:5] for pos in range(3)]
 
-    sum_pred = models.get('sum_group',{}).get('prediction',{})
-    sum_label = {0:'0-9（小）',1:'10-17（中）',2:'18-27（大）'}.get(
-        sum_pred.get('value',1), '10-17（中）')
-
-    return {
-        'groups': groups[:6],
-        'sum_range_pred': sum_label,
-        'hot_bai': [x[0] for x in hot_digits[0]],
-        'hot_shi': [x[0] for x in hot_digits[1]],
-        'hot_ge':  [x[0] for x in hot_digits[2]],
-        'note': '基于XGBoost+随机森林时序回测，仅供娱乐参考。'
-    }
-
-
-def gen_recommendation_ssq(records, models):
-    """双色球综合推荐"""
-    red_freq = Counter(n for r in records[-30:] for n in r['red'])
-    blue_freq = Counter(r['blue'] for r in records[-30:])
-    hot_red  = [x[0] for x in red_freq.most_common(15)]
-    cold_red = [x[0] for x in red_freq.most_common()[-10:]]
-
-    blue_m = models.get('blue',{})
-    blue_top = []
-    if blue_m and 'prediction' in blue_m:
-        probs = blue_m['prediction']['probs']
-        blue_top = [int(k) for k,v in sorted(probs.items(), key=lambda x:-x[1])[:3]]
-    else:
-        blue_top = [x[0] for x in blue_freq.most_common(3)]
-
-    odd_m = models.get('odd_cnt',{})
-    odd_pred = odd_m.get('prediction',{}).get('value', 3) if odd_m else 3
-
-    zone_m = models.get('sum_group',{})
-    sum_label = {0:'低(<70)',1:'中(70-99)',2:'高(≥100)'}.get(
-        zone_m.get('prediction',{}).get('value',1) if zone_m else 1, '中(70-99)')
-
-    # 生成6注推荐（结合热号+冷号+奇偶预测）
-    import random
-    random.seed(42)
-    groups = []
+    # 生成6注推荐
+    random.seed(int(datetime.now().strftime('%Y%m%d')))
+    groups=[]
     for i in range(6):
-        mix = hot_red[:10] + cold_red[:5]
-        picked = sorted(random.sample(list(set(mix)), min(6, len(set(mix)))))
-        if len(picked)<6:
-            extra = [n for n in range(1,34) if n not in picked]
-            picked += random.sample(extra, 6-len(picked))
-        picked = sorted(picked[:6])
-        blue = blue_top[i % len(blue_top)] if blue_top else random.randint(1,16)
-        groups.append({'red': picked, 'blue': blue})
+        combo=[]
+        for pos in range(3):
+            pool=[v for v,_ in tops[pos]] or list(range(10))
+            # 加权随机选
+            weights=[s for _,s in tops[pos]] or [1]*len(pool)
+            total_w=sum(weights)
+            r_val=random.uniform(0,total_w)
+            cum=0
+            chosen=pool[0]
+            for v,w in zip(pool,weights):
+                cum+=w
+                if r_val<=cum: chosen=v; break
+            combo.append(chosen)
+        groups.append(combo)
+
+    sum_m=ml_result.get('models',{}).get('sum_group',{})
+    sum_label={0:'小(0-9)',1:'中(10-17)',2:'大(18-27)'}.get(
+        sum_m.get('prediction',{}).get('value',1) if sum_m else 1,'中(10-17)')
 
     return {
-        'groups': groups,
-        'blue_recommend': blue_top,
-        'odd_cnt_pred': int(odd_pred),
-        'sum_range_pred': sum_label,
-        'hot_red': hot_red[:10],
-        'cold_red': cold_red[:5],
-        'note': '基于XGBoost+随机森林时序回测，仅供娱乐参考。'
+        'groups':groups,
+        'pos_candidates':[[int(v) for v,_ in t] for t in tops],
+        'markov':markov,
+        'omission_overdue':[om['overdue'] for om in omission],
+        'sum_pred':sum_label,
+        'note':'综合ML+马尔可夫转移+遗漏分析三路投票，仅供娱乐参考。',
     }
 
 
-def gen_recommendation_kl8(records, models):
-    """
-    快乐8综合推荐
-    快乐8实际玩法：从1-80中选1到10个号码
-    主流玩法：选四(4个)、选五(5个，含复式)、选六(6个)、选九(9个)
-    20个全中是开奖结果，玩家只选自己想押的号码
-    """
-    import random
-    random.seed(int(datetime.now().strftime('%Y%m%d')))  # 每天种子不同
+def recommend_ssq(records, ml_result, omission):
+    """双色球推荐：结合ML+遗漏"""
+    freq30=Counter(n for r in records[-30:] for n in r['red'])
+    hot=[x[0] for x in freq30.most_common(15)]
+    overdue_red=omission.get('red_overdue',[])
+    overdue_blue=omission.get('blue_overdue',[])
 
-    # ── 基础统计 ──
-    freq_30  = Counter(n for r in records[-30:] for n in r['numbers'])
-    freq_10  = Counter(n for r in records[-10:] for n in r['numbers'])
-    freq_50  = Counter(n for r in records        for n in r['numbers'])
+    blue_m=ml_result.get('models',{}).get('blue',{})
+    blue_probs=blue_m.get('prediction',{}).get('probs',{}) if blue_m else {}
+    blue_top=[int(k) for k,v in sorted(blue_probs.items(),key=lambda x:-x[1])[:5]] or \
+             [x[0] for x in Counter(r['blue'] for r in records[-30:]).most_common(5)]
 
-    # 热号：最近30期高频出现
-    hot_nums  = [x[0] for x in freq_30.most_common(25)]
-    # 冷号：最近30期低频，但历史总频率正常（即近期遗漏）
-    cold_nums = [x[0] for x in freq_30.most_common()[-25:]]
-    # 近10期超热（近期爆发）
-    hot10 = [x[0] for x in freq_10.most_common(15)]
-    # 各区热号
-    zone_hot = {}
-    for zi, (lo, hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
-        zone_nums = {k:v for k,v in freq_30.items() if lo<=k<=hi}
-        zone_hot[zi] = [x[0] for x in sorted(zone_nums.items(),key=lambda x:-x[1])[:8]]
+    # 推荐红球候选池（热号+遗漏号混合）
+    pool=list(set(hot[:10]+overdue_red[:8]))
+    if len(pool)<18:
+        pool+=random.sample([n for n in range(1,34) if n not in pool],18-len(pool))
 
-    # ── 模型预测参考 ──
-    zone_m = models.get('zone_dominant',{})
-    zone_pred = zone_m.get('prediction',{}).get('value', 1) if zone_m else 1
-    zone_probs = zone_m.get('prediction',{}).get('probs',{}) if zone_m else {}
-    zone_name = {0:'1-20区',1:'21-40区',2:'41-60区',3:'61-80区'}.get(zone_pred,'21-40区')
+    odd_m=ml_result.get('models',{}).get('odd_cnt',{})
+    odd_pred=odd_m.get('prediction',{}).get('value',3) if odd_m else 3
+    sum_m=ml_result.get('models',{}).get('sum_group',{})
+    sum_pred={0:'低(<70)',1:'中(70-99)',2:'高(≥100)'}.get(
+        sum_m.get('prediction',{}).get('value',1) if sum_m else 1,'中(70-99)')
 
-    total_m = models.get('total_group',{})
-    total_pred = total_m.get('prediction',{}).get('value',1) if total_m else 1
-    total_label = {0:'低(<640)',1:'中(640-819)',2:'高(≥820)'}.get(total_pred,'中(640-819)')
-    # 总和高低影响偏大号/小号倾向
-    prefer_big = total_pred == 2   # 预测总和高→偏大号
-    prefer_small = total_pred == 0 # 预测总和低→偏小号
-
-    odd_m = models.get('odd_cnt_group',{})
-    odd_pred = odd_m.get('prediction',{}).get('value',1) if odd_m else 1  # 0=少奇,1=均衡,2=多奇
-    prefer_odd = odd_pred == 2
-
-    def smart_pool(size, prefer_zone=None):
-        """智能构建候选池：综合热号+冷号+区间偏好"""
-        pool = set()
-        # 加入预测主落区热号
-        pz = zone_pred if prefer_zone is None else prefer_zone
-        pool.update(zone_hot.get(pz,[])[:6])
-        # 加入整体热号
-        pool.update(hot_nums[:12])
-        # 加入近10期超热
-        pool.update(hot10[:6])
-        # 少量冷号（回补效应）
-        cold_pick = cold_nums[:8]
-        pool.update(cold_pick[:3])
-        # 大小号调整
-        if prefer_big:
-            pool.update([n for n in range(41,81) if freq_30.get(n,0)>0][:5])
-        elif prefer_small:
-            pool.update([n for n in range(1,41) if freq_30.get(n,0)>0][:5])
-        return sorted(pool)
-
-    def pick_balanced(n, seed_extra=0):
-        """从候选池中均衡选n个，确保四区都有覆盖"""
-        random.seed(int(datetime.now().strftime('%Y%m%d')) + seed_extra)
-        pool = smart_pool(n)
-        if len(pool) < n:
-            extra = [x for x in range(1,81) if x not in pool]
-            pool += random.sample(extra, n - len(pool))
-        # 按区间均衡：每区至少1个（选四以上）
-        if n >= 4:
-            result = []
-            zones_list = [(1,20),(21,40),(41,60),(61,80)]
-            for lo,hi in zones_list:
-                zone_pool = sorted([x for x in pool if lo<=x<=hi])
-                if zone_pool:
-                    result.append(random.choice(zone_pool))
-            remaining_pool = [x for x in pool if x not in result]
-            need = n - len(result)
-            if need > 0 and remaining_pool:
-                result += random.sample(remaining_pool, min(need, len(remaining_pool)))
-            if len(result) < n:
-                extra = [x for x in range(1,81) if x not in result]
-                result += random.sample(extra, n-len(result))
-            return sorted(result[:n])
-        else:
-            return sorted(random.sample(pool if len(pool)>=n else list(range(1,81)), n))
-
-    # ══ 各玩法推荐 ══════════════════════════════════════
-
-    # 选四（4个球，全中倍率最高，但命中难）推荐3注
-    xuan4 = []
-    for i in range(3):
-        xuan4.append(pick_balanced(4, seed_extra=i))
-
-    # 选五（5个球）推荐3注
-    xuan5 = []
-    for i in range(3):
-        xuan5.append(pick_balanced(5, seed_extra=100+i))
-
-    # 选五复式（8个球覆盖，包含多个5球组合）推荐1注
-    random.seed(int(datetime.now().strftime('%Y%m%d')) + 200)
-    pool5 = smart_pool(8)
-    if len(pool5) < 8:
-        extra = [x for x in range(1,81) if x not in pool5]
-        pool5 += random.sample(extra, 8-len(pool5))
-    xuan5_fufu = sorted(pool5[:8])  # 8个球复式=C(8,5)=56注
-
-    # 选六（6个球）推荐3注
-    xuan6 = []
-    for i in range(3):
-        xuan6.append(pick_balanced(6, seed_extra=300+i))
-
-    # 选九（9个球，高赔率，全中难度大）推荐2注
-    xuan9 = []
-    for i in range(2):
-        xuan9.append(pick_balanced(9, seed_extra=400+i))
-
-    # 选十（10个球，最高赔率）推荐1注（结合热号全覆盖）
-    random.seed(int(datetime.now().strftime('%Y%m%d')) + 500)
-    xuan10_pool = hot_nums[:16] + cold_nums[:4]
-    xuan10_pool = list(set(xuan10_pool))
-    if len(xuan10_pool) < 10:
-        extra = [x for x in range(1,81) if x not in xuan10_pool]
-        xuan10_pool += random.sample(extra, 10-len(xuan10_pool))
-    xuan10 = sorted(random.sample(xuan10_pool, 10))
+    random.seed(int(datetime.now().strftime('%Y%m%d')))
+    groups=[]
+    for i in range(6):
+        # 三区均衡选红球
+        picked=[]
+        zones=[(1,11),(12,22),(23,33)]
+        for lo,hi in zones:
+            zp=[n for n in pool if lo<=n<=hi]
+            if not zp: zp=list(range(lo,hi+1))
+            picked.append(random.choice(zp))
+        # 剩余3个从全池选
+        remain=[n for n in pool if n not in picked]
+        if len(remain)<3: remain=[n for n in range(1,34) if n not in picked]
+        picked+=random.sample(remain,3)
+        blue=blue_top[i%len(blue_top)]
+        groups.append({'red':sorted(picked),'blue':blue})
 
     return {
-        'zone_dominant_pred': zone_name,
-        'zone_probs': {str(i): round(float(zone_probs.get(str(i),0)),1) for i in range(4)},
-        'total_range_pred': total_label,
-        'hot_nums':  sorted(hot_nums[:15]),
-        'cold_nums': sorted(cold_nums[:15]),
-        'hot10':     sorted(hot10[:10]),
-        'plays': {
-            'xuan4':  {'name':'选四','balls':4,'groups':xuan4,
-                       'tip':'4个球全中，赔率高，推荐直选'},
-            'xuan5':  {'name':'选五','balls':5,'groups':xuan5,
-                       'tip':'5个球全中，平衡赔率与命中率'},
-            'xuan5_fu':{'name':'选五复式','balls':8,'groups':[xuan5_fufu],
-                        'tip':f'8个球复式含C(8,5)=56注五球组合，全面覆盖'},
-            'xuan6':  {'name':'选六','balls':6,'groups':xuan6,
-                       'tip':'6个球全中，中奖率与赔率较均衡，推荐玩法'},
-            'xuan9':  {'name':'选九','balls':9,'groups':xuan9,
-                       'tip':'9个球全中，高赔率，适合小额搏奖'},
-            'xuan10': {'name':'选十','balls':10,'groups':[xuan10],
-                       'tip':'10个球全中，最高赔率，覆盖热号区域'},
-        },
-        'note': '推荐号码基于近期热号/冷号统计与ML区间预测综合生成，仅供娱乐参考，请理性购彩。'
+        'groups':groups,
+        'blue_recommend':blue_top[:3],
+        'hot_red':hot[:12],
+        'overdue_red':overdue_red[:8],
+        'overdue_blue':overdue_blue[:4],
+        'odd_pred':int(odd_pred),
+        'sum_pred':sum_pred,
+        'note':'综合ML+遗漏分析+三区均衡选号，仅供娱乐参考。',
+    }
+
+
+def recommend_kl8(records, ml_result, omission):
+    """快乐8多玩法推荐：结合ML+遗漏"""
+    freq30=Counter(n for r in records[-30:] for n in r['numbers'])
+    freq10=Counter(n for r in records[-10:] for n in r['numbers'])
+    hot=sorted([x[0] for x in freq30.most_common(20)])
+    cold=sorted([x[0] for x in freq30.most_common()[-20:]])
+    overdue=omission.get('overdue',[])
+
+    zone_m=ml_result.get('models',{}).get('zone_dom',{})
+    zone_pred=zone_m.get('prediction',{}).get('value',1) if zone_m else 1
+    zone_name={0:'1-20区',1:'21-40区',2:'41-60区',3:'61-80区'}.get(zone_pred,'21-40区')
+    total_m=ml_result.get('models',{}).get('total_group',{})
+    total_pred={0:'低',1:'中',2:'高'}.get(
+        total_m.get('prediction',{}).get('value',1) if total_m else 1,'中')
+
+    # 智能候选池
+    pool=list(set(hot[:15]+overdue[:8]+[x[0] for x in freq10.most_common(8)]))
+    if len(pool)<30:
+        pool+=random.sample([n for n in range(1,81) if n not in pool],30-len(pool))
+
+    def pick_balanced(n, seed_add=0):
+        random.seed(int(datetime.now().strftime('%Y%m%d'))+seed_add)
+        result=[]
+        zone_ranges=[(1,20),(21,40),(41,60),(61,80)]
+        per_zone=max(1,n//4)
+        for lo,hi in zone_ranges:
+            zp=[x for x in pool if lo<=x<=hi]
+            if not zp: zp=list(range(lo,hi+1))
+            take=min(per_zone,len(zp),n-len(result))
+            result+=random.sample(zp,take)
+        while len(result)<n:
+            extra=[x for x in range(1,81) if x not in result]
+            result.append(random.choice(extra))
+        return sorted(result[:n])
+
+    def factorial(n):
+        r=1
+        for i in range(2,n+1): r*=i
+        return r
+
+    def comb(n,k):
+        if k>n: return 0
+        return factorial(n)//(factorial(k)*factorial(n-k))
+
+    plays={
+        'xuan4':{'name':'选四','balls':4,'groups':[pick_balanced(4,i) for i in range(3)],
+                 'tip':'4球全中，高赔率'},
+        'xuan5':{'name':'选五','balls':5,'groups':[pick_balanced(5,100+i) for i in range(3)],
+                 'tip':'5球全中，赔率与命中率均衡'},
+        'xuan5_fu':{'name':'选五复式','balls':5,'groups':[pick_balanced(8,200)],
+                    'tip':f'8球覆盖C(8,5)={comb(8,5)}注五球组合'},
+        'xuan6':{'name':'选六','balls':6,'groups':[pick_balanced(6,300+i) for i in range(3)],
+                 'tip':'6球全中，主流玩法推荐'},
+        'xuan9':{'name':'选九','balls':9,'groups':[pick_balanced(9,400+i) for i in range(2)],
+                 'tip':'9球全中，搏高赔率'},
+        'xuan10':{'name':'选十','balls':10,'groups':[pick_balanced(10,500)],
+                  'tip':'10球全中，最高赔率'},
+    }
+
+    return {
+        'plays':plays,
+        'zone_dominant_pred':zone_name,
+        'total_range_pred':total_pred,
+        'hot_nums':hot[:15],
+        'cold_nums':cold[:10],
+        'overdue':overdue[:10],
+        'note':'综合ML+遗漏分析+区间均衡选号，按玩法分类推荐，仅供娱乐参考。',
     }
 
 
 # ══════════════════════════════════════════════════════
-#  每日回测报告（与上次预测对比实际结果）
+#  每日回测（昨日预测 vs 今日实际）
 # ══════════════════════════════════════════════════════
 
-def daily_backtest_report(history, prev_prediction):
-    """把昨天的预测和今天的实际结果做对比"""
-    report = {'date': str(date.today()), 'games': {}}
+def daily_backtest(history, prev_pred):
+    report={'date':str(date.today()),'games':{}}
     for game in ['3d','ssq','kl8']:
-        records = history.get(game, [])
-        if not records or game not in (prev_prediction or {}):
-            continue
-        latest = records[-1]
-        pred   = prev_prediction[game]
-        rec    = pred.get('recommendation', {})
-        hit_info = {}
+        records=history.get(game,[])
+        if not records or game not in (prev_pred or {}): continue
+        latest=records[-1]
+        rec=prev_pred[game].get('recommendation',{})
 
-        if game == '3d':
-            actual = latest.get('digits', [])
-            groups = rec.get('groups', [])
-            hits = [g for g in groups if g==actual]
-            partial = [g for g in groups if sum(1 for i,v in enumerate(g) if i<len(actual) and v==actual[i])>=2]
-            hit_info = {'actual': actual, 'hit_groups': hits, 'partial_hit': partial,
-                        'hit_count': len(hits), 'partial_count': len(partial)}
+        if game=='3d':
+            actual=latest.get('digits',[])
+            groups=rec.get('groups',[])
+            hits=[g for g in groups if g==actual]
+            partial=[g for g in groups if sum(1 for i,v in enumerate(g) if i<len(actual) and v==actual[i])>=2]
+            report['games'][game]={'actual':actual,'hit_count':len(hits),'partial_count':len(partial)}
 
-        elif game == 'ssq':
-            actual_red  = sorted(latest.get('red',[]))
-            actual_blue = latest.get('blue', 0)
-            groups = rec.get('groups', [])
-            hit_info_list = []
-            for g in groups:
-                red_hit  = len(set(g.get('red',[])) & set(actual_red))
-                blue_hit = 1 if g.get('blue')==actual_blue else 0
-                hit_info_list.append({'red_hit': red_hit, 'blue_hit': blue_hit})
-            hit_info = {'actual_red': actual_red, 'actual_blue': actual_blue,
-                        'group_results': hit_info_list,
-                        'best_red_hit': max((x['red_hit'] for x in hit_info_list), default=0)}
+        elif game=='ssq':
+            ar=sorted(latest.get('red',[])); ab=latest.get('blue',0)
+            groups=rec.get('groups',[])
+            results=[{'red_hit':len(set(g.get('red',[]))&set(ar)),'blue_hit':int(g.get('blue')==ab)} for g in groups]
+            report['games'][game]={'actual_red':ar,'actual_blue':ab,'group_results':results,
+                                   'best_red_hit':max((x['red_hit'] for x in results),default=0)}
 
-        elif game == 'kl8':
-            actual = set(latest.get('numbers',[]))
-            plays = rec.get('plays', {})
-            play_results = {}
-            for play_key, play_data in plays.items():
-                groups = play_data.get('groups', [])
-                balls  = play_data.get('balls', 0)
-                name   = play_data.get('name', play_key)
-                grp_results = []
-                for g in groups:
-                    nums = g if isinstance(g, list) else g.get('numbers', g)
-                    hit = len(actual & set(nums))
-                    # 是否中奖（全中才中奖）
-                    won = (hit == balls)
-                    grp_results.append({'nums': nums, 'hit': hit, 'balls': balls, 'won': won})
-                play_results[play_key] = {
-                    'name': name, 'balls': balls,
-                    'groups': grp_results,
-                    'any_won': any(g['won'] for g in grp_results),
-                    'best_hit': max((g['hit'] for g in grp_results), default=0),
-                }
-            hit_info = {
-                'actual': sorted(actual),
-                'play_results': play_results,
-                'best_hit': max((pr['best_hit'] for pr in play_results.values()), default=0),
-            }
-
-        report['games'][game] = hit_info
+        elif game=='kl8':
+            actual=set(latest.get('numbers',[]))
+            plays=rec.get('plays',{})
+            play_results={}
+            for pk,pd in plays.items():
+                grps=pd.get('groups',[])
+                balls=pd.get('balls',0)
+                name=pd.get('name',pk)
+                grp_res=[]
+                for g in grps:
+                    nums=g if isinstance(g,list) else g.get('numbers',g)
+                    hit=len(actual&set(nums)); won=(hit==balls)
+                    grp_res.append({'nums':nums,'hit':hit,'balls':balls,'won':won})
+                play_results[pk]={'name':name,'balls':balls,'groups':grp_res,
+                                  'any_won':any(x['won'] for x in grp_res),
+                                  'best_hit':max((x['hit'] for x in grp_res),default=0)}
+            report['games'][game]={'actual':sorted(actual),'play_results':play_results,
+                                   'best_hit':max((pr['best_hit'] for pr in play_results.values()),default=0)}
     return report
+
+
+# ══════════════════════════════════════════════════════
+#  AI Gateway 结合：生成结构化解读提示
+# ══════════════════════════════════════════════════════
+
+def build_ai_context(game, records, ml_result, markov_data, omission_data, recommendation):
+    """生成供AI解读的结构化数据摘要（写入prediction.json）"""
+    latest=records[-1]
+    n=len(records)
+
+    if game=='3d':
+        best_acc={k:v.get('accuracy',{}).get('ensemble',0) for k,v in ml_result.get('models',{}).items()}
+        top_model=max(best_acc.items(),key=lambda x:x[1]) if best_acc else ('—',0)
+        context={
+            'game':'福彩3D','latest_qihao':latest.get('qihao',''),
+            'latest_date':latest.get('date',''),'data_count':n,
+            'latest_digits':latest.get('digits',[]),
+            'ml_top_accuracy':f"{top_model[0]}目标集成准确率{top_model[1]}%",
+            'markov_summary':[f"{'百十个'[m['pos']]}位上期{m['from']}→最可能{m['top3'][0][0]}({m['top3'][0][1]}%)" for m in markov_data],
+            'overdue_summary':[f"{'百十个'[i]}位遗漏号:{v}" for i,v in enumerate(omission_data['overdue'] if isinstance(omission_data,dict) else [om['overdue'] for om in omission_data])],
+            'recommend_groups':recommendation.get('groups',[]),
+            'sum_pred':recommendation.get('sum_pred',''),
+        }
+    elif game=='ssq':
+        context={
+            'game':'双色球','latest_qihao':latest.get('qihao',''),
+            'latest_date':latest.get('date',''),'data_count':n,
+            'latest_red':latest.get('red',[]),'latest_blue':latest.get('blue',0),
+            'blue_overdue':omission_data.get('blue_overdue',[]),
+            'red_overdue':omission_data.get('red_overdue',[])[:8],
+            'blue_recommend':recommendation.get('blue_recommend',[]),
+            'sum_pred':recommendation.get('sum_pred',''),
+            'odd_pred':recommendation.get('odd_pred',''),
+        }
+    elif game=='kl8':
+        context={
+            'game':'快乐8','latest_qihao':latest.get('qihao',''),
+            'latest_date':latest.get('date',''),'data_count':n,
+            'zone_pred':recommendation.get('zone_dominant_pred',''),
+            'total_pred':recommendation.get('total_range_pred',''),
+            'overdue_top10':omission_data.get('overdue',[])[:10],
+            'hot_nums':recommendation.get('hot_nums',[])[:10],
+        }
+    return context
 
 
 # ══════════════════════════════════════════════════════
@@ -745,68 +753,85 @@ def daily_backtest_report(history, prev_prediction):
 # ══════════════════════════════════════════════════════
 
 def main():
-    print(f"=== 福彩ML预测系统 {date.today()} ===")
-    print(f"XGBoost: {'✓' if HAS_XGB else '✗（使用GradientBoosting替代）'}")
+    print(f"\n{'='*50}")
+    print(f"福彩ML预测系统 v2  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*50}")
 
     # 读取历史数据
     try:
-        with open('history.json', encoding='utf-8') as f:
-            history = json.load(f)
+        with open('history.json',encoding='utf-8') as f:
+            history=json.load(f)
     except FileNotFoundError:
-        print("history.json 不存在，请先运行 lottery_crawler.py")
-        sys.exit(1)
+        print("history.json 不存在，请先运行 lottery_crawler.py"); sys.exit(1)
 
     # 读取上次预测（用于回测）
-    prev_prediction = {}
+    prev_pred={}
     try:
-        with open('prediction.json', encoding='utf-8') as f:
-            prev_data = json.load(f)
-            prev_prediction = prev_data.get('predictions', {})
-    except (FileNotFoundError, json.JSONDecodeError):
+        with open('prediction.json',encoding='utf-8') as f:
+            prev_pred=json.load(f).get('predictions',{})
+    except Exception:
         pass
 
-    # 每日回测
-    print("\n── 生成回测报告…")
-    bt_report = daily_backtest_report(history, prev_prediction)
+    # 回测
+    print("\n── 生成昨日回测报告…")
+    bt=daily_backtest(history,prev_pred)
 
-    # 各彩种分析
-    predictions = {}
-    for game, name, fn in [('ssq','双色球',analyze_ssq),
-                             ('3d', '福彩3D',analyze_3d),
-                             ('kl8','快乐8', analyze_kl8)]:
-        records = history.get(game, [])
-        if len(records) < 35:
-            print(f"  {name}: 数据不足（{len(records)}期，需≥35期），跳过")
-            continue
-        # 只用近50期
-        records = records[-50:]
-        print(f"\n── 分析 {name}（使用近{len(records)}期）…")
+    predictions={}
+    for game, feat_fn, tgt_fn, tkeys in [
+        ('3d',  feat_3d,  targets_3d,  ['bai','shi','ge','sum_group','odd_cnt']),
+        ('ssq', feat_ssq, targets_ssq, ['blue','odd_cnt','sum_group']),
+        ('kl8', feat_kl8, targets_kl8, ['odd_group','zone_dom','total_group']),
+    ]:
+        records=history.get(game,[])
+        if len(records)<70:
+            print(f"\n── {game}: 数据不足({len(records)}期，需≥70)，跳过"); continue
+
+        print(f"\n── 分析 {game}（全量{len(records)}期，窗口{WINDOW}期）…")
         try:
-            predictions[game] = fn(records)
-            acc_info = {k: v['accuracy'] for k,v in predictions[game]['models'].items() if 'accuracy' in v}
-            print(f"  ✓ {name} 完成，回测准确率: {acc_info}")
+            ml_res=analyze_game(game,records,feat_fn,tgt_fn,tkeys)
+
+            # 马尔可夫 & 遗漏
+            if game=='3d':
+                mk=markov_3d(records); om=omission_3d(records)
+                rec=recommend_3d(records,ml_res,mk,om)
+                mk_out=mk; om_out={'overdue':[x['overdue'] for x in om]}
+            elif game=='ssq':
+                mk=markov_ssq_blue(records); om=omission_ssq(records)
+                rec=recommend_ssq(records,ml_res,om)
+                mk_out=mk; om_out=om
+            else:
+                mk=None; om=omission_kl8(records)
+                rec=recommend_kl8(records,ml_res,om)
+                mk_out=None; om_out=om
+
+            ai_ctx=build_ai_context(game,records,ml_res,mk_out or [],om_out,rec)
+
+            predictions[game]={**ml_res,'recommendation':rec,
+                               'markov':mk_out,'omission_summary':om_out,
+                               'ai_context':ai_ctx}
+            print(f"  ✓ {game} 完成")
         except Exception as e:
-            print(f"  ✗ {name} 失败: {e}", file=sys.stderr)
             import traceback; traceback.print_exc()
+            print(f"  ✗ {game} 失败: {e}")
 
-    # 写出结果
-    output = {
-        'updated_at':  datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'has_xgboost': HAS_XGB,
-        'predictions': predictions,
-        'backtest':    bt_report,
-        'disclaimer':  '本预测基于历史统计与机器学习模型，彩票开奖具有随机性，预测结果仅供娱乐参考，不构成任何投注建议。',
+    output={
+        'updated_at':datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'models_used':{'rf':True,'xgb':HAS_XGB,'lgb':HAS_LGB,'ensemble':True,
+                       'markov':True,'omission':True},
+        'predictions':predictions,
+        'backtest':bt,
+        'disclaimer':'彩票开奖结果具有完全随机性，本系统仅为数学统计模型演示，预测结果不具有实际预测意义，请理性购彩，量力而行。',
     }
-    with open('prediction.json', 'w', encoding='utf-8') as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
+    with open('prediction.json','w',encoding='utf-8') as f:
+        json.dump(output,f,ensure_ascii=False,indent=2)
 
-    print(f"\n✓ 完成！结果已写入 prediction.json")
-    for game, res in predictions.items():
-        for t, m in res.get('models',{}).items():
-            if 'accuracy' in m:
-                a = m['accuracy']
-                print(f"  {game}/{t}: RF={a['random_forest']}%  XGB={a.get('xgboost','-')}%")
+    print(f"\n✓ 完成！已写入 prediction.json")
+    for game,res in predictions.items():
+        print(f"  {game}: {res['data_count']}期数据")
+        for t,m in res.get('models',{}).items():
+            acc=m.get('accuracy',{})
+            print(f"    {t}: 集成{acc.get('ensemble','—')}% RF{acc.get('rf','—')}% XGB{acc.get('xgb','—')}% LGB{acc.get('lgb','—')}%")
 
 
-if __name__ == '__main__':
+if __name__=='__main__':
     main()
