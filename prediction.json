@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-11 14:40:56",
+  "updated_at": "2026-08-12 14:41:05",
   "models_used": {
     "rf": true,
     "xgb": true,
@@ -13,71 +13,66 @@
       "game": "3d",
       "data_count": 100,
       "window": 50,
-      "updated_at": "2026-08-11 14:37",
+      "updated_at": "2026-08-12 14:37",
       "models": {
         "bai": {
           "target": "bai",
           "data_used": 95,
           "backtest_periods": 35,
           "accuracy": {
-            "rf": 17.1,
-            "xgb": 14.3,
+            "rf": 11.4,
+            "xgb": 11.4,
             "lgb": 11.4,
-            "ensemble": 17.1
+            "ensemble": 11.4
           },
           "feature_importance": [
             {
               "name": "s_mean_50",
-              "score": 0.0424
+              "score": 0.0429
             },
             {
-              "name": "sum_std_50",
-              "score": 0.039
+              "name": "s_mean_20",
+              "score": 0.0422
+            },
+            {
+              "name": "sum_tail",
+              "score": 0.0412
             },
             {
               "name": "sum",
-              "score": 0.0376
+              "score": 0.0399
             },
             {
-              "name": "span_mean_50",
-              "score": 0.037
-            },
-            {
-              "name": "sum_std_10",
-              "score": 0.0369
+              "name": "g_mean_50",
+              "score": 0.0375
             }
           ],
           "prediction": {
-            "value": 8,
-            "confidence": 72.4,
+            "value": 5,
+            "confidence": 74.8,
             "probs": {
-              "0": 1.7,
+              "0": 2.2,
               "1": 1.0,
-              "2": 5.3,
-              "3": 2.1,
-              "4": 2.7,
-              "5": 2.4,
-              "6": 3.5,
-              "7": 3.2,
-              "8": 72.4,
-              "9": 5.8
+              "2": 2.5,
+              "3": 2.5,
+              "4": 3.8,
+              "5": 74.8,
+              "6": 2.8,
+              "7": 3.3,
+              "8": 4.5,
+              "9": 2.6
             }
           },
           "backtest_latest": [
             {
-              "true": 9,
-              "pred_ensemble": 9,
-              "pred_rf": 9
-            },
-            {
               "true": 8,
-              "pred_ensemble": 5,
+              "pred_ensemble": 4,
               "pred_rf": 5
             },
             {
               "true": 9,
-              "pred_ensemble": 3,
-              "pred_rf": 9
+              "pred_ensemble": 8,
+              "pred_rf": 8
             },
             {
               "true": 4,
@@ -86,13 +81,13 @@
             },
             {
               "true": 6,
-              "pred_ensemble": 2,
+              "pred_ensemble": 9,
               "pred_rf": 9
             },
             {
               "true": 2,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred_ensemble": 9,
+              "pred_rf": 9
             },
             {
               "true": 7,
@@ -102,17 +97,22 @@
             {
               "true": 7,
               "pred_ensemble": 4,
-              "pred_rf": 2
+              "pred_rf": 4
             },
             {
               "true": 5,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred_ensemble": 4,
+              "pred_rf": 6
             },
             {
               "true": 8,
               "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred_rf": 9
+            },
+            {
+              "true": 5,
+              "pred_ensemble": 8,
+              "pred_rf": 8
             }
           ]
         },
@@ -121,54 +121,59 @@
           "data_used": 95,
           "backtest_periods": 35,
           "accuracy": {
-            "rf": 11.4,
-            "xgb": 14.3,
-            "lgb": 8.6,
+            "rf": 14.3,
+            "xgb": 20.0,
+            "lgb": 11.4,
             "ensemble": 17.1
           },
           "feature_importance": [
             {
               "name": "sum_mean_50",
-              "score": 0.0562
+              "score": 0.0592
             },
             {
               "name": "sum_std_20",
-              "score": 0.049
+              "score": 0.0485
             },
             {
               "name": "gap_bs",
-              "score": 0.0399
+              "score": 0.0407
             },
             {
               "name": "b_mean_10",
-              "score": 0.0394
+              "score": 0.0352
             },
             {
-              "name": "sum_std_10",
-              "score": 0.0389
+              "name": "g",
+              "score": 0.0337
             }
           ],
           "prediction": {
-            "value": 7,
-            "confidence": 79.9,
+            "value": 4,
+            "confidence": 70.8,
             "probs": {
-              "0": 2.3,
-              "1": 2.6,
-              "2": 3.0,
+              "0": 3.1,
+              "1": 3.4,
+              "2": 4.4,
               "3": 2.6,
-              "4": 0.8,
-              "5": 2.0,
-              "6": 2.0,
-              "7": 79.9,
-              "8": 2.8,
-              "9": 2.0
+              "4": 70.8,
+              "5": 1.7,
+              "6": 1.8,
+              "7": 7.3,
+              "8": 2.5,
+              "9": 2.5
             }
           },
           "backtest_latest": [
             {
-              "true": 7,
-              "pred_ensemble": 8,
-              "pred_rf": 8
+              "true": 1,
+              "pred_ensemble": 0,
+              "pred_rf": 0
+            },
+            {
+              "true": 4,
+              "pred_ensemble": 0,
+              "pred_rf": 0
             },
             {
               "true": 1,
@@ -176,29 +181,19 @@
               "pred_rf": 2
             },
             {
-              "true": 4,
-              "pred_ensemble": 5,
-              "pred_rf": 1
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 4,
-              "pred_rf": 2
-            },
-            {
               "true": 3,
-              "pred_ensemble": 5,
-              "pred_rf": 1
+              "pred_ensemble": 0,
+              "pred_rf": 0
             },
             {
               "true": 8,
-              "pred_ensemble": 3,
+              "pred_ensemble": 1,
               "pred_rf": 3
             },
             {
               "true": 5,
-              "pred_ensemble": 4,
-              "pred_rf": 8
+              "pred_ensemble": 9,
+              "pred_rf": 9
             },
             {
               "true": 0,
@@ -207,13 +202,18 @@
             },
             {
               "true": 6,
-              "pred_ensemble": 6,
-              "pred_rf": 6
+              "pred_ensemble": 2,
+              "pred_rf": 2
             },
             {
               "true": 7,
               "pred_ensemble": 7,
               "pred_rf": 2
+            },
+            {
+              "true": 4,
+              "pred_ensemble": 7,
+              "pred_rf": 7
             }
           ]
         },
@@ -222,55 +222,50 @@
           "data_used": 95,
           "backtest_periods": 35,
           "accuracy": {
-            "rf": 8.6,
-            "xgb": 14.3,
-            "lgb": 8.6,
-            "ensemble": 11.4
+            "rf": 20.0,
+            "xgb": 17.1,
+            "lgb": 11.4,
+            "ensemble": 20.0
           },
           "feature_importance": [
             {
               "name": "span",
-              "score": 0.0461
+              "score": 0.0507
             },
             {
               "name": "span_mean_50",
-              "score": 0.0405
-            },
-            {
-              "name": "sum_std_20",
-              "score": 0.0377
+              "score": 0.0435
             },
             {
               "name": "sum_tail",
-              "score": 0.037
+              "score": 0.0408
             },
             {
-              "name": "s",
-              "score": 0.0354
+              "name": "g_mean_50",
+              "score": 0.0399
+            },
+            {
+              "name": "b_mean_50",
+              "score": 0.0372
             }
           ],
           "prediction": {
-            "value": 2,
-            "confidence": 79.2,
+            "value": 5,
+            "confidence": 81.1,
             "probs": {
-              "0": 2.1,
-              "1": 1.3,
-              "2": 79.2,
-              "3": 2.6,
-              "4": 1.3,
-              "5": 3.0,
-              "6": 1.4,
-              "7": 1.2,
-              "8": 5.8,
-              "9": 2.3
+              "0": 1.4,
+              "1": 2.0,
+              "2": 6.0,
+              "3": 0.9,
+              "4": 2.0,
+              "5": 81.1,
+              "6": 1.3,
+              "7": 1.7,
+              "8": 2.0,
+              "9": 1.5
             }
           },
           "backtest_latest": [
-            {
-              "true": 8,
-              "pred_ensemble": 0,
-              "pred_rf": 0
-            },
             {
               "true": 4,
               "pred_ensemble": 8,
@@ -278,8 +273,8 @@
             },
             {
               "true": 2,
-              "pred_ensemble": 4,
-              "pred_rf": 4
+              "pred_ensemble": 6,
+              "pred_rf": 6
             },
             {
               "true": 5,
@@ -294,7 +289,7 @@
             {
               "true": 9,
               "pred_ensemble": 0,
-              "pred_rf": 5
+              "pred_rf": 8
             },
             {
               "true": 5,
@@ -315,6 +310,11 @@
               "true": 2,
               "pred_ensemble": 8,
               "pred_rf": 8
+            },
+            {
+              "true": 5,
+              "pred_ensemble": 5,
+              "pred_rf": 5
             }
           ]
         },
@@ -324,48 +324,43 @@
           "backtest_periods": 35,
           "accuracy": {
             "rf": 60.0,
-            "xgb": 48.6,
-            "lgb": 40.0,
-            "ensemble": 48.6
+            "xgb": 57.1,
+            "lgb": 48.6,
+            "ensemble": 54.3
           },
           "feature_importance": [
             {
               "name": "span_mean_5",
-              "score": 0.0547
+              "score": 0.0498
+            },
+            {
+              "name": "sum_mean_5",
+              "score": 0.0459
             },
             {
               "name": "span_mean_50",
-              "score": 0.0437
-            },
-            {
-              "name": "b_mean_20",
-              "score": 0.0391
+              "score": 0.0431
             },
             {
               "name": "g_mean_10",
-              "score": 0.0382
+              "score": 0.0416
             },
             {
-              "name": "sum_std_20",
-              "score": 0.0362
+              "name": "sum_tail",
+              "score": 0.0391
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 92.6,
+            "confidence": 93.9,
             "probs": {
-              "0": 3.8,
-              "1": 92.6,
-              "2": 3.5
+              "0": 2.4,
+              "1": 93.9,
+              "2": 3.7
             }
           },
           "backtest_latest": [
             {
-              "true": 2,
-              "pred_ensemble": 0,
-              "pred_rf": 1
-            },
-            {
               "true": 1,
               "pred_ensemble": 1,
               "pred_rf": 1
@@ -387,6 +382,11 @@
             },
             {
               "true": 2,
+              "pred_ensemble": 1,
+              "pred_rf": 1
+            },
+            {
+              "true": 1,
               "pred_ensemble": 1,
               "pred_rf": 1
             },
@@ -417,49 +417,44 @@
           "data_used": 95,
           "backtest_periods": 35,
           "accuracy": {
-            "rf": 48.6,
-            "xgb": 42.9,
-            "lgb": 40.0,
+            "rf": 51.4,
+            "xgb": 45.7,
+            "lgb": 45.7,
             "ensemble": 42.9
           },
           "feature_importance": [
             {
-              "name": "b_mean_10",
-              "score": 0.0463
-            },
-            {
               "name": "sum_std_10",
-              "score": 0.0449
+              "score": 0.0385
             },
             {
               "name": "span_mean_10",
-              "score": 0.0413
+              "score": 0.0378
             },
             {
-              "name": "b_mean_50",
-              "score": 0.041
+              "name": "b_mean_10",
+              "score": 0.0375
             },
             {
-              "name": "sum_std_50",
-              "score": 0.036
+              "name": "b",
+              "score": 0.0366
+            },
+            {
+              "name": "g",
+              "score": 0.0363
             }
           ],
           "prediction": {
-            "value": 1,
-            "confidence": 87.0,
+            "value": 2,
+            "confidence": 83.1,
             "probs": {
-              "0": 1.8,
-              "1": 87.0,
-              "2": 8.8,
-              "3": 2.4
+              "0": 4.0,
+              "1": 9.9,
+              "2": 83.1,
+              "3": 3.1
             }
           },
           "backtest_latest": [
-            {
-              "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
             {
               "true": 1,
               "pred_ensemble": 2,
@@ -504,6 +499,11 @@
               "true": 1,
               "pred_ensemble": 1,
               "pred_rf": 1
+            },
+            {
+              "true": 2,
+              "pred_ensemble": 1,
+              "pred_rf": 1
             }
           ]
         }
@@ -511,111 +511,111 @@
       "recommendation": {
         "groups": [
           [
-            8,
-            7,
-            2
+            5,
+            4,
+            7
           ],
           [
             8,
-            7,
-            2
+            0,
+            5
           ],
           [
             8,
-            6,
-            2
+            0,
+            5
           ],
           [
-            8,
+            5,
             2,
-            2
+            5
           ],
           [
-            8,
-            7,
-            9
+            5,
+            4,
+            5
           ],
           [
-            8,
-            7,
+            5,
+            2,
             2
           ]
         ],
         "pos_candidates": [
           [
+            5,
+            0,
             8,
             3,
-            1,
-            5,
+            1
+          ],
+          [
+            4,
+            0,
+            2,
+            7,
             9
           ],
           [
-            7,
-            1,
-            2,
-            6,
-            9
-          ],
-          [
-            2,
             5,
             7,
-            9,
-            3
+            2,
+            4,
+            0
           ]
         ],
         "markov": [
           {
             "pos": 0,
-            "from": 8,
+            "from": 5,
             "top3": [
               [
-                1,
-                20.0
-              ],
-              [
-                3,
-                20.0
+                0,
+                22.2
               ],
               [
                 5,
-                10.0
+                22.2
+              ],
+              [
+                8,
+                22.2
               ]
             ]
           },
           {
             "pos": 1,
-            "from": 7,
+            "from": 4,
             "top3": [
               [
-                1,
-                37.5
+                0,
+                40.0
+              ],
+              [
+                7,
+                20.0
               ],
               [
                 2,
-                25.0
-              ],
-              [
-                6,
-                12.5
+                20.0
               ]
             ]
           },
           {
             "pos": 2,
-            "from": 2,
+            "from": 5,
             "top3": [
               [
-                5,
-                25.0
-              ],
-              [
                 7,
-                16.7
+                23.1
               ],
               [
-                9,
-                16.7
+                2,
+                15.4
+              ],
+              [
+                4,
+                15.4
               ]
             ]
           }
@@ -643,55 +643,55 @@
       "markov": [
         {
           "pos": 0,
-          "from": 8,
+          "from": 5,
           "top3": [
             [
-              1,
-              20.0
-            ],
-            [
-              3,
-              20.0
+              0,
+              22.2
             ],
             [
               5,
-              10.0
+              22.2
+            ],
+            [
+              8,
+              22.2
             ]
           ]
         },
         {
           "pos": 1,
-          "from": 7,
+          "from": 4,
           "top3": [
             [
-              1,
-              37.5
+              0,
+              40.0
+            ],
+            [
+              7,
+              20.0
             ],
             [
               2,
-              25.0
-            ],
-            [
-              6,
-              12.5
+              20.0
             ]
           ]
         },
         {
           "pos": 2,
-          "from": 2,
+          "from": 5,
           "top3": [
             [
-              5,
-              25.0
-            ],
-            [
               7,
-              16.7
+              23.1
             ],
             [
-              9,
-              16.7
+              2,
+              15.4
+            ],
+            [
+              4,
+              15.4
             ]
           ]
         }
@@ -717,19 +717,19 @@
       },
       "ai_context": {
         "game": "福彩3D",
-        "latest_qihao": "2026213",
-        "latest_date": "2026-08-11",
+        "latest_qihao": "2026214",
+        "latest_date": "2026-08-12",
         "data_count": 100,
         "latest_digits": [
-          8,
-          7,
-          2
+          5,
+          4,
+          5
         ],
-        "ml_top_accuracy": "sum_group目标集成准确率48.6%",
+        "ml_top_accuracy": "sum_group目标集成准确率54.3%",
         "markov_summary": [
-          "百位上期8→最可能1(20.0%)",
-          "十位上期7→最可能1(37.5%)",
-          "个位上期2→最可能5(25.0%)"
+          "百位上期5→最可能0(22.2%)",
+          "十位上期4→最可能0(40.0%)",
+          "个位上期5→最可能7(23.1%)"
         ],
         "overdue_summary": [
           "百位遗漏号:[0, 1, 3]",
@@ -738,33 +738,33 @@
         ],
         "recommend_groups": [
           [
-            8,
-            7,
-            2
+            5,
+            4,
+            7
           ],
           [
             8,
-            7,
-            2
+            0,
+            5
           ],
           [
             8,
-            6,
-            2
+            0,
+            5
           ],
           [
-            8,
+            5,
             2,
-            2
+            5
           ],
           [
-            8,
-            7,
-            9
+            5,
+            4,
+            5
           ],
           [
-            8,
-            7,
+            5,
+            2,
             2
           ]
         ],
@@ -775,7 +775,7 @@
       "game": "ssq",
       "data_count": 100,
       "window": 50,
-      "updated_at": "2026-08-11 14:39",
+      "updated_at": "2026-08-12 14:39",
       "models": {
         "blue": {
           "target": "blue",
@@ -1079,67 +1079,67 @@
         "groups": [
           {
             "red": [
+              3,
               5,
-              11,
+              10,
               14,
-              16,
-              24,
-              31
+              20,
+              28
             ],
             "blue": 11
           },
           {
             "red": [
-              5,
-              11,
+              10,
               14,
-              24,
-              29,
-              31
+              20,
+              25,
+              28,
+              32
             ],
             "blue": 3
           },
           {
             "red": [
-              11,
+              8,
+              10,
               14,
-              15,
-              19,
-              28,
-              32
+              20,
+              23,
+              33
             ],
             "blue": 5
           },
           {
             "red": [
-              5,
               8,
-              15,
+              14,
+              16,
               24,
-              25,
-              33
+              28,
+              31
             ],
             "blue": 4
           },
           {
             "red": [
-              11,
-              14,
+              3,
+              21,
+              25,
+              27,
               28,
-              29,
-              30,
-              32
+              33
             ],
             "blue": 15
           },
           {
             "red": [
-              2,
-              11,
-              18,
+              5,
+              20,
               24,
               27,
-              32
+              28,
+              31
             ],
             "blue": 11
           }
@@ -1304,55 +1304,50 @@
       "game": "kl8",
       "data_count": 100,
       "window": 50,
-      "updated_at": "2026-08-11 14:40",
+      "updated_at": "2026-08-12 14:40",
       "models": {
         "odd_group": {
           "target": "odd_group",
           "data_used": 95,
           "backtest_periods": 35,
           "accuracy": {
-            "rf": 54.3,
-            "xgb": 54.3,
-            "lgb": 48.6,
+            "rf": 57.1,
+            "xgb": 45.7,
+            "lgb": 60.0,
             "ensemble": 54.3
           },
           "feature_importance": [
             {
               "name": "min_n",
-              "score": 0.0579
+              "score": 0.0469
             },
             {
               "name": "total_std_10",
-              "score": 0.0434
+              "score": 0.0414
             },
             {
               "name": "total_mean_5",
-              "score": 0.0386
+              "score": 0.0361
             },
             {
-              "name": "total_mean_20",
-              "score": 0.0303
+              "name": "z2_mean_5",
+              "score": 0.034
             },
             {
-              "name": "z3_mean_5",
-              "score": 0.0297
+              "name": "z3_mean_20",
+              "score": 0.0331
             }
           ],
           "prediction": {
-            "value": 0,
-            "confidence": 77.9,
+            "value": 2,
+            "confidence": 72.9,
             "probs": {
-              "0": 77.9,
-              "1": 17.7,
-              "2": 4.5
+              "0": 5.0,
+              "1": 22.1,
+              "2": 72.9
             }
           },
           "backtest_latest": [
-            {
-              "true": 0,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
             {
               "true": 2,
               "pred_ensemble": 1,
@@ -1395,6 +1390,11 @@
             },
             {
               "true": 0,
+              "pred_ensemble": 1,
+              "pred_rf": 1
+            },
+            {
+              "true": 2,
               "pred_ensemble": 1,
               "pred_rf": 1
             }
@@ -1405,53 +1405,48 @@
           "data_used": 95,
           "backtest_periods": 35,
           "accuracy": {
-            "rf": 45.7,
-            "xgb": 40.0,
-            "lgb": 45.7,
+            "rf": 51.4,
+            "xgb": 48.6,
+            "lgb": 40.0,
             "ensemble": 45.7
           },
           "feature_importance": [
             {
               "name": "total",
-              "score": 0.043
-            },
-            {
-              "name": "z1_mean_10",
-              "score": 0.0388
-            },
-            {
-              "name": "total_std_5",
-              "score": 0.0367
-            },
-            {
-              "name": "z3_mean_20",
-              "score": 0.0357
+              "score": 0.0479
             },
             {
               "name": "total_std_10",
-              "score": 0.0352
+              "score": 0.0403
+            },
+            {
+              "name": "total_std_5",
+              "score": 0.0392
+            },
+            {
+              "name": "z4_mean_50",
+              "score": 0.0373
+            },
+            {
+              "name": "z3_mean_20",
+              "score": 0.0351
             }
           ],
           "prediction": {
-            "value": 0,
-            "confidence": 88.3,
+            "value": 1,
+            "confidence": 67.4,
             "probs": {
-              "0": 88.3,
-              "1": 5.2,
-              "2": 2.7,
-              "3": 3.8
+              "0": 18.4,
+              "1": 67.4,
+              "2": 1.6,
+              "3": 12.6
             }
           },
           "backtest_latest": [
             {
-              "true": 2,
-              "pred_ensemble": 0,
-              "pred_rf": 0
-            },
-            {
               "true": 0,
               "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred_rf": 0
             },
             {
               "true": 0,
@@ -1492,6 +1487,11 @@
               "true": 0,
               "pred_ensemble": 0,
               "pred_rf": 0
+            },
+            {
+              "true": 1,
+              "pred_ensemble": 0,
+              "pred_rf": 0
             }
           ]
         },
@@ -1501,47 +1501,42 @@
           "backtest_periods": 35,
           "accuracy": {
             "rf": 65.7,
-            "xgb": 51.4,
+            "xgb": 57.1,
             "lgb": 57.1,
-            "ensemble": 51.4
+            "ensemble": 57.1
           },
           "feature_importance": [
             {
-              "name": "total",
-              "score": 0.0498
+              "name": "consec_grp",
+              "score": 0.0486
             },
             {
-              "name": "consec_grp",
-              "score": 0.0482
+              "name": "total",
+              "score": 0.0478
+            },
+            {
+              "name": "hot_z1",
+              "score": 0.0428
+            },
+            {
+              "name": "z3_mean_20",
+              "score": 0.0376
             },
             {
               "name": "total_mean_20",
-              "score": 0.0385
-            },
-            {
-              "name": "total_std_20",
-              "score": 0.0369
-            },
-            {
-              "name": "z3_mean_5",
-              "score": 0.0367
+              "score": 0.0331
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 90.3,
+            "confidence": 85.4,
             "probs": {
-              "0": 0.4,
-              "1": 90.3,
-              "2": 9.3
+              "0": 1.0,
+              "1": 85.4,
+              "2": 13.6
             }
           },
           "backtest_latest": [
-            {
-              "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
             {
               "true": 1,
               "pred_ensemble": 1,
@@ -1586,6 +1581,11 @@
               "true": 1,
               "pred_ensemble": 1,
               "pred_rf": 1
+            },
+            {
+              "true": 1,
+              "pred_ensemble": 1,
+              "pred_rf": 1
             }
           ]
         }
@@ -1598,21 +1598,21 @@
             "groups": [
               [
                 2,
-                27,
-                45,
-                69
+                35,
+                51,
+                65
               ],
               [
-                2,
+                10,
                 27,
-                45,
-                62
+                53,
+                65
               ],
               [
-                6,
-                32,
-                60,
-                62
+                14,
+                26,
+                42,
+                65
               ]
             ],
             "tip": "4球全中，高赔率"
@@ -1622,25 +1622,25 @@
             "balls": 5,
             "groups": [
               [
-                12,
-                13,
-                37,
-                42,
-                65
-              ],
-              [
                 2,
                 5,
-                38,
-                44,
-                69
+                39,
+                47,
+                65
               ],
               [
                 4,
-                29,
-                44,
-                52,
+                26,
+                47,
+                51,
                 65
+              ],
+              [
+                18,
+                26,
+                53,
+                65,
+                78
               ]
             ],
             "tip": "5球全中，赔率与命中率均衡"
@@ -1650,14 +1650,14 @@
             "balls": 5,
             "groups": [
               [
-                11,
-                14,
+                2,
+                18,
+                26,
+                32,
                 33,
-                37,
                 42,
-                45,
-                65,
-                69
+                51,
+                65
               ]
             ],
             "tip": "8球覆盖C(8,5)=56注五球组合"
@@ -1667,28 +1667,28 @@
             "balls": 6,
             "groups": [
               [
-                14,
-                32,
-                43,
-                45,
-                62,
-                69
-              ],
-              [
-                7,
+                12,
                 16,
-                33,
-                35,
-                44,
+                31,
+                34,
+                47,
                 65
               ],
               [
                 2,
-                6,
-                21,
-                49,
-                50,
-                69
+                10,
+                32,
+                45,
+                63,
+                65
+              ],
+              [
+                4,
+                5,
+                40,
+                53,
+                65,
+                68
               ]
             ],
             "tip": "6球全中，主流玩法推荐"
@@ -1698,26 +1698,26 @@
             "balls": 9,
             "groups": [
               [
-                6,
-                14,
-                19,
+                1,
+                3,
+                15,
                 27,
-                32,
-                41,
+                35,
                 45,
-                62,
-                65
+                57,
+                65,
+                77
               ],
               [
-                10,
-                20,
+                3,
+                14,
+                15,
+                18,
                 27,
-                32,
-                41,
-                44,
-                62,
-                65,
-                78
+                31,
+                51,
+                53,
+                65
               ]
             ],
             "tip": "9球全中，搏高赔率"
@@ -1727,51 +1727,51 @@
             "balls": 10,
             "groups": [
               [
-                10,
-                20,
-                32,
-                33,
-                35,
-                41,
-                51,
-                62,
-                69,
-                80
+                1,
+                3,
+                14,
+                26,
+                31,
+                42,
+                44,
+                50,
+                65,
+                79
               ]
             ],
             "tip": "10球全中，最高赔率"
           }
         },
-        "zone_dominant_pred": "1-20区",
+        "zone_dominant_pred": "21-40区",
         "total_range_pred": "中",
         "hot_nums": [
           2,
           4,
-          6,
-          7,
           10,
-          11,
           12,
+          15,
           18,
           27,
           29,
           32,
+          35,
           37,
+          40,
           42,
           44,
           45
         ],
         "cold_nums": [
-          5,
           8,
           9,
-          16,
           22,
           26,
           36,
           38,
           41,
-          43
+          43,
+          50,
+          52
         ],
         "overdue": [],
         "note": "综合ML+遗漏分析+区间均衡选号，按玩法分类推荐，仅供娱乐参考。"
@@ -1779,121 +1779,121 @@
       "markov": null,
       "omission_summary": {
         "omit": {
-          "1": 1,
-          "2": 4,
-          "3": 3,
-          "4": 2,
-          "5": 2,
-          "6": 0,
+          "1": 2,
+          "2": 0,
+          "3": 4,
+          "4": 3,
+          "5": 3,
+          "6": 1,
           "7": 0,
-          "8": 0,
-          "9": 8,
-          "10": 1,
-          "11": 0,
+          "8": 1,
+          "9": 9,
+          "10": 2,
+          "11": 1,
           "12": 0,
-          "13": 0,
-          "14": 1,
-          "15": 1,
-          "16": 4,
-          "17": 3,
+          "13": 1,
+          "14": 2,
+          "15": 2,
+          "16": 5,
+          "17": 4,
           "18": 0,
-          "19": 6,
-          "20": 2,
+          "19": 7,
+          "20": 0,
           "21": 0,
-          "22": 3,
-          "23": 2,
-          "24": 2,
-          "25": 2,
-          "26": 1,
-          "27": 3,
-          "28": 5,
-          "29": 3,
-          "30": 2,
-          "31": 1,
-          "32": 4,
-          "33": 0,
-          "34": 5,
-          "35": 2,
-          "36": 0,
+          "22": 4,
+          "23": 0,
+          "24": 3,
+          "25": 0,
+          "26": 2,
+          "27": 4,
+          "28": 6,
+          "29": 4,
+          "30": 3,
+          "31": 2,
+          "32": 0,
+          "33": 1,
+          "34": 0,
+          "35": 0,
+          "36": 1,
           "37": 0,
-          "38": 5,
-          "39": 6,
-          "40": 10,
-          "41": 6,
-          "42": 0,
-          "43": 5,
-          "44": 0,
-          "45": 1,
-          "46": 2,
-          "47": 3,
-          "48": 1,
-          "49": 6,
-          "50": 7,
-          "51": 2,
-          "52": 4,
-          "53": 2,
-          "54": 9,
-          "55": 7,
-          "56": 0,
-          "57": 0,
-          "58": 0,
-          "59": 4,
-          "60": 0,
-          "61": 1,
-          "62": 7,
-          "63": 6,
-          "64": 6,
-          "65": 6,
-          "66": 0,
-          "67": 4,
-          "68": 11,
-          "69": 17,
-          "70": 5,
+          "38": 6,
+          "39": 7,
+          "40": 0,
+          "41": 7,
+          "42": 1,
+          "43": 6,
+          "44": 1,
+          "45": 0,
+          "46": 3,
+          "47": 0,
+          "48": 2,
+          "49": 7,
+          "50": 8,
+          "51": 0,
+          "52": 5,
+          "53": 3,
+          "54": 10,
+          "55": 0,
+          "56": 1,
+          "57": 1,
+          "58": 1,
+          "59": 0,
+          "60": 1,
+          "61": 0,
+          "62": 8,
+          "63": 7,
+          "64": 7,
+          "65": 7,
+          "66": 1,
+          "67": 5,
+          "68": 12,
+          "69": 18,
+          "70": 6,
           "71": 0,
-          "72": 1,
-          "73": 5,
-          "74": 1,
-          "75": 2,
-          "76": 6,
-          "77": 1,
-          "78": 2,
-          "79": 1,
-          "80": 0
+          "72": 2,
+          "73": 6,
+          "74": 2,
+          "75": 3,
+          "76": 7,
+          "77": 2,
+          "78": 3,
+          "79": 2,
+          "80": 1
         },
         "overdue": [],
         "avg": 25.0
       },
       "ai_context": {
         "game": "快乐8",
-        "latest_qihao": "2026213",
-        "latest_date": "2026-08-11",
+        "latest_qihao": "2026214",
+        "latest_date": "2026-08-12",
         "data_count": 100,
-        "zone_pred": "1-20区",
+        "zone_pred": "21-40区",
         "total_pred": "中",
         "overdue_top10": [],
         "hot_nums": [
           2,
           4,
-          6,
-          7,
           10,
-          11,
           12,
+          15,
           18,
           27,
-          29
+          29,
+          32,
+          35
         ]
       }
     }
   },
   "backtest": {
-    "date": "2026-08-11",
+    "date": "2026-08-12",
     "games": {
       "3d": {
         "actual": [
-          8,
-          7,
-          2
+          5,
+          4,
+          5
         ],
         "hit_count": 0,
         "partial_count": 0
@@ -1911,53 +1911,53 @@
         "group_results": [
           {
             "red_hit": 1,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 2,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 2,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 3,
             "blue_hit": 1
           },
           {
-            "red_hit": 0,
+            "red_hit": 1,
             "blue_hit": 0
           },
           {
             "red_hit": 1,
             "blue_hit": 0
+          },
+          {
+            "red_hit": 2,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 2,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 1,
+            "blue_hit": 1
           }
         ],
-        "best_red_hit": 3
+        "best_red_hit": 2
       },
       "kl8": {
         "actual": [
-          6,
+          2,
           7,
-          8,
-          11,
           12,
-          13,
           18,
+          20,
           21,
-          33,
-          36,
+          23,
+          25,
+          32,
+          34,
+          35,
           37,
-          42,
-          44,
-          56,
-          57,
-          58,
-          60,
-          66,
-          71,
-          80
+          40,
+          45,
+          47,
+          51,
+          55,
+          59,
+          61,
+          71
         ],
         "play_results": {
           "xuan4": {
@@ -1966,21 +1966,10 @@
             "groups": [
               {
                 "nums": [
-                  14,
-                  32,
-                  46,
-                  68
-                ],
-                "hit": 0,
-                "balls": 4,
-                "won": false
-              },
-              {
-                "nums": [
                   2,
-                  37,
-                  46,
-                  66
+                  27,
+                  45,
+                  69
                 ],
                 "hit": 2,
                 "balls": 4,
@@ -1989,9 +1978,20 @@
               {
                 "nums": [
                   2,
-                  37,
-                  46,
-                  65
+                  27,
+                  45,
+                  62
+                ],
+                "hit": 2,
+                "balls": 4,
+                "won": false
+              },
+              {
+                "nums": [
+                  6,
+                  32,
+                  60,
+                  62
                 ],
                 "hit": 1,
                 "balls": 4,
@@ -2007,11 +2007,11 @@
             "groups": [
               {
                 "nums": [
-                  4,
-                  27,
+                  12,
+                  13,
+                  37,
                   42,
-                  50,
-                  66
+                  65
                 ],
                 "hit": 2,
                 "balls": 5,
@@ -2019,23 +2019,23 @@
               },
               {
                 "nums": [
-                  14,
-                  24,
-                  32,
-                  51,
-                  68
+                  2,
+                  5,
+                  38,
+                  44,
+                  69
                 ],
-                "hit": 0,
+                "hit": 1,
                 "balls": 5,
                 "won": false
               },
               {
                 "nums": [
-                  2,
-                  5,
-                  23,
-                  45,
-                  68
+                  4,
+                  29,
+                  44,
+                  52,
+                  65
                 ],
                 "hit": 0,
                 "balls": 5,
@@ -2051,22 +2051,22 @@
             "groups": [
               {
                 "nums": [
-                  4,
+                  11,
                   14,
-                  27,
-                  32,
-                  46,
-                  51,
+                  33,
+                  37,
+                  42,
+                  45,
                   65,
                   69
                 ],
-                "hit": 0,
+                "hit": 2,
                 "balls": 5,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 0
+            "best_hit": 2
           },
           "xuan6": {
             "name": "选六",
@@ -2074,38 +2074,38 @@
             "groups": [
               {
                 "nums": [
-                  12,
-                  21,
-                  50,
-                  60,
-                  64,
+                  14,
+                  32,
+                  43,
+                  45,
+                  62,
+                  69
+                ],
+                "hit": 2,
+                "balls": 6,
+                "won": false
+              },
+              {
+                "nums": [
+                  7,
+                  16,
+                  33,
+                  35,
+                  44,
                   65
                 ],
-                "hit": 3,
+                "hit": 2,
                 "balls": 6,
                 "won": false
               },
               {
                 "nums": [
-                  1,
-                  27,
-                  43,
-                  46,
-                  62,
-                  66
-                ],
-                "hit": 1,
-                "balls": 6,
-                "won": false
-              },
-              {
-                "nums": [
-                  11,
-                  16,
-                  28,
-                  34,
-                  45,
-                  80
+                  2,
+                  6,
+                  21,
+                  49,
+                  50,
+                  69
                 ],
                 "hit": 2,
                 "balls": 6,
@@ -2113,7 +2113,7 @@
               }
             ],
             "any_won": false,
-            "best_hit": 3
+            "best_hit": 2
           },
           "xuan9": {
             "name": "选九",
@@ -2121,31 +2121,31 @@
             "groups": [
               {
                 "nums": [
-                  11,
-                  12,
-                  24,
-                  36,
+                  6,
+                  14,
+                  19,
+                  27,
+                  32,
                   41,
-                  42,
                   45,
-                  69,
-                  80
+                  62,
+                  65
                 ],
-                "hit": 5,
+                "hit": 2,
                 "balls": 9,
                 "won": false
               },
               {
                 "nums": [
-                  1,
-                  4,
-                  19,
+                  10,
+                  20,
                   27,
-                  37,
-                  46,
-                  51,
+                  32,
+                  41,
+                  44,
+                  62,
                   65,
-                  80
+                  78
                 ],
                 "hit": 2,
                 "balls": 9,
@@ -2153,7 +2153,7 @@
               }
             ],
             "any_won": false,
-            "best_hit": 5
+            "best_hit": 2
           },
           "xuan10": {
             "name": "选十",
@@ -2161,27 +2161,27 @@
             "groups": [
               {
                 "nums": [
-                  2,
-                  9,
-                  13,
-                  14,
-                  29,
-                  34,
-                  46,
+                  10,
+                  20,
+                  32,
+                  33,
+                  35,
+                  41,
                   51,
-                  66,
-                  79
+                  62,
+                  69,
+                  80
                 ],
-                "hit": 2,
+                "hit": 4,
                 "balls": 10,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 4
           }
         },
-        "best_hit": 5
+        "best_hit": 4
       }
     }
   },
