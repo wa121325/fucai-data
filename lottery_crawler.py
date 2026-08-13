@@ -1,139 +1,145 @@
 """
-福彩开奖数据爬虫 - 17500.cn 版
-数据源：data.17500.cn 文本存档
-输出：latest.json + history.json（追加历史，保留近100期用于走势图）
+福彩开奖数据爬虫
+数据源：data.17500.cn
+输出：latest.json（最新一期）、history.json（全量历史，ML训练用）
+
+运行模式：
+  python lottery_crawler.py          # 日常模式：只抓最新，追加到history
+  python lottery_crawler.py --full   # 全量模式：抓全部历史（首次运行时用）
 """
-import requests
-import json
-import re
-import sys
+import requests, json, re, sys
 from datetime import datetime
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
 URL_MAP = {
     'ssq': 'http://data.17500.cn/ssq_asc.txt',
     '3d':  'http://data.17500.cn/3d_asc.txt',
     'qlc': 'http://data.17500.cn/7lc_asc.txt',
-    'kl8': 'http://data.17500.cn/kl8_asc.txt'
+    'kl8': 'http://data.17500.cn/kl8_asc.txt',
 }
 
-HISTORY_KEEP = 100   # 每种彩票保留最近多少期
-
-def parse_17500_line(game, text):
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
-    if not lines:
-        raise ValueError("Empty content")
-
-    line = lines[-1]
-    print(f'  [原始最后一行] {line}')
+# ── 解析单行 ─────────────────────────────────────────
+def parse_line(game, line):
     parts = line.split()
+    if len(parts) < 4:
+        return None
     qihao = parts[0]
-
-    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line)
-    if not date_match:
-        raise ValueError(f"未找到日期: {line}")
-    date_str = date_match.group(1)
-
-    raw_nums = []
-    for p in parts[1:]:
-        if re.match(r'^\d+$', p) and p != qihao and len(p) <= 3:
-            raw_nums.append(int(p))
-
-    print(f'  [解析] 期号={qihao} 日期={date_str} 号码={raw_nums}')
-
-    if game == 'ssq':
-        if len(raw_nums) < 7:
-            raise ValueError(f"SSQ号码不足7个: {raw_nums}")
-        return {'qihao': qihao, 'date': date_str,
-                'red': sorted(raw_nums[:6]), 'blue': raw_nums[6]}
-    elif game == '3d':
-        if len(raw_nums) < 3:
-            raise ValueError(f"3D号码不足3个: {raw_nums}")
-        return {'qihao': qihao, 'date': date_str, 'digits': raw_nums[:3]}
-    elif game == 'qlc':
-        if len(raw_nums) < 8:
-            raise ValueError(f"QLC号码不足8个: {raw_nums}")
-        return {'qihao': qihao, 'date': date_str,
-                'numbers': sorted(raw_nums[:7]), 'special': raw_nums[7]}
-    elif game == 'kl8':
-        if len(raw_nums) < 20:
-            raise ValueError(f"KL8号码不足20个: {raw_nums}")
-        return {'qihao': qihao, 'date': date_str,
-                'numbers': sorted(raw_nums[:20])}
-
-# ── 历史数据（多期）：读取文件里最后N行 ─────────────────────
-def parse_17500_history(game, text, n=HISTORY_KEEP):
-    """解析txt里最后n期，返回列表（旧→新顺序）"""
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
-    records = []
-    for line in lines:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        qihao = parts[0]
-        if not re.match(r'^\d{6,}$', qihao):
-            continue
-        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', line)
-        if not date_match:
-            continue
-        date_str = date_match.group(1)
-        raw_nums = [int(p) for p in parts[1:]
-                    if re.match(r'^\d+$', p) and p != qihao and len(p) <= 3]
-        try:
-            if game == 'ssq' and len(raw_nums) >= 7:
-                records.append({'qihao': qihao, 'date': date_str,
-                                'red': sorted(raw_nums[:6]), 'blue': raw_nums[6]})
-            elif game == '3d' and len(raw_nums) >= 3:
-                records.append({'qihao': qihao, 'date': date_str,
-                                'digits': raw_nums[:3]})
-            elif game == 'qlc' and len(raw_nums) >= 8:
-                records.append({'qihao': qihao, 'date': date_str,
-                                'numbers': sorted(raw_nums[:7]), 'special': raw_nums[7]})
-            elif game == 'kl8' and len(raw_nums) >= 20:
-                records.append({'qihao': qihao, 'date': date_str,
-                                'numbers': sorted(raw_nums[:20])})
-        except Exception:
-            continue
-    return records[-n:]   # 取最近n期
-
-def fetch_game(game, name):
+    if not re.match(r'^\d{6,}$', qihao):
+        return None
+    m = re.search(r'(\d{4}-\d{2}-\d{2})', line)
+    if not m:
+        return None
+    date_str = m.group(1)
+    raw = [int(p) for p in parts[1:] if re.match(r'^\d+$', p) and p != qihao and len(p) <= 3]
     try:
-        resp = requests.get(URL_MAP[game], headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        latest = parse_17500_line(game, resp.text)
-        history = parse_17500_history(game, resp.text)
-        print(f'  ✓ {name} 期号:{latest["qihao"]} 日期:{latest["date"]} 历史:{len(history)}期')
-        return latest, history
+        if game == 'ssq' and len(raw) >= 7:
+            return {'qihao': qihao, 'date': date_str, 'red': sorted(raw[:6]), 'blue': raw[6]}
+        elif game == '3d' and len(raw) >= 3:
+            return {'qihao': qihao, 'date': date_str, 'digits': raw[:3]}
+        elif game == 'qlc' and len(raw) >= 8:
+            return {'qihao': qihao, 'date': date_str, 'numbers': sorted(raw[:7]), 'special': raw[7]}
+        elif game == 'kl8' and len(raw) >= 20:
+            return {'qihao': qihao, 'date': date_str, 'numbers': sorted(raw[:20])}
+    except Exception:
+        pass
+    return None
+
+# ── 解析全文本 ───────────────────────────────────────
+def parse_all(game, text):
+    """解析txt所有行，返回去重的全量记录列表（旧→新）"""
+    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    seen, records = set(), []
+    for line in lines:
+        rec = parse_line(game, line)
+        if rec and rec['qihao'] not in seen:
+            seen.add(rec['qihao'])
+            records.append(rec)
+    return records  # 已升序（17500是升序文件）
+
+# ── 拉取文本 ─────────────────────────────────────────
+def fetch_text(game, name):
+    try:
+        r = requests.get(URL_MAP[game], headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        print(f'  ✗ {name} 失败: {e}', file=sys.stderr)
-        return None, None
+        print(f'  ✗ {name} 请求失败: {e}', file=sys.stderr)
+        return None
 
+# ── 主流程 ───────────────────────────────────────────
 def main():
-    print(f'开始抓取 {datetime.now().strftime("%Y-%m-%d")} 最新开奖数据')
-    games = [('ssq','双色球'), ('3d','福彩3D'), ('qlc','七乐彩'), ('kl8','快乐8')]
+    full_mode = '--full' in sys.argv
+    mode_label = '全量历史' if full_mode else '日常增量'
+    print(f'福彩开奖数据爬虫 [{mode_label}模式] {datetime.now().strftime("%Y-%m-%d %H:%M")}')
 
+    # 读取已有history（日常模式用于追加）
+    existing_history = {}
+    if not full_mode:
+        try:
+            with open('history.json', encoding='utf-8') as f:
+                existing_history = json.load(f)
+            print('已读取现有 history.json')
+        except Exception:
+            print('未找到 history.json，将创建新文件')
+
+    games = [('ssq','双色球'), ('3d','福彩3D'), ('qlc','七乐彩'), ('kl8','快乐8')]
     latest_out  = {'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     history_out = {'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     ok = 0
 
     for game, name in games:
         print(f'\n── {name} ──')
-        latest, history = fetch_game(game, name)
-        if latest:
-            latest_out[game]  = latest
-            history_out[game] = history
-            ok += 1
+        text = fetch_text(game, name)
+        if not text:
+            continue
 
+        all_records = parse_all(game, text)
+        if not all_records:
+            print(f'  ✗ {name} 解析失败')
+            continue
+
+        latest = all_records[-1]
+        print(f'  最新: 期号={latest["qihao"]} 日期={latest["date"]}')
+        print(f'  全量记录数: {len(all_records)}期')
+
+        if full_mode:
+            # 全量模式：直接用所有记录
+            history_records = all_records
+        else:
+            # 日常模式：合并已有记录 + 新记录，去重
+            old = existing_history.get(game, [])
+            old_qihaos = {r['qihao'] for r in old}
+            new_ones = [r for r in all_records if r['qihao'] not in old_qihaos]
+            history_records = old + new_ones
+            # 按期号排序
+            history_records.sort(key=lambda x: x['qihao'])
+            if new_ones:
+                print(f'  新增 {len(new_ones)} 期，累计 {len(history_records)} 期')
+            else:
+                print(f'  无新数据，保持 {len(history_records)} 期')
+
+        latest_out[game]  = latest
+        history_out[game] = history_records
+        ok += 1
+        print(f'  ✓ {name} 完成，history共 {len(history_records)} 期')
+
+    # 写出文件
     with open('latest.json', 'w', encoding='utf-8') as f:
         json.dump(latest_out, f, ensure_ascii=False, indent=2)
 
     with open('history.json', 'w', encoding='utf-8') as f:
-        json.dump(history_out, f, ensure_ascii=False)   # 不缩进，节省体积
+        json.dump(history_out, f, ensure_ascii=False)  # 不缩进，节省体积
 
-    print(f'\n完成：{ok}/4 成功 → latest.json + history.json')
+    # 统计
+    print(f'\n完成：{ok}/4 成功')
+    for game, _ in games:
+        recs = history_out.get(game, [])
+        if recs:
+            print(f'  {game}: {len(recs)}期 ({recs[0]["date"]} ~ {recs[-1]["date"]})')
+
     if ok == 0:
         sys.exit(1)
 
