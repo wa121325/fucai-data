@@ -1,509 +1,508 @@
 {
-  "updated_at": "2026-08-12 14:41:05",
+  "updated_at": "2026-08-13 13:41:27",
   "models_used": {
     "rf": true,
     "xgb": true,
     "lgb": true,
-    "ensemble": true,
     "markov": true,
-    "omission": true
+    "omission": true,
+    "ensemble": true
   },
   "predictions": {
     "3d": {
       "game": "3d",
-      "data_count": 100,
-      "window": 50,
-      "updated_at": "2026-08-12 14:37",
+      "data_count": 8722,
+      "updated_at": "2026-08-13 13:25",
       "models": {
         "bai": {
           "target": "bai",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 8717,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 11.4,
-            "xgb": 11.4,
-            "lgb": 11.4,
-            "ensemble": 11.4
+            "rf": 11.0,
+            "xgb": 11.0,
+            "lgb": 15.0,
+            "ensemble": 11.0
           },
-          "feature_importance": [
+          "feat_imp": [
             {
-              "name": "s_mean_50",
-              "score": 0.0429
+              "name": "sum_std_10",
+              "score": 0.0444
             },
             {
-              "name": "s_mean_20",
-              "score": 0.0422
+              "name": "sum_std_20",
+              "score": 0.042
             },
             {
-              "name": "sum_tail",
-              "score": 0.0412
+              "name": "sum_std_50",
+              "score": 0.0407
             },
             {
-              "name": "sum",
-              "score": 0.0399
+              "name": "sum_std_5",
+              "score": 0.0386
             },
             {
-              "name": "g_mean_50",
-              "score": 0.0375
+              "name": "sum_mean_50",
+              "score": 0.0378
             }
           ],
           "prediction": {
             "value": 5,
-            "confidence": 74.8,
+            "confidence": 17.0,
             "probs": {
-              "0": 2.2,
-              "1": 1.0,
-              "2": 2.5,
-              "3": 2.5,
-              "4": 3.8,
-              "5": 74.8,
-              "6": 2.8,
-              "7": 3.3,
-              "8": 4.5,
-              "9": 2.6
+              "0": 7.1,
+              "1": 13.5,
+              "2": 11.3,
+              "3": 10.7,
+              "4": 6.4,
+              "5": 17.0,
+              "6": 8.1,
+              "7": 9.0,
+              "8": 9.5,
+              "9": 7.4
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 8,
-              "pred_ensemble": 4,
-              "pred_rf": 5
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 9,
-              "pred_ensemble": 8,
-              "pred_rf": 8
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 4,
-              "pred_ensemble": 9,
-              "pred_rf": 9
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 6,
-              "pred_ensemble": 9,
-              "pred_rf": 9
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 9,
-              "pred_rf": 9
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 7,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred": 7,
+              "hit": 1
             },
             {
               "true": 7,
-              "pred_ensemble": 4,
-              "pred_rf": 4
+              "pred": 3,
+              "hit": 0
             },
             {
               "true": 5,
-              "pred_ensemble": 4,
-              "pred_rf": 6
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 8,
-              "pred_ensemble": 2,
-              "pred_rf": 9
+              "pred": 7,
+              "hit": 0
             },
             {
               "true": 5,
-              "pred_ensemble": 8,
-              "pred_rf": 8
+              "pred": 1,
+              "hit": 0
             }
           ]
         },
         "shi": {
           "target": "shi",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 8717,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 14.3,
-            "xgb": 20.0,
-            "lgb": 11.4,
-            "ensemble": 17.1
+            "rf": 9.0,
+            "xgb": 6.0,
+            "lgb": 9.0,
+            "ensemble": 9.0
           },
-          "feature_importance": [
+          "feat_imp": [
             {
-              "name": "sum_mean_50",
-              "score": 0.0592
+              "name": "sum_std_5",
+              "score": 0.0402
             },
             {
               "name": "sum_std_20",
-              "score": 0.0485
+              "score": 0.0395
             },
             {
-              "name": "gap_bs",
-              "score": 0.0407
+              "name": "sum_std_10",
+              "score": 0.0377
             },
             {
-              "name": "b_mean_10",
-              "score": 0.0352
+              "name": "sum_std_50",
+              "score": 0.0369
             },
             {
-              "name": "g",
-              "score": 0.0337
+              "name": "b_mean_50",
+              "score": 0.0361
             }
           ],
           "prediction": {
             "value": 4,
-            "confidence": 70.8,
+            "confidence": 27.5,
             "probs": {
-              "0": 3.1,
-              "1": 3.4,
-              "2": 4.4,
-              "3": 2.6,
-              "4": 70.8,
-              "5": 1.7,
-              "6": 1.8,
-              "7": 7.3,
-              "8": 2.5,
-              "9": 2.5
+              "0": 7.8,
+              "1": 9.1,
+              "2": 7.0,
+              "3": 5.7,
+              "4": 27.5,
+              "5": 8.8,
+              "6": 6.8,
+              "7": 10.3,
+              "8": 9.4,
+              "9": 7.5
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 1,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 6,
+              "hit": 0
             },
             {
               "true": 4,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred": 5,
+              "hit": 0
             },
             {
               "true": 3,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 8,
-              "pred_ensemble": 1,
-              "pred_rf": 3
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 5,
-              "pred_ensemble": 9,
-              "pred_rf": 9
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 0,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 6,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred": 6,
+              "hit": 1
             },
             {
               "true": 7,
-              "pred_ensemble": 7,
-              "pred_rf": 2
+              "pred": 8,
+              "hit": 0
             },
             {
               "true": 4,
-              "pred_ensemble": 7,
-              "pred_rf": 7
+              "pred": 7,
+              "hit": 0
             }
           ]
         },
         "ge": {
           "target": "ge",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 8717,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 20.0,
-            "xgb": 17.1,
-            "lgb": 11.4,
-            "ensemble": 20.0
+            "rf": 10.0,
+            "xgb": 9.0,
+            "lgb": 7.0,
+            "ensemble": 9.0
           },
-          "feature_importance": [
+          "feat_imp": [
             {
-              "name": "span",
-              "score": 0.0507
+              "name": "sum_std_5",
+              "score": 0.0452
             },
             {
-              "name": "span_mean_50",
-              "score": 0.0435
+              "name": "sum_std_10",
+              "score": 0.0405
             },
             {
-              "name": "sum_tail",
-              "score": 0.0408
+              "name": "sum_std_50",
+              "score": 0.0405
             },
             {
-              "name": "g_mean_50",
-              "score": 0.0399
+              "name": "sum_std_20",
+              "score": 0.0398
             },
             {
               "name": "b_mean_50",
-              "score": 0.0372
+              "score": 0.0381
             }
           ],
           "prediction": {
             "value": 5,
-            "confidence": 81.1,
+            "confidence": 20.5,
             "probs": {
-              "0": 1.4,
-              "1": 2.0,
-              "2": 6.0,
-              "3": 0.9,
-              "4": 2.0,
-              "5": 81.1,
-              "6": 1.3,
-              "7": 1.7,
-              "8": 2.0,
-              "9": 1.5
+              "0": 8.6,
+              "1": 10.3,
+              "2": 10.1,
+              "3": 9.5,
+              "4": 7.7,
+              "5": 20.5,
+              "6": 7.9,
+              "7": 7.5,
+              "8": 9.6,
+              "9": 8.3
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 4,
-              "pred_ensemble": 8,
-              "pred_rf": 8
+              "pred": 5,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 6,
-              "pred_rf": 6
+              "pred": 8,
+              "hit": 0
             },
             {
               "true": 5,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred": 3,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 8,
-              "pred_rf": 8
+              "pred": 8,
+              "hit": 0
             },
             {
               "true": 9,
-              "pred_ensemble": 0,
-              "pred_rf": 8
+              "pred": 8,
+              "hit": 0
             },
             {
               "true": 5,
-              "pred_ensemble": 5,
-              "pred_rf": 5
+              "pred": 5,
+              "hit": 1
             },
             {
               "true": 8,
-              "pred_ensemble": 9,
-              "pred_rf": 5
+              "pred": 5,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred": 8,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 8,
-              "pred_rf": 8
+              "pred": 8,
+              "hit": 0
             },
             {
               "true": 5,
-              "pred_ensemble": 5,
-              "pred_rf": 5
+              "pred": 2,
+              "hit": 0
             }
           ]
         },
         "sum_group": {
           "target": "sum_group",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 8717,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 60.0,
-            "xgb": 57.1,
-            "lgb": 48.6,
-            "ensemble": 54.3
+            "rf": 55.0,
+            "xgb": 54.0,
+            "lgb": 56.0,
+            "ensemble": 55.0
           },
-          "feature_importance": [
+          "feat_imp": [
             {
-              "name": "span_mean_5",
-              "score": 0.0498
+              "name": "sum_std_50",
+              "score": 0.0475
             },
             {
-              "name": "sum_mean_5",
-              "score": 0.0459
+              "name": "sum_std_20",
+              "score": 0.0423
             },
             {
-              "name": "span_mean_50",
-              "score": 0.0431
+              "name": "sum_std_5",
+              "score": 0.0415
             },
             {
-              "name": "g_mean_10",
-              "score": 0.0416
+              "name": "sum_mean_50",
+              "score": 0.0414
             },
             {
-              "name": "sum_tail",
-              "score": 0.0391
+              "name": "sum_mean_20",
+              "score": 0.0399
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 93.9,
+            "confidence": 60.9,
             "probs": {
-              "0": 2.4,
-              "1": 93.9,
-              "2": 3.7
+              "0": 20.8,
+              "1": 60.9,
+              "2": 18.3
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             }
           ]
         },
         "odd_cnt": {
           "target": "odd_cnt",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 8717,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 51.4,
-            "xgb": 45.7,
-            "lgb": 45.7,
-            "ensemble": 42.9
+            "rf": 36.0,
+            "xgb": 34.0,
+            "lgb": 38.0,
+            "ensemble": 36.0
           },
-          "feature_importance": [
+          "feat_imp": [
+            {
+              "name": "sum_std_20",
+              "score": 0.0408
+            },
+            {
+              "name": "sum_std_5",
+              "score": 0.0405
+            },
             {
               "name": "sum_std_10",
-              "score": 0.0385
+              "score": 0.0401
             },
             {
-              "name": "span_mean_10",
+              "name": "sum_std_50",
+              "score": 0.0382
+            },
+            {
+              "name": "b_mean_50",
               "score": 0.0378
-            },
-            {
-              "name": "b_mean_10",
-              "score": 0.0375
-            },
-            {
-              "name": "b",
-              "score": 0.0366
-            },
-            {
-              "name": "g",
-              "score": 0.0363
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 83.1,
+            "confidence": 48.4,
             "probs": {
-              "0": 4.0,
-              "1": 9.9,
-              "2": 83.1,
-              "3": 3.1
+              "0": 10.8,
+              "1": 30.6,
+              "2": 48.4,
+              "3": 10.2
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 2
+              "pred": 2,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 2,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 3,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 2,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 2,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 2,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 2,
+              "hit": 1
             }
           ]
         }
@@ -511,1081 +510,524 @@
       "recommendation": {
         "groups": [
           [
-            5,
+            8,
             4,
-            7
+            0
+          ],
+          [
+            7,
+            2,
+            3
+          ],
+          [
+            1,
+            2,
+            3
           ],
           [
             8,
-            0,
-            5
+            9,
+            0
           ],
           [
             8,
-            0,
-            5
+            7,
+            6
           ],
           [
             5,
-            2,
-            5
-          ],
-          [
-            5,
-            4,
-            5
-          ],
-          [
-            5,
-            2,
-            2
+            7,
+            0
           ]
         ],
         "pos_candidates": [
           [
+            1,
             5,
-            0,
-            8,
             3,
-            1
+            7,
+            8
           ],
           [
             4,
-            0,
-            2,
+            9,
             7,
-            9
+            2,
+            3
           ],
           [
             5,
-            7,
-            2,
-            4,
+            6,
+            3,
+            9,
             0
           ]
         ],
-        "markov": [
-          {
-            "pos": 0,
-            "from": 5,
-            "top3": [
-              [
-                0,
-                22.2
-              ],
-              [
-                5,
-                22.2
-              ],
-              [
-                8,
-                22.2
-              ]
-            ]
-          },
-          {
-            "pos": 1,
-            "from": 4,
-            "top3": [
-              [
-                0,
-                40.0
-              ],
-              [
-                7,
-                20.0
-              ],
-              [
-                2,
-                20.0
-              ]
-            ]
-          },
-          {
-            "pos": 2,
-            "from": 5,
-            "top3": [
-              [
-                7,
-                23.1
-              ],
-              [
-                2,
-                15.4
-              ],
-              [
-                4,
-                15.4
-              ]
-            ]
-          }
-        ],
-        "omission_overdue": [
-          [
-            0,
-            1,
-            3
-          ],
-          [
-            2,
-            9
-          ],
-          [
-            0,
-            3,
-            6,
-            7
-          ]
-        ],
         "sum_pred": "中(10-17)",
-        "note": "综合ML+马尔可夫转移+遗漏分析三路投票，仅供娱乐参考。"
+        "note": "综合ML+马尔可夫+遗漏三路投票预测下一期，仅供娱乐参考。"
       },
       "markov": [
         {
-          "pos": 0,
+          "pos_name": "百位",
           "from": 5,
           "top3": [
-            [
-              0,
-              22.2
-            ],
-            [
-              5,
-              22.2
-            ],
-            [
-              8,
-              22.2
-            ]
+            {
+              "val": 6,
+              "prob": 12.4
+            },
+            {
+              "val": 7,
+              "prob": 12.2
+            },
+            {
+              "val": 8,
+              "prob": 10.9
+            }
           ]
         },
         {
-          "pos": 1,
+          "pos_name": "十位",
           "from": 4,
           "top3": [
-            [
-              0,
-              40.0
-            ],
-            [
-              7,
-              20.0
-            ],
-            [
-              2,
-              20.0
-            ]
+            {
+              "val": 3,
+              "prob": 11.3
+            },
+            {
+              "val": 7,
+              "prob": 11.3
+            },
+            {
+              "val": 9,
+              "prob": 11.2
+            }
           ]
         },
         {
-          "pos": 2,
+          "pos_name": "个位",
           "from": 5,
           "top3": [
-            [
-              7,
-              23.1
-            ],
-            [
-              2,
-              15.4
-            ],
-            [
-              4,
-              15.4
-            ]
+            {
+              "val": 6,
+              "prob": 11.6
+            },
+            {
+              "val": 9,
+              "prob": 11.2
+            },
+            {
+              "val": 5,
+              "prob": 10.7
+            }
           ]
         }
       ],
-      "omission_summary": {
-        "overdue": [
-          [
+      "omission": [
+        {
+          "pos_name": "百位",
+          "omission": {
+            "0": 24,
+            "1": 43,
+            "2": 5,
+            "3": 13,
+            "4": 7,
+            "5": 0,
+            "6": 6,
+            "7": 3,
+            "8": 1,
+            "9": 8
+          },
+          "overdue": [
             0,
             1,
             3
-          ],
-          [
+          ]
+        },
+        {
+          "pos_name": "十位",
+          "omission": {
+            "0": 3,
+            "1": 7,
+            "2": 13,
+            "3": 6,
+            "4": 0,
+            "5": 4,
+            "6": 2,
+            "7": 1,
+            "8": 5,
+            "9": 15
+          },
+          "overdue": [
             2,
             9
-          ],
-          [
+          ]
+        },
+        {
+          "pos_name": "个位",
+          "omission": {
+            "0": 34,
+            "1": 2,
+            "2": 1,
+            "3": 20,
+            "4": 9,
+            "5": 0,
+            "6": 23,
+            "7": 29,
+            "8": 3,
+            "9": 5
+          },
+          "overdue": [
             0,
             3,
             6,
             7
           ]
-        ]
-      },
+        }
+      ],
       "ai_context": {
-        "game": "福彩3D",
+        "game": "3d",
+        "data_count": 8722,
         "latest_qihao": "2026214",
         "latest_date": "2026-08-12",
-        "data_count": 100,
+        "ml_best": {
+          "target": "sum_group",
+          "acc": 55.0
+        },
         "latest_digits": [
           5,
           4,
           5
         ],
-        "ml_top_accuracy": "sum_group目标集成准确率54.3%",
-        "markov_summary": [
-          "百位上期5→最可能0(22.2%)",
-          "十位上期4→最可能0(40.0%)",
-          "个位上期5→最可能7(23.1%)"
+        "markov": [
+          "百位上期5→预测6(12.4%)",
+          "十位上期4→预测3(11.3%)",
+          "个位上期5→预测6(11.6%)"
         ],
-        "overdue_summary": [
+        "overdue": [
           "百位遗漏号:[0, 1, 3]",
           "十位遗漏号:[2, 9]",
           "个位遗漏号:[0, 3, 6, 7]"
         ],
+        "sum_pred": 1,
         "recommend_groups": [
           [
-            5,
+            8,
             4,
-            7
+            0
+          ],
+          [
+            7,
+            2,
+            3
+          ],
+          [
+            1,
+            2,
+            3
           ],
           [
             8,
-            0,
-            5
+            9,
+            0
           ],
           [
             8,
-            0,
-            5
+            7,
+            6
           ],
           [
             5,
-            2,
-            5
-          ],
-          [
-            5,
-            4,
-            5
-          ],
-          [
-            5,
-            2,
-            2
+            7,
+            0
           ]
-        ],
-        "sum_pred": "中(10-17)"
-      }
-    },
-    "ssq": {
-      "game": "ssq",
-      "data_count": 100,
-      "window": 50,
-      "updated_at": "2026-08-12 14:39",
-      "models": {
-        "blue": {
-          "target": "blue",
-          "data_used": 95,
-          "backtest_periods": 35,
-          "accuracy": {
-            "rf": 5.7,
-            "xgb": 5.7,
-            "lgb": 0.0,
-            "ensemble": 2.9
-          },
-          "feature_importance": [
-            {
-              "name": "blue_mean_20",
-              "score": 0.0594
-            },
-            {
-              "name": "sum_std_5",
-              "score": 0.0431
-            },
-            {
-              "name": "blue_mean_10",
-              "score": 0.0422
-            },
-            {
-              "name": "sum_std_50",
-              "score": 0.0405
-            },
-            {
-              "name": "red_sum",
-              "score": 0.0405
-            }
-          ],
-          "prediction": {
-            "value": 11,
-            "confidence": 64.1,
-            "probs": {
-              "1": 2.1,
-              "2": 2.0,
-              "3": 7.6,
-              "4": 4.6,
-              "5": 7.3,
-              "6": 1.4,
-              "7": 1.1,
-              "8": 2.2,
-              "9": 0.3,
-              "10": 0.7,
-              "11": 64.1,
-              "12": 1.4,
-              "13": 0.7,
-              "14": 0.0,
-              "15": 3.6,
-              "16": 0.9
-            }
-          },
-          "backtest_latest": [
-            {
-              "true": 3,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 5,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 15,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 5,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 11,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
-            {
-              "true": 5,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 3,
-              "pred_ensemble": 5,
-              "pred_rf": 5
-            },
-            {
-              "true": 3,
-              "pred_ensemble": 5,
-              "pred_rf": 5
-            },
-            {
-              "true": 5,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            },
-            {
-              "true": 11,
-              "pred_ensemble": 5,
-              "pred_rf": 5
-            }
-          ]
-        },
-        "odd_cnt": {
-          "target": "odd_cnt",
-          "data_used": 95,
-          "backtest_periods": 35,
-          "accuracy": {
-            "rf": 20.0,
-            "xgb": 22.9,
-            "lgb": 14.3,
-            "ensemble": 20.0
-          },
-          "feature_importance": [
-            {
-              "name": "sum_std_50",
-              "score": 0.051
-            },
-            {
-              "name": "sum_mean_10",
-              "score": 0.0503
-            },
-            {
-              "name": "sum_std_10",
-              "score": 0.0475
-            },
-            {
-              "name": "sum_mean_20",
-              "score": 0.0469
-            },
-            {
-              "name": "blue_mean_5",
-              "score": 0.0443
-            }
-          ],
-          "prediction": {
-            "value": 4,
-            "confidence": 69.9,
-            "probs": {
-              "1": 4.3,
-              "2": 4.3,
-              "3": 18.2,
-              "4": 69.9,
-              "5": 3.3
-            }
-          },
-          "backtest_latest": [
-            {
-              "true": 4,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            },
-            {
-              "true": 2,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 3,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 2,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            },
-            {
-              "true": 2,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            },
-            {
-              "true": 3,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            },
-            {
-              "true": 4,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            },
-            {
-              "true": 4,
-              "pred_ensemble": 2,
-              "pred_rf": 2
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 4,
-              "pred_rf": 4
-            },
-            {
-              "true": 4,
-              "pred_ensemble": 3,
-              "pred_rf": 3
-            }
-          ]
-        },
-        "sum_group": {
-          "target": "sum_group",
-          "data_used": 95,
-          "backtest_periods": 35,
-          "accuracy": {
-            "rf": 42.9,
-            "xgb": 42.9,
-            "lgb": 45.7,
-            "ensemble": 42.9
-          },
-          "feature_importance": [
-            {
-              "name": "sum_mean_5",
-              "score": 0.0706
-            },
-            {
-              "name": "sum_std_20",
-              "score": 0.066
-            },
-            {
-              "name": "sum_std_10",
-              "score": 0.0631
-            },
-            {
-              "name": "blue_mean_5",
-              "score": 0.0517
-            },
-            {
-              "name": "odd_mean_10",
-              "score": 0.0471
-            }
-          ],
-          "prediction": {
-            "value": 2,
-            "confidence": 82.3,
-            "probs": {
-              "0": 1.7,
-              "1": 16.0,
-              "2": 82.3
-            }
-          },
-          "backtest_latest": [
-            {
-              "true": 2,
-              "pred_ensemble": 2,
-              "pred_rf": 2
-            },
-            {
-              "true": 0,
-              "pred_ensemble": 2,
-              "pred_rf": 2
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 1
-            },
-            {
-              "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 2
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 2
-            },
-            {
-              "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 2
-            },
-            {
-              "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            },
-            {
-              "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
-            }
-          ]
-        }
-      },
-      "recommendation": {
-        "groups": [
-          {
-            "red": [
-              3,
-              5,
-              10,
-              14,
-              20,
-              28
-            ],
-            "blue": 11
-          },
-          {
-            "red": [
-              10,
-              14,
-              20,
-              25,
-              28,
-              32
-            ],
-            "blue": 3
-          },
-          {
-            "red": [
-              8,
-              10,
-              14,
-              20,
-              23,
-              33
-            ],
-            "blue": 5
-          },
-          {
-            "red": [
-              8,
-              14,
-              16,
-              24,
-              28,
-              31
-            ],
-            "blue": 4
-          },
-          {
-            "red": [
-              3,
-              21,
-              25,
-              27,
-              28,
-              33
-            ],
-            "blue": 15
-          },
-          {
-            "red": [
-              5,
-              20,
-              24,
-              27,
-              28,
-              31
-            ],
-            "blue": 11
-          }
-        ],
-        "blue_recommend": [
-          11,
-          3,
-          5
-        ],
-        "hot_red": [
-          24,
-          18,
-          5,
-          14,
-          25,
-          16,
-          32,
-          27,
-          8,
-          28,
-          30,
-          33
-        ],
-        "overdue_red": [],
-        "overdue_blue": [
-          1,
-          2,
-          4,
-          6
-        ],
-        "odd_pred": 4,
-        "sum_pred": "高(≥100)",
-        "note": "综合ML+遗漏分析+三区均衡选号，仅供娱乐参考。"
-      },
-      "markov": [
-        [
-          6,
-          25.0
-        ],
-        [
-          2,
-          25.0
-        ],
-        [
-          7,
-          25.0
-        ],
-        [
-          5,
-          25.0
         ]
-      ],
-      "omission_summary": {
-        "red_omit": {
-          "1": 8,
-          "2": 1,
-          "3": 16,
-          "4": 2,
-          "5": 3,
-          "6": 4,
-          "7": 4,
-          "8": 17,
-          "9": 0,
-          "10": 5,
-          "11": 0,
-          "12": 0,
-          "13": 1,
-          "14": 1,
-          "15": 2,
-          "16": 1,
-          "17": 7,
-          "18": 3,
-          "19": 12,
-          "20": 1,
-          "21": 10,
-          "22": 4,
-          "23": 2,
-          "24": 1,
-          "25": 0,
-          "26": 18,
-          "27": 2,
-          "28": 7,
-          "29": 13,
-          "30": 0,
-          "31": 5,
-          "32": 6,
-          "33": 0
-        },
-        "red_overdue": [],
-        "blue_omit": {
-          "1": 12,
-          "2": 27,
-          "3": 2,
-          "4": 10,
-          "5": 1,
-          "6": 14,
-          "7": 16,
-          "8": 19,
-          "9": 30,
-          "10": 41,
-          "11": 0,
-          "12": 11,
-          "13": 25,
-          "14": 68,
-          "15": 7,
-          "16": 26
-        },
-        "blue_overdue": [
-          1,
-          2,
-          4,
-          6,
-          7,
-          8,
-          9,
-          10,
-          12,
-          13,
-          14,
-          16
-        ]
-      },
-      "ai_context": {
-        "game": "双色球",
-        "latest_qihao": "2026092",
-        "latest_date": "2026-08-11",
-        "data_count": 100,
-        "latest_red": [
-          9,
-          11,
-          12,
-          25,
-          30,
-          33
-        ],
-        "latest_blue": 11,
-        "blue_overdue": [
-          1,
-          2,
-          4,
-          6,
-          7,
-          8,
-          9,
-          10,
-          12,
-          13,
-          14,
-          16
-        ],
-        "red_overdue": [],
-        "blue_recommend": [
-          11,
-          3,
-          5
-        ],
-        "sum_pred": "高(≥100)",
-        "odd_pred": 4
       }
     },
     "kl8": {
       "game": "kl8",
-      "data_count": 100,
-      "window": 50,
-      "updated_at": "2026-08-12 14:40",
+      "data_count": 2035,
+      "updated_at": "2026-08-13 13:41",
       "models": {
         "odd_group": {
           "target": "odd_group",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 2030,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 57.1,
-            "xgb": 45.7,
+            "rf": 64.0,
+            "xgb": 61.0,
             "lgb": 60.0,
-            "ensemble": 54.3
+            "ensemble": 61.0
           },
-          "feature_importance": [
+          "feat_imp": [
             {
-              "name": "min_n",
-              "score": 0.0469
+              "name": "total_std_20",
+              "score": 0.0443
             },
             {
-              "name": "total_std_10",
-              "score": 0.0414
+              "name": "total_mean_20",
+              "score": 0.043
             },
             {
-              "name": "total_mean_5",
-              "score": 0.0361
+              "name": "total_std_5",
+              "score": 0.038
             },
             {
-              "name": "z2_mean_5",
-              "score": 0.034
+              "name": "total",
+              "score": 0.0359
             },
             {
-              "name": "z3_mean_20",
-              "score": 0.0331
+              "name": "total_std_50",
+              "score": 0.0336
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 72.9,
+            "confidence": 55.0,
             "probs": {
-              "0": 5.0,
-              "1": 22.1,
-              "2": 72.9
+              "0": 9.9,
+              "1": 35.0,
+              "2": 55.0
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 0,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             }
           ]
         },
         "zone_dom": {
           "target": "zone_dom",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 2030,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 51.4,
-            "xgb": 48.6,
-            "lgb": 40.0,
-            "ensemble": 45.7
+            "rf": 38.0,
+            "xgb": 35.0,
+            "lgb": 38.0,
+            "ensemble": 38.0
           },
-          "feature_importance": [
-            {
-              "name": "total",
-              "score": 0.0479
-            },
-            {
-              "name": "total_std_10",
-              "score": 0.0403
-            },
+          "feat_imp": [
             {
               "name": "total_std_5",
+              "score": 0.0422
+            },
+            {
+              "name": "total_std_50",
+              "score": 0.0419
+            },
+            {
+              "name": "total",
+              "score": 0.0394
+            },
+            {
+              "name": "total_std_20",
               "score": 0.0392
             },
             {
-              "name": "z4_mean_50",
-              "score": 0.0373
-            },
-            {
-              "name": "z3_mean_20",
-              "score": 0.0351
+              "name": "total_mean_5",
+              "score": 0.0382
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 67.4,
+            "confidence": 47.1,
             "probs": {
-              "0": 18.4,
-              "1": 67.4,
-              "2": 1.6,
-              "3": 12.6
+              "0": 23.8,
+              "1": 47.1,
+              "2": 8.8,
+              "3": 20.3
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 0,
-              "pred_ensemble": 2,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 1
             },
             {
               "true": 3,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 0
             },
             {
               "true": 0,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 3,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 0,
-              "pred_rf": 0
+              "pred": 0,
+              "hit": 0
             }
           ]
         },
         "total_group": {
           "target": "total_group",
-          "data_used": 95,
-          "backtest_periods": 35,
+          "data_used": 2030,
+          "bt_periods": 100,
           "accuracy": {
-            "rf": 65.7,
-            "xgb": 57.1,
-            "lgb": 57.1,
-            "ensemble": 57.1
+            "rf": 62.0,
+            "xgb": 60.0,
+            "lgb": 59.0,
+            "ensemble": 61.0
           },
-          "feature_importance": [
+          "feat_imp": [
             {
-              "name": "consec_grp",
-              "score": 0.0486
+              "name": "total_mean_5",
+              "score": 0.0395
             },
             {
               "name": "total",
-              "score": 0.0478
+              "score": 0.0379
             },
             {
-              "name": "hot_z1",
-              "score": 0.0428
+              "name": "total_std_5",
+              "score": 0.0362
             },
             {
-              "name": "z3_mean_20",
-              "score": 0.0376
+              "name": "total_std_20",
+              "score": 0.0346
             },
             {
-              "name": "total_mean_20",
-              "score": 0.0331
+              "name": "total_std_10",
+              "score": 0.0344
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 85.4,
+            "confidence": 76.9,
             "probs": {
-              "0": 1.0,
-              "1": 85.4,
-              "2": 13.6
+              "0": 0.9,
+              "1": 76.9,
+              "2": 22.2
             }
           },
-          "backtest_latest": [
+          "bt_detail": [
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 2,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 2,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 2,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 0
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             },
             {
               "true": 1,
-              "pred_ensemble": 1,
-              "pred_rf": 1
+              "pred": 1,
+              "hit": 1
             }
           ]
         }
@@ -1595,155 +1037,155 @@
           "xuan4": {
             "name": "选四",
             "balls": 4,
+            "tip": "4球全中，高赔率",
             "groups": [
               [
-                2,
-                35,
-                51,
-                65
-              ],
-              [
-                10,
+                4,
                 27,
-                53,
-                65
+                49,
+                64
               ],
               [
                 14,
-                26,
-                42,
-                65
+                29,
+                49,
+                61
+              ],
+              [
+                2,
+                32,
+                49,
+                68
               ]
-            ],
-            "tip": "4球全中，高赔率"
+            ]
           },
           "xuan5": {
             "name": "选五",
             "balls": 5,
+            "tip": "5球全中，赔率命中均衡",
             "groups": [
               [
                 2,
-                5,
-                39,
+                40,
                 47,
-                65
+                52,
+                69
               ],
               [
-                4,
-                26,
-                47,
-                51,
-                65
+                1,
+                12,
+                28,
+                57,
+                68
               ],
               [
-                18,
-                26,
-                53,
-                65,
-                78
+                14,
+                35,
+                45,
+                47,
+                61
               ]
-            ],
-            "tip": "5球全中，赔率与命中率均衡"
+            ]
           },
           "xuan5_fu": {
             "name": "选五复式",
             "balls": 5,
+            "tip": "8球复式含56注五球组合",
             "groups": [
               [
-                2,
-                18,
-                26,
-                32,
-                33,
-                42,
-                51,
-                65
+                12,
+                15,
+                29,
+                40,
+                44,
+                58,
+                61,
+                64
               ]
-            ],
-            "tip": "8球覆盖C(8,5)=56注五球组合"
+            ]
           },
           "xuan6": {
             "name": "选六",
             "balls": 6,
+            "tip": "主流玩法，推荐",
             "groups": [
               [
-                12,
-                16,
-                31,
-                34,
-                47,
-                65
-              ],
-              [
                 2,
-                10,
+                4,
                 32,
                 45,
                 63,
-                65
+                69
               ],
               [
-                4,
-                5,
+                2,
                 40,
-                53,
+                49,
                 65,
+                68,
+                70
+              ],
+              [
+                10,
+                22,
+                32,
+                49,
+                58,
                 68
               ]
-            ],
-            "tip": "6球全中，主流玩法推荐"
+            ]
           },
           "xuan9": {
             "name": "选九",
             "balls": 9,
+            "tip": "9球全中，搏高赔率",
             "groups": [
               [
-                1,
-                3,
-                15,
-                27,
-                35,
-                45,
-                57,
-                65,
-                77
-              ],
-              [
-                3,
-                14,
-                15,
+                10,
                 18,
                 27,
+                28,
                 31,
-                51,
-                53,
-                65
+                44,
+                58,
+                61,
+                69
+              ],
+              [
+                2,
+                10,
+                29,
+                35,
+                42,
+                44,
+                47,
+                61,
+                77
               ]
-            ],
-            "tip": "9球全中，搏高赔率"
+            ]
           },
           "xuan10": {
             "name": "选十",
             "balls": 10,
+            "tip": "最高赔率",
             "groups": [
               [
-                1,
-                3,
+                4,
                 14,
-                26,
-                31,
+                15,
+                27,
+                28,
+                29,
                 42,
-                44,
-                50,
-                65,
-                79
+                51,
+                61,
+                69
               ]
-            ],
-            "tip": "10球全中，最高赔率"
+            ]
           }
         },
         "zone_dominant_pred": "21-40区",
-        "total_range_pred": "中",
+        "total_range_pred": "中(640-819)",
         "hot_nums": [
           2,
           4,
@@ -1774,10 +1216,10 @@
           52
         ],
         "overdue": [],
-        "note": "综合ML+遗漏分析+区间均衡选号，按玩法分类推荐，仅供娱乐参考。"
+        "note": "综合ML+遗漏+区间均衡预测下一期，仅供娱乐参考。"
       },
       "markov": null,
-      "omission_summary": {
+      "omission": {
         "omit": {
           "1": 2,
           "2": 0,
@@ -1861,16 +1303,32 @@
           "80": 1
         },
         "overdue": [],
-        "avg": 25.0
+        "avg": 508.8
       },
       "ai_context": {
-        "game": "快乐8",
+        "game": "kl8",
+        "data_count": 2035,
         "latest_qihao": "2026214",
         "latest_date": "2026-08-12",
-        "data_count": 100,
+        "ml_best": {
+          "target": "odd_group",
+          "acc": 61.0
+        },
+        "latest_nums": [
+          2,
+          7,
+          12,
+          18,
+          20,
+          21,
+          23,
+          25,
+          32,
+          34
+        ],
         "zone_pred": "21-40区",
-        "total_pred": "中",
-        "overdue_top10": [],
+        "total_pred": "中(640-819)",
+        "overdue": [],
         "hot_nums": [
           2,
           4,
@@ -1887,7 +1345,7 @@
     }
   },
   "backtest": {
-    "date": "2026-08-12",
+    "date": "2026-08-13",
     "games": {
       "3d": {
         "actual": [
@@ -1895,8 +1353,8 @@
           4,
           5
         ],
-        "hit_count": 0,
-        "partial_count": 0
+        "hit_count": 1,
+        "partial_count": 3
       },
       "ssq": {
         "actual_red": [
@@ -1910,7 +1368,7 @@
         "actual_blue": 11,
         "group_results": [
           {
-            "red_hit": 1,
+            "red_hit": 0,
             "blue_hit": 1
           },
           {
@@ -1922,7 +1380,7 @@
             "blue_hit": 0
           },
           {
-            "red_hit": 2,
+            "red_hit": 0,
             "blue_hit": 0
           },
           {
@@ -1930,7 +1388,7 @@
             "blue_hit": 0
           },
           {
-            "red_hit": 1,
+            "red_hit": 0,
             "blue_hit": 1
           }
         ],
@@ -1965,79 +1423,40 @@
             "balls": 4,
             "groups": [
               {
-                "nums": [
-                  2,
-                  27,
-                  45,
-                  69
-                ],
-                "hit": 2,
+                "hit": 3,
                 "balls": 4,
                 "won": false
               },
               {
-                "nums": [
-                  2,
-                  27,
-                  45,
-                  62
-                ],
-                "hit": 2,
+                "hit": 0,
                 "balls": 4,
                 "won": false
               },
               {
-                "nums": [
-                  6,
-                  32,
-                  60,
-                  62
-                ],
-                "hit": 1,
+                "hit": 0,
                 "balls": 4,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 3
           },
           "xuan5": {
             "name": "选五",
             "balls": 5,
             "groups": [
               {
-                "nums": [
-                  12,
-                  13,
-                  37,
-                  42,
-                  65
-                ],
                 "hit": 2,
                 "balls": 5,
                 "won": false
               },
               {
-                "nums": [
-                  2,
-                  5,
-                  38,
-                  44,
-                  69
-                ],
-                "hit": 1,
+                "hit": 2,
                 "balls": 5,
                 "won": false
               },
               {
-                "nums": [
-                  4,
-                  29,
-                  44,
-                  52,
-                  65
-                ],
-                "hit": 0,
+                "hit": 1,
                 "balls": 5,
                 "won": false
               }
@@ -2050,103 +1469,47 @@
             "balls": 5,
             "groups": [
               {
-                "nums": [
-                  11,
-                  14,
-                  33,
-                  37,
-                  42,
-                  45,
-                  65,
-                  69
-                ],
-                "hit": 2,
+                "hit": 4,
                 "balls": 5,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 4
           },
           "xuan6": {
             "name": "选六",
             "balls": 6,
             "groups": [
               {
-                "nums": [
-                  14,
-                  32,
-                  43,
-                  45,
-                  62,
-                  69
-                ],
-                "hit": 2,
+                "hit": 3,
                 "balls": 6,
                 "won": false
               },
               {
-                "nums": [
-                  7,
-                  16,
-                  33,
-                  35,
-                  44,
-                  65
-                ],
-                "hit": 2,
+                "hit": 3,
                 "balls": 6,
                 "won": false
               },
               {
-                "nums": [
-                  2,
-                  6,
-                  21,
-                  49,
-                  50,
-                  69
-                ],
-                "hit": 2,
+                "hit": 1,
                 "balls": 6,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 3
           },
           "xuan9": {
             "name": "选九",
             "balls": 9,
             "groups": [
               {
-                "nums": [
-                  6,
-                  14,
-                  19,
-                  27,
-                  32,
-                  41,
-                  45,
-                  62,
-                  65
-                ],
                 "hit": 2,
                 "balls": 9,
                 "won": false
               },
               {
-                "nums": [
-                  10,
-                  20,
-                  27,
-                  32,
-                  41,
-                  44,
-                  62,
-                  65,
-                  78
-                ],
                 "hit": 2,
                 "balls": 9,
                 "won": false
@@ -2160,30 +1523,18 @@
             "balls": 10,
             "groups": [
               {
-                "nums": [
-                  10,
-                  20,
-                  32,
-                  33,
-                  35,
-                  41,
-                  51,
-                  62,
-                  69,
-                  80
-                ],
-                "hit": 4,
+                "hit": 0,
                 "balls": 10,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 4
+            "best_hit": 0
           }
         },
         "best_hit": 4
       }
     }
   },
-  "disclaimer": "彩票开奖结果具有完全随机性，本系统仅为数学统计模型演示，预测结果不具有实际预测意义，请理性购彩，量力而行。"
+  "disclaimer": "彩票开奖完全随机，本系统仅为统计模型演示，不具预测意义，请理性购彩。"
 }
