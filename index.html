@@ -2209,123 +2209,137 @@ function renderBacktest(bt){
 function factorial(n){ let r=1; for(let i=2;i<=n;i++) r*=i; return r; }
 
 function renderGamePredict(game, data){
-  const panelIds={'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
-  const contentIds={'3d':'predict3dContent','ssq':'predictSSQContent','kl8':'predictKL8Content'};
-  const panel=document.getElementById(panelIds[game]);
-  const contentEl=document.getElementById(contentIds[game]);
+  const panelIds   = {'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
+  const contentIds = {'3d':'predict3dContent','ssq':'predictSSQContent','kl8':'predictKL8Content'};
+  const panel     = document.getElementById(panelIds[game]);
+  const contentEl = document.getElementById(contentIds[game]);
   if(!data||!data.models){panel.style.display='none';return;}
   panel.style.display='block';
 
   const modelLabels={
-    bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_group:'和值区间',odd_cnt:'奇数个数',
-    blue:'蓝球号码',zone_combo:'三区组合',
-    odd_cnt_group:'奇数区间',zone_dominant:'主落区',total_group:'总和区间'
+    bai:'百位数字', shi:'十位数字', ge:'个位数字',
+    sum_group:'和值区间', odd_cnt:'奇数个数',
+    blue:'蓝球号码',
+    odd_group:'奇数区间', zone_dom:'主落区', total_group:'总和区间'
   };
 
-  let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">近${data.data_count}期数据 · 更新：${data.updated_at}</div>`;
+  let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">全量${data.data_count||'—'}期训练 · ${data.updated_at||''}</div>`;
 
-  for(const [mname,mdata] of Object.entries(data.models)){
+  // ── 各模型卡片 ──
+  for(const [mname,mdata] of Object.entries(data.models||{})){
     if(!mdata||!mdata.accuracy) continue;
-    const acc_rf=mdata.accuracy.random_forest;
-    const acc_xgb=mdata.accuracy.xgboost;
-    const pred=mdata.prediction||{};
+    const acc  = mdata.accuracy || {};
+    const pred = mdata.prediction || {};
     html+=`<div class="pred-model-card">`;
-    html+=`<div class="pred-model-title">目标：${modelLabels[mname]||mname}</div>`;
+    html+=`<div class="pred-model-title">预测目标：${modelLabels[mname]||mname}</div>`;
     html+=`<div class="pred-acc-row">`;
-    html+=`<span class="pred-acc-badge">随机森林 ${acc_rf}%</span>`;
-    if(acc_xgb) html+=`<span class="pred-acc-badge" style="background:#1a3a8b;">XGBoost ${acc_xgb}%</span>`;
+    if(acc.rf!==undefined)       html+=`<span class="pred-acc-badge">随机森林 ${acc.rf}%</span>`;
+    if(acc.xgb!==undefined)      html+=`<span class="pred-acc-badge" style="background:#1a3a8b;">XGBoost ${acc.xgb}%</span>`;
+    if(acc.lgb!==undefined)      html+=`<span class="pred-acc-badge" style="background:#1a6b1a;">LightGBM ${acc.lgb}%</span>`;
+    if(acc.ensemble!==undefined) html+=`<span class="pred-acc-badge" style="background:#6b3a9b;">集成 ${acc.ensemble}%</span>`;
     html+=`</div>`;
     if(pred.value!==undefined){
-      html+=`<div style="font-size:12px;margin-bottom:6px;">预测值：<b style="color:#c81e1e;font-size:14px;">${pred.value}</b>（置信度 ${pred.confidence}%）</div>`;
+      html+=`<div style="font-size:12px;margin-bottom:6px;">预测下一期：`;
+      html+=`<b style="color:#c81e1e;font-size:15px;">${pred.value}</b>`;
+      html+=`（置信度 ${pred.confidence??'—'}%）</div>`;
     }
-    if(pred.probs){
-      const topProbs=Object.entries(pred.probs).sort((a,b)=>b[1]-a[1]).slice(0,6);
-      const maxV=Math.max(...topProbs.map(x=>+x[1]));
-      topProbs.forEach(([k,v])=>{
+    if(pred.probs&&Object.keys(pred.probs).length){
+      const top=Object.entries(pred.probs).sort((a,b)=>b[1]-a[1]).slice(0,6);
+      const maxV=Math.max(...top.map(x=>+x[1]));
+      top.forEach(([k,v])=>{
         html+=`<div class="pred-prob-bar">`;
         html+=`<div class="pred-prob-label">${k} — ${v}%</div>`;
-        html+=`<div class="pred-bar-wrap"><div class="pred-bar-fill" style="width:${v}%;background:${+v===maxV?'#c81e1e':'#8a97b3'}"></div></div>`;
+        html+=`<div class="pred-bar-wrap"><div class="pred-bar-fill" style="width:${Math.min(+v,100)}%;background:${+v===maxV?'#c81e1e':'#8a97b3'}"></div></div>`;
         html+=`</div>`;
       });
     }
-    if(mdata.feature_importance?.length){
+    const fi=mdata.feat_imp||mdata.feature_importance||[];
+    if(fi.length){
       html+=`<div style="margin-top:8px;font-size:11px;color:#888;">关键特征：`;
-      html+=mdata.feature_importance.map(f=>`${f.name}(${(f.score*100).toFixed(1)}%)`).join(' · ');
+      html+=fi.map(f=>`${f.name}(${((f.score||0)*100).toFixed(1)}%)`).join(' · ');
       html+=`</div>`;
     }
-    if(mdata.backtest_latest?.length){
-      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">近期回测（实际→RF/XGB）：`;
-      html+=mdata.backtest_latest.slice(-5).map(b=>{
-        const hit=b.true===b.pred_rf||b.true===b.pred_xgb;
-        return `<span class="bt-tag ${hit?'hit':'miss'}">${b.true}→${b.pred_rf}/${b.pred_xgb}</span>`;
+    const btd=mdata.bt_detail||mdata.backtest_latest||[];
+    if(btd.length){
+      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">近期回测：`;
+      html+=btd.slice(-5).map(b=>{
+        const actual=b.true??'?';
+        const predicted=b.pred??b.pred_ensemble??'?';
+        const hit=b.hit===1||(b.true!==undefined&&b.true===b.pred);
+        return `<span class="bt-tag ${hit?'hit':'miss'}">${actual}→${predicted}${hit?' ✓':''}</span>`;
       }).join(' ');
       html+=`</div>`;
     }
     html+=`</div>`;
   }
 
+  // ── 推荐区 ──
   const rec=data.recommendation||{};
-  html+=`<div style="margin-top:16px;"><div class="sectionTitle" style="font-size:13px;">🎯 综合推荐号码</div><div style="margin:10px 0;">`;
+  html+=`<div style="margin-top:16px;">`;
+  html+=`<div class="sectionTitle" style="font-size:13px;">🎯 综合推荐（预测下一期）</div>`;
+  html+=`<div style="margin:10px 0;">`;
+
   if(game==='3d'){
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">预测和值区间：${rec.sum_range_pred||'—'}</div>`;
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">热号：百${(rec.hot_bai||[]).join('/')} 十${(rec.hot_shi||[]).join('/')} 个${(rec.hot_ge||[]).join('/')}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">预测和值区间：<b>${rec.sum_pred||rec.sum_range_pred||'—'}</b></div>`;
+    const cands=rec.pos_candidates||[];
+    if(cands.length===3)
+      html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">候选号：百[${cands[0].join('/')}] 十[${cands[1].join('/')}] 个[${cands[2].join('/')}]</div>`;
     (rec.groups||[]).forEach((g,i)=>{
-      html+=`<div class="rec-group">第${i+1}注：${g.map(n=>`<span class="ball-r">${n}</span>`).join('')}</div>`;
+      html+=`<div class="rec-group">第${i+1}注：${(Array.isArray(g)?g:[]).map(n=>`<span class="ball-r">${n}</span>`).join('')}</div>`;
     });
+
   } else if(game==='ssq'){
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">蓝球推荐：${(rec.blue_recommend||[]).join('、')} · 预测奇数个：${rec.odd_cnt_pred||'—'} · 和值：${rec.sum_range_pred||'—'}</div>`;
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">热号：${(rec.hot_red||[]).join(' ')} · 冷号：${(rec.cold_red||[]).join(' ')}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">`;
+    html+=`蓝球推荐：<b>${(rec.blue_recommend||[]).join('、')||'—'}</b>`;
+    html+=` · 预测奇数：<b>${rec.odd_pred??rec.odd_cnt_pred??'—'}</b>个`;
+    html+=` · 和值：<b>${rec.sum_pred||rec.sum_range_pred||'—'}</b></div>`;
+    const hot=rec.hot_red||[]; const od=rec.overdue_red||rec.cold_red||[];
+    if(hot.length) html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">热号：${hot.slice(0,12).join(' ')}</div>`;
+    if(od.length)  html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">遗漏回补：${od.slice(0,8).join(' ')}</div>`;
     (rec.groups||[]).forEach((g,i)=>{
-      html+=`<div class="rec-group">第${i+1}注：${(g.red||[]).map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('')}<span class="ball-b">${String(g.blue||0).padStart(2,'0')}</span></div>`;
+      const red=g.red||[]; const blue=g.blue||0;
+      html+=`<div class="rec-group">第${i+1}注：`;
+      html+=red.map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('');
+      html+=`<span class="ball-b">${String(blue).padStart(2,'0')}</span></div>`;
     });
+
   } else if(game==='kl8'){
-    // 模型预测摘要
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">主落区预测：<b>${rec.zone_dominant_pred||'—'}</b> · 总和区间：<b>${rec.total_range_pred||'—'}</b></div>`;
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">近期热号：${(rec.hot_nums||rec.hot20||[]).slice(0,12).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#c81e1e;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:10px;">近期冷号：${(rec.cold_nums||rec.cold20||[]).slice(0,8).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#8a97b3;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
-
-    // 各玩法卡片
-    const plays = rec.plays || {};
-    const playOrder = ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'];
-    const playColors = {xuan4:'#c81e1e',xuan5:'#1560c8',xuan5_fu:'#9b59b6',xuan6:'#1a7a4c',xuan9:'#e87d00',xuan10:'#7a1233'};
-
-    playOrder.forEach(pk=>{
-      const play = plays[pk];
-      if(!play) return;
-      const color = playColors[pk]||'#333';
-      html += `<div style="border:1px solid ${color};border-radius:10px;margin-bottom:10px;overflow:hidden;">`;
-      html += `<div style="background:${color};color:#fff;padding:7px 12px;font-size:13px;font-weight:700;">`;
-      html += `${play.name}（每注选${play.balls}个球）`;
-      html += `<span style="font-size:10px;font-weight:400;margin-left:8px;opacity:.85;">${play.tip||''}</span></div>`;
-      html += `<div style="padding:10px 12px;">`;
-
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">主落区：<b>${rec.zone_dominant_pred||'—'}</b> · 总和：<b>${rec.total_range_pred||'—'}</b></div>`;
+    const hot=rec.hot_nums||rec.hot20||[];
+    const ov=rec.overdue||[];
+    if(hot.length) html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">热号：`+
+      hot.slice(0,12).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#c81e1e;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')+`</div>`;
+    if(ov.length) html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">遗漏回补：`+
+      ov.slice(0,8).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#9b59b6;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')+`</div>`;
+    const plays=rec.plays||{};
+    const order=['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'];
+    const colors={xuan4:'#c81e1e',xuan5:'#1560c8',xuan5_fu:'#9b59b6',xuan6:'#1a7a4c',xuan9:'#e87d00',xuan10:'#7a1233'};
+    order.forEach(pk=>{
+      const play=plays[pk]; if(!play) return;
+      const color=colors[pk]||'#333';
+      html+=`<div style="border:1px solid ${color};border-radius:10px;margin-bottom:10px;overflow:hidden;">`;
+      html+=`<div style="background:${color};color:#fff;padding:7px 12px;font-size:13px;font-weight:700;">`;
+      html+=`${play.name}（选${play.balls}球）<span style="font-size:10px;opacity:.85;margin-left:8px;">${play.tip||''}</span></div>`;
+      html+=`<div style="padding:10px 12px;">`;
       (play.groups||[]).forEach((g,i)=>{
-        const nums = Array.isArray(g) ? g : (g.numbers||g);
-        const label = play.name.includes('复式') ? `复式${nums.length}个球` : `第${i+1}注`;
-        html += `<div style="margin-bottom:6px;">`;
-        html += `<span style="font-size:11px;color:#666;margin-right:6px;">${label}：</span>`;
-        nums.forEach(n=>{
-          html += `<span style="display:inline-block;width:24px;height:24px;line-height:24px;border-radius:50%;background:${color};color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`;
-        });
-        if(play.name.includes('复式')){
-          const combos = factorial(nums.length) / (factorial(play.balls) * factorial(nums.length - play.balls));
-          html += `<span style="font-size:10px;color:#888;margin-left:6px;">= C(${nums.length},${play.balls}) = ${combos}注组合</span>`;
+        const nums=Array.isArray(g)?g:[];
+        const label=play.name.includes('复式')?`复式${nums.length}球`:`第${i+1}注`;
+        html+=`<div style="margin-bottom:6px;"><span style="font-size:11px;color:#666;margin-right:4px;">${label}：</span>`;
+        nums.forEach(n=>{ html+=`<span style="display:inline-block;width:24px;height:24px;line-height:24px;border-radius:50%;background:${color};color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`; });
+        if(play.name.includes('复式')&&nums.length>0&&play.balls>0){
+          html+=`<span style="font-size:10px;color:#888;margin-left:6px;">C(${nums.length},${play.balls})=${factorial(nums.length)/(factorial(play.balls)*factorial(nums.length-play.balls))}注</span>`;
         }
-        html += `</div>`;
+        html+=`</div>`;
       });
-      html += `</div></div>`;
+      html+=`</div></div>`;
     });
   }
-  html+=`</div><div style="font-size:11px;color:#aaa;margin-top:8px;">${rec.note||''}</div></div>`;
+
+  html+=`</div>`;
+  html+=`<div style="font-size:11px;color:#aaa;margin-top:6px;">${rec.note||''}</div>`;
+  html+=`</div>`;
   contentEl.innerHTML=html;
 }
-
-// 走势图彩种切换
-let trendType = '3d';
-
-// ── AI解读缓存（按彩种独立保存）──────────────────────
-const AI_CACHE_KEY = 'fucaiAiReadingCache';
-const aiCache = { '3d': null, 'ssq': null, 'kl8': null };
 
 function saveAiCache(){
   try{ localStorage.setItem(AI_CACHE_KEY, JSON.stringify(aiCache)); } catch(e){}
