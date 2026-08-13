@@ -3,7 +3,7 @@ name: 每日抓取 + ML预测
 on:
   schedule:
     - cron: '30 13 * * *'   # UTC 13:30 = 北京时间 21:30
-  workflow_dispatch:
+  workflow_dispatch:         # 手动触发
 
 jobs:
   crawl-and-predict:
@@ -12,28 +12,74 @@ jobs:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 配置 Python
+      - name: 配置 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 依赖缓存：只有 requirements 变化才重新安装，大幅加速
+      - name: 缓存 pip 依赖
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-v1
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: 安装依赖
+        run: pip install requests beautifulsoup4 numpy scikit-learn xgboost lightgbm
+
+      # 缓存模型包：models.pkl 不变则跳过重新训练（增量更新）
+      - name: 缓存模型包 models.pkl
+        uses: actions/cache@v4
+        with:
+          path: models.pkl
+          key: models-${{ hashFiles('history.json') }}-${{ hashFiles('lottery_ml.py') }}
+          restore-keys: models-
+
+      - name: 第一步：增量抓取最新开奖数据
+        run: python lottery_crawler.py
+
+      - name: 第二步：ML训练 + 预测（增量，复用模型包）
+        run: python lottery_ml.py
+        continue-on-error: true
+
+      - name: 提交并推送结果
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add latest.json history.json prediction.json
+          git diff --cached --quiet || git commit -m \
+            "每日更新 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M') | RF+XGB+LGB+马尔可夫+遗漏"
+          git push
+
+  # 单独的全量初始化 job，只在手动触发时按需运行
+  # 首次使用或数据异常时，手动在 Actions 页面触发并选择 full_init=true
+  full-init:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: |
-          pip install requests beautifulsoup4
-          pip install numpy scikit-learn xgboost lightgbm
+        run: pip install requests beautifulsoup4 numpy scikit-learn xgboost lightgbm
 
-      - name: 第一步：抓取最新开奖数据
-        run: python lottery_crawler.py
-        continue-on-error: true
+      - name: 全量抓取历史数据
+        run: python lottery_crawler.py --full
 
-      - name: 第二步：ML特征工程 + 训练 + 预测
+      - name: 全量训练模型包
         run: python lottery_ml.py
-        continue-on-error: true
 
-      - name: 提交并推送所有结果
+      - name: 提交全量数据
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add latest.json history.json prediction.json
-          git diff --cached --quiet || git commit -m "每日更新 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M') | RF+XGB+LGB+马尔可夫+遗漏"
+          git diff --cached --quiet || git commit -m \
+            "全量初始化 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M')"
           git push
