@@ -303,7 +303,13 @@ def build_dataset(records, feat_fn, tgt_fn, keys):
     if last_feat is None:
         last_feat = feat_fn(records, n - 1)
     last_X = np.array([list(last_feat.values())], dtype=float) if last_feat else None
-    names = list(feat_fn(records, 1).keys()) if len(records) > 1 else []
+    # 获取特征名：找第一个不为None的特征
+    names = []
+    for _i in range(10, min(len(records), 100)):
+        _f = feat_fn(records, _i)
+        if _f is not None:
+            names = list(_f.keys())
+            break
     return np.array(X, dtype=float), Y, names, last_X
 
 def make_models():
