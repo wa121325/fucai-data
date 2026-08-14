@@ -15,7 +15,7 @@ jobs:
       - name: 安装 Kaggle CLI
         run: pip install kaggle
 
-      - name: 配置 Kaggle 凭据
+      - name: 配置 Kaggle Token
         run: |
           mkdir -p ~/.kaggle
           echo "${{ secrets.KAGGLE_TOKEN }}" > ~/.kaggle/access_token
@@ -26,26 +26,26 @@ jobs:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
           kaggle kernels push -p ./kaggle_kernel/
-          echo "✓ 已推送到 Kaggle，Notebook 开始运行"
+          echo "✓ 已推送，Kaggle 开始运行"
 
-      - name: 等待运行完成（最多30分钟）
+      - name: 等待运行完成（最多 40 分钟）
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
-          KERNEL="wa121325/fucai-daily"
-          echo "监控 $KERNEL 运行状态…"
-          for i in $(seq 1 30); do
+          KERNEL="megskfdbbskeb/fucai-ml-daily"
+          echo "监控 $KERNEL …"
+          for i in $(seq 1 40); do
             sleep 60
-            STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
-            echo "$(date +'%H:%M:%S') [$i/30] $STATUS"
+            STATUS=$(kaggle kernels status $KERNEL 2>&1)
+            echo "$(date +'%H:%M:%S') [$i/40] $STATUS"
             if echo "$STATUS" | grep -qi "complete"; then
               echo "✓ Kaggle 运行完成"
               exit 0
             fi
             if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then
-              echo "✗ Kaggle 运行失败，查看: https://www.kaggle.com/code/wa121325/fucai-daily"
+              echo "✗ Kaggle 运行失败"
               exit 1
             fi
           done
-          echo "⚠️ 超时30分钟"
+          echo "⚠️ 超时 40 分钟"
           exit 0
