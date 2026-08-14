@@ -1,4 +1,3 @@
-
 """
 福彩全能脚本 - Kaggle Notebook 版
 功能：抓数据 + ML训练 + 推送所有结果到 GitHub
@@ -296,39 +295,94 @@ def make_models():
     if HAS_LGB: ms['lgb']=lgb.LGBMClassifier(n_estimators=300,max_depth=6,learning_rate=0.05,num_leaves=31,random_state=42,verbose=-1)
     return ms
 
-def train_target(X, y, feat_names, tname):
+CACHE_FILE = '/kaggle/working/models_cache.pkl'
+RETRAIN_THRESHOLD = 20  # 新数据超过20期才重新全量训练
+
+def load_model_cache():
+    import pickle
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE,'rb') as f: cache=pickle.load(f)
+            print(f"✓ 本地模型缓存已加载（{len(cache)}个目标）"); return cache
+        except Exception: pass
+    try:
+        url=f'https://raw.githubusercontent.com/{GH_REPO}/main/models_cache.pkl'
+        req=urllib.request.Request(url,headers={'Cache-Control':'no-cache','User-Agent':'kaggle-bot'})
+        with urllib.request.urlopen(req,timeout=30) as r: data=r.read()
+        with open(CACHE_FILE,'wb') as f: f.write(data)
+        import pickle
+        with open(CACHE_FILE,'rb') as f: cache=pickle.load(f)
+        print(f"✓ 从 GitHub 下载模型缓存（{len(cache)}个目标）"); return cache
+    except Exception as e:
+        print(f"  未找到模型缓存，将全量训练: {e}"); return {}
+
+def save_model_cache(cache):
+    import pickle
+    with open(CACHE_FILE,'wb') as f: pickle.dump(cache,f)
+    try:
+        with open(CACHE_FILE,'rb') as f: content_b64=base64.b64encode(f.read()).decode()
+        sha=gh_get_sha('models_cache.pkl')
+        url=f'https://api.github.com/repos/{GH_REPO}/contents/models_cache.pkl'
+        data={'message':f"更新模型缓存 {datetime.now().strftime('%Y-%m-%d')}",
+              'content':content_b64,'branch':'main'}
+        if sha: data['sha']=sha
+        req=urllib.request.Request(url,data=json.dumps(data).encode(),method='PUT',headers={
+            'Authorization':f'token {GH_TOKEN}','Content-Type':'application/json',
+            'Accept':'application/vnd.github.v3+json','User-Agent':'kaggle-bot'})
+        with urllib.request.urlopen(req,timeout=30): print("  ✓ models_cache.pkl 已推送")
+    except Exception as e: print(f"  ! 缓存推送失败: {e}")
+
+def train_target(X, y, feat_names, tname, model_cache):
     n=len(X); MIN=60
     if n<MIN+5: return None
-    final={}
-    for mname,m in make_models().items():
-        try: m.fit(X,y); final[mname]=m
-        except Exception as e: print(f"    {mname} 失败:{e}")
-    if not final: return None
-    # 时序回测最近150期
-    bt_start=max(MIN,n-150); all_true=[]; preds_by={k:[] for k in final}
-    for end in range(bt_start,n):
-        Xtr,ytr=X[:end],y[:end]; Xte,yte=X[end:end+1],y[end:end+1]
+    cache_key=tname; cached=model_cache.get(cache_key,{})
+    cached_n=cached.get('trained_n',0); new_data=n-cached_n
+
+    if cached.get('models') and new_data<RETRAIN_THRESHOLD:
+        print(f"    [{tname}] 增量模式（缓存{cached_n}期→当前{n}期，新增{new_data}期）")
+        final=cached['models']; acc=cached.get('accuracy',{}); fi=cached.get('feature_importance',[])
+        bt_start=max(MIN,n-10); all_true=[]; preds_by={k:[] for k in final}
+        for end in range(bt_start,n):
+            Xtr,ytr=X[:end],y[:end]; Xte,yte=X[end:end+1],y[end:end+1]
+            for mname,m in final.items():
+                try: preds_by.setdefault(mname,[]).extend(m.predict(Xte).tolist())
+                except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
+            all_true.extend(yte.tolist())
+    else:
+        print(f"    [{tname}] 全量训练（{n}期，新增{new_data}期）")
+        final={}
         for mname,m in make_models().items():
-            try:
-                m2=type(m)(**m.get_params()); m2.fit(Xtr,ytr)
-                preds_by.setdefault(mname,[]).extend(m2.predict(Xte).tolist())
-            except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
-        all_true.extend(yte.tolist())
-    acc={}
-    for mname,ps in preds_by.items():
-        if len(ps)==len(all_true) and all_true:
-            acc[mname]=round(accuracy_score(all_true,ps)*100,1)
-    if all_true:
-        from collections import Counter as Ctr
-        ens=[]
-        for i in range(len(all_true)):
-            vs=[preds_by[m][i] for m in preds_by if len(preds_by[m])>i]
-            ens.append(Ctr(vs).most_common(1)[0][0] if vs else all_true[i])
-        acc['ensemble']=round(accuracy_score(all_true,ens)*100,1)
-    fi=[]
-    if 'rf' in final and hasattr(final['rf'],'feature_importances_'):
-        imp=final['rf'].feature_importances_
-        fi=[{'name':str(k),'score':round(float(v),4)} for k,v in sorted(zip(feat_names,imp),key=lambda x:-x[1])[:5]]
+            try: m.fit(X,y); final[mname]=m
+            except Exception as e: print(f"      {mname}失败:{e}")
+        if not final: return None
+        bt_start=max(MIN,n-100); all_true=[]; preds_by={k:[] for k in final}
+        for end in range(bt_start,n):
+            Xtr,ytr=X[:end],y[:end]; Xte,yte=X[end:end+1],y[end:end+1]
+            for mname,m in make_models().items():
+                try:
+                    m2=type(m)(**m.get_params()); m2.fit(Xtr,ytr)
+                    preds_by.setdefault(mname,[]).extend(m2.predict(Xte).tolist())
+                except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
+            all_true.extend(yte.tolist())
+        acc={}
+        for mname,ps in preds_by.items():
+            if len(ps)==len(all_true) and all_true:
+                acc[mname]=round(accuracy_score(all_true,ps)*100,1)
+        if all_true:
+            from collections import Counter as Ctr
+            ens=[]
+            for i in range(len(all_true)):
+                vs=[preds_by[m][i] for m in preds_by if len(preds_by[m])>i]
+                ens.append(Ctr(vs).most_common(1)[0][0] if vs else all_true[i])
+            acc['ensemble']=round(accuracy_score(all_true,ens)*100,1)
+        fi=[]
+        if 'rf' in final and hasattr(final['rf'],'feature_importances_'):
+            imp=final['rf'].feature_importances_
+            fi=[{'name':str(k),'score':round(float(v),4)} for k,v in sorted(zip(feat_names,imp),key=lambda x:-x[1])[:5]]
+        model_cache[cache_key]={'models':final,'trained_n':n,'accuracy':acc,'feature_importance':fi}
+
+    if not all_true:
+        all_true=[]; preds_by={k:[] for k in final}
     last_X=X[-1:]; all_probs=[]; classes=None
     for m in final.values():
         try:
@@ -349,6 +403,7 @@ def train_target(X, y, feat_names, tname):
             'prediction':{'value':int(pred_cls),'confidence':round(float(max(avg_prob))*100,1),
                           'probs':{str(c):round(float(p)*100,1) for c,p in zip(classes,avg_prob)}},
             'bt_detail':bt_detail}
+
 
 # 目标变量
 def tgt3d(r): b,s,g=r['digits']; sm=b+s+g; return {'bai':b,'shi':s,'ge':g,'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),'odd':sum(1 for x in [b,s,g] if x%2!=0)}
@@ -555,6 +610,10 @@ def run_ml(history):
 
     bt=daily_backtest(history, prev_pred)
 
+    # 加载模型缓存
+    model_cache = load_model_cache()
+    cache_updated = False
+
     cfg=[
         ('3d',  f3d,   tgt3d,  ['bai','shi','ge','sum_grp','odd']),
         ('ssq', fssq,  tgtssq, ['blue','odd','sum_grp']),
@@ -571,12 +630,15 @@ def run_ml(history):
         ml_res={'data_count':len(records),'updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),'models':{}}
         for tname in tkeys:
             y=np.array([tgts[tname][i] for i in idx])
-            print(f"  [{tname}] 训练{len(y)}期…")
-            r=train_target(X,y,names,tname)
+            # 传入 model_cache，支持增量训练
+            r=train_target(X,y,names,f"{game}_{tname}",model_cache)
             if r:
+                if r.pop('_needs_save', False):
+                    cache_updated = True
                 ml_res['models'][tname]=r
                 acc=r.get('accuracy',{}); pred=r.get('prediction',{})
-                print(f"    集成{acc.get('ensemble','—')}%  预测→{pred.get('value','?')}({pred.get('confidence','?')}%)")
+                mode = "增量" if model_cache.get(f"{game}_{tname}",{}).get('trained_n',0)==len(X) else "全量"
+                print(f"    集成{acc.get('ensemble',acc.get('ensemble_recent','—'))}%  预测→{pred.get('value','?')}({pred.get('confidence','?')}%)")
         if game=='3d':
             mk=markov3d(records); om=omit3d(records)
             rec=rec3d(records,ml_res['models'],mk,om)
@@ -597,6 +659,13 @@ def run_ml(history):
                     'overdue':rec.get('overdue',[]),'hot_nums':rec.get('hot_nums',[])}
         predictions[game]={**ml_res,'recommendation':rec,'ai_context':ai_ctx}
         print(f"  ✓ {game} 完成")
+
+    # 有全量训练发生时才保存缓存
+    if cache_updated:
+        print("\n保存模型缓存…")
+        save_model_cache(model_cache)
+    else:
+        print("\n✓ 全部使用缓存模型，跳过缓存更新")
 
     return predictions, bt
 
