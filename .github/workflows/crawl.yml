@@ -1,45 +1,51 @@
-name: 每日抓取开奖数据
+name: 触发 Kaggle 运行
 
 on:
   schedule:
-    - cron: '30 13 * * *'    # UTC 13:30 = 北京时间 21:30
+    - cron: '30 13 * * *'   # UTC 13:30 = 北京时间 21:30
   workflow_dispatch:
-    inputs:
-      full_crawl:
-        description: '首次全量抓取历史数据？(yes/no)'
-        required: false
-        default: 'no'
 
 jobs:
-  crawl:
+  trigger-kaggle:
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 配置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: 安装 Kaggle CLI
+        run: pip install kaggle
 
-      - name: 安装依赖
-        run: pip install requests beautifulsoup4
-
-      - name: 抓取开奖数据
+      - name: 配置 Kaggle 凭据
         run: |
-          if [ "${{ github.event.inputs.full_crawl }}" = "yes" ]; then
-            echo ">>> 全量历史数据抓取"
-            python lottery_crawler.py --full
-          else
-            echo ">>> 日常增量抓取"
-            python lottery_crawler.py
-          fi
-        continue-on-error: true
+          mkdir -p ~/.kaggle
+          echo "${{ secrets.KAGGLE_TOKEN }}" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
 
-      - name: 提交并推送
+      - name: 推送脚本到 Kaggle 并触发运行
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add latest.json history.json
-          git diff --cached --quiet || git commit -m "每日开奖数据 $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M')"
-          git push
+          kaggle kernels push -p ./kaggle_kernel/
+          echo "✓ 已推送到 Kaggle，Notebook 开始运行"
+
+      - name: 等待运行完成（最多30分钟）
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+        run: |
+          KERNEL="wa121325/fucai-daily"
+          echo "监控 $KERNEL 运行状态…"
+          for i in $(seq 1 30); do
+            sleep 60
+            STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
+            echo "$(date +'%H:%M:%S') [$i/30] $STATUS"
+            if echo "$STATUS" | grep -qi "complete"; then
+              echo "✓ Kaggle 运行完成"
+              exit 0
+            fi
+            if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then
+              echo "✗ Kaggle 运行失败，查看: https://www.kaggle.com/code/wa121325/fucai-daily"
+              exit 1
+            fi
+          done
+          echo "⚠️ 超时30分钟"
+          exit 0
