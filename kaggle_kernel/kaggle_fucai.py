@@ -203,107 +203,147 @@ def _feat_window(w):
     return w
 
 def f3d(records, idx):
-    w = records[max(0,idx-WINDOW):idx]
+    w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    d=w[-1]['digits']; b,s,g=d; sm=b+s+g; sp=max(d)-min(d)
-    prev=w[-2]['digits'] if len(w)>=2 else d
-    rep=sum(1 for i in range(3) if prev[i]==d[i])
-    s3=sorted(d); arith=int((s3[1]-s3[0])==(s3[2]-s3[1]) and s3[2]-s3[0]>0)
-    f={'sum':sm,'tail':sm%10,'span':sp,'odd':sum(1 for x in d if x%2!=0),
-       'big':sum(1 for x in d if x>=5),'r0':d[0]%3,'r1':d[1]%3,'r2':d[2]%3,
-       'b':b,'s':s,'g':g,'gbs':abs(b-s),'gsg':abs(s-g),
-       'grp':0 if b==s==g else(1 if(b==s or s==g or b==g)else 2),
-       'rep':rep,'arith':arith}
-    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]; sms=[sum(x['digits']) for x in chunk]
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        sms=[sum(x['digits']) for x in chunk]
         sps=[max(x['digits'])-min(x['digits']) for x in chunk]
+        odds=[sum(1 for d in x['digits'] if d%2!=0) for x in chunk]
+        bigs=[sum(1 for d in x['digits'] if d>=5) for x in chunk]
+        tails=[sum(x['digits'])%10 for x in chunk]
         f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
         f[f'sp{sfx}']=float(np.mean(sps))
+        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
+        f[f'tail{sfx}']=float(np.mean(tails))
         for ci,cn in enumerate(['b','s','g']):
-            vals=[x['digits'][ci] for x in chunk]; f[f'{cn}m{sfx}']=float(np.mean(vals))
-    tr3=[sum(x['digits']) for x in w[-3:]] if len(w)>=3 else [sm]
-    f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
+            vals=[x['digits'][ci] for x in chunk]
+            f[f'{cn}m{sfx}']=float(np.mean(vals))
+            f[f'{cn}s{sfx}']=float(np.std(vals)) if len(vals)>1 else 0.0
+    if len(w)>=3:
+        s3=[sum(x['digits']) for x in w[-3:]]
+        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+    else: f['sm_trend']=0
+    r0=r1=r2=0
+    for x in w[-20:]:
+        for d in x['digits']:
+            if d%3==0: r0+=1
+            elif d%3==1: r1+=1
+            else: r2+=1
+    total=r0+r1+r2 or 1
+    f['road0']=r0/total; f['road1']=r1/total; f['road2']=r2/total
+    g3=g6=gt=0
+    for x in w[-20:]:
+        b2,s2,g2=x['digits']
+        if b2==s2==g2: gt+=1
+        elif b2==s2 or s2==g2 or b2==g2: g3+=1
+        else: g6+=1
+    f['grp3']=g3/20; f['grp6']=g6/20; f['grpt']=gt/20
     return f
 
 def fssq(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    r=w[-1]; red=sorted(r['red']); bl=r['blue']
-    sm=sum(red); odd=sum(1 for x in red if x%2!=0); big=sum(1 for x in red if x>16)
-    csc=sum(1 for i in range(len(red)-1) if red[i+1]-red[i]==1)
-    df=set()
-    for i in range(len(red)):
-        for j in range(i+1,len(red)): df.add(red[j]-red[i])
-    ac=len(df)-(len(red)-1)
-    z1=sum(1 for x in red if x<=11); z2=sum(1 for x in red if 12<=x<=22); z3=sum(1 for x in red if x>=23)
-    mg=max(red[i+1]-red[i] for i in range(len(red)-1)) if len(red)>1 else 0
-    f={'sm':sm,'odd':odd,'big':big,'consec':csc,'ac':ac,'z1':z1,'z2':z2,'z3':z3,'mg':mg,
-       'bl':bl,'bl_odd':bl%2,'bl_big':int(bl>=9),'rmax':red[-1],'rmin':red[0],'rsp':red[-1]-red[0]}
-    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]; sms=[sum(x['red']) for x in chunk]
-        bls=[x['blue'] for x in chunk]; odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
-        f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
-        f[f'bl{sfx}']=float(np.mean(bls)); f[f'od{sfx}']=float(np.mean(odds))
-    cnt=Counter(n for x in w for n in x['red'])
-    f['hz1']=sum(cnt.get(n,0) for n in range(1,12))
-    f['hz2']=sum(cnt.get(n,0) for n in range(12,23))
-    f['hz3']=sum(cnt.get(n,0) for n in range(23,34))
-    tr3=[sum(x['red']) for x in w[-3:]] if len(w)>=3 else [sm]
-    f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
+    # ★ 不直接用当期号码作特征（避免模型过拟合上一期具体值）
+    # 只用滑动窗口的统计量
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        sms=[sum(x['red']) for x in chunk]
+        bls=[x['blue'] for x in chunk]
+        odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
+        bigs=[sum(1 for n in x['red'] if n>16) for x in chunk]
+        z1s=[sum(1 for n in x['red'] if n<=11) for x in chunk]
+        z3s=[sum(1 for n in x['red'] if n>=23) for x in chunk]
+        consecs=[sum(1 for i in range(len(sorted(x['red']))-1) if sorted(x['red'])[i+1]-sorted(x['red'])[i]==1) for x in chunk]
+        f[f'sm_mean{sfx}']=float(np.mean(sms))
+        f[f'sm_std{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
+        f[f'bl_mean{sfx}']=float(np.mean(bls))
+        f[f'bl_std{sfx}']=float(np.std(bls)) if len(bls)>1 else 0.0
+        f[f'odd_mean{sfx}']=float(np.mean(odds))
+        f[f'big_mean{sfx}']=float(np.mean(bigs))
+        f[f'z1_mean{sfx}']=float(np.mean(z1s))
+        f[f'z3_mean{sfx}']=float(np.mean(z3s))
+        f[f'consec_mean{sfx}']=float(np.mean(consecs))
+    # 近期趋势
+    if len(w)>=3:
+        s3=[sum(x['red']) for x in w[-3:]]
+        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+        b3=[x['blue'] for x in w[-3:]]
+        f['bl_trend']=1 if b3[-1]>b3[-2] else(-1 if b3[-1]<b3[-2] else 0)
+    else:
+        f['sm_trend']=0; f['bl_trend']=0
+    # 热区统计（近20期各区间出现频率）
+    cnt=Counter(n for x in w[-20:] for n in x['red'])
+    f['hot_z1']=sum(cnt.get(n,0) for n in range(1,12))
+    f['hot_z2']=sum(cnt.get(n,0) for n in range(12,23))
+    f['hot_z3']=sum(cnt.get(n,0) for n in range(23,34))
+    bcnt=Counter(x['blue'] for x in w[-20:])
+    f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))   # 蓝球1-8
+    f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))  # 蓝球9-16
     return f
 
 def fkl8(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    r=w[-1]; nums=sorted(r['numbers']); tot=sum(nums)
-    odd=sum(1 for x in nums if x%2!=0); big=sum(1 for x in nums if x>40)
-    zn=[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
-    fv=[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
-    cg=0; inc=False
-    for i in range(len(nums)-1):
-        if nums[i+1]-nums[i]==1:
-            if not inc: cg+=1; inc=True
-        else: inc=False
-    f={'tot':tot,'odd':odd,'big':big,'mn':nums[0],'mx':nums[-1],
-       'z1':zn[0],'z2':zn[1],'z3':zn[2],'z4':zn[3],
-       'f1':fv[0],'f2':fv[1],'f3':fv[2],'f4':fv[3],'f5':fv[4],'cg':cg}
-    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]; tots=[sum(x['numbers']) for x in chunk]
+    # ★ 只用窗口统计量，不直接用当期号码
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        tots=[sum(x['numbers']) for x in chunk]
+        odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
+        bigs=[sum(1 for n in x['numbers'] if n>40) for x in chunk]
         f[f'tm{sfx}']=float(np.mean(tots)); f[f'ts{sfx}']=float(np.std(tots)) if len(tots)>1 else 0.0
+        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
         for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
             zv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
             f[f'z{zi+1}m{sfx}']=float(np.mean(zv))
-    cnt=Counter(n for x in w for n in x['numbers'])
+        for fi2,(lo,hi) in enumerate([(1,16),(17,32),(33,48),(49,64),(65,80)]):
+            fv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
+            f[f'f{fi2+1}m{sfx}']=float(np.mean(fv))
+    if len(w)>=3:
+        t3=[sum(x['numbers']) for x in w[-3:]]
+        f['tot_trend']=1 if t3[-1]>t3[-2] else(-1 if t3[-1]<t3[-2] else 0)
+    else: f['tot_trend']=0
+    cnt=Counter(n for x in w[-20:] for n in x['numbers'])
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'hz{zi+1}']=sum(cnt.get(n,0) for n in range(lo,hi+1))
-    tr3=[sum(x['numbers']) for x in w[-3:]] if len(w)>=3 else [tot]
-    f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
     return f
+
 
 def build_dataset(records, feat_fn, tgt_fn, keys):
     """
     正确的时序对齐：
-    X[i] = 第i期的特征（用第i期及之前数据计算）
-    y[i] = 第i+1期的目标值（预测未来）
-    最后一条 X[-1] 用于预测真正的下一期（未开奖）
+    X[i] = 第i期的特征（用第i期及之前历史计算，不含第i+1期任何信息）
+    y[i] = 第i+1期的目标值（模型要预测的未来值）
+
+    训练样本：X[i] → y[i]  即"知道第i期及历史，预测第i+1期"
+    预测样本：X[n-1]（最新一期特征）→ 预测真正未开奖的下一期
     """
     X, Y = [], {k:[] for k in keys}
     n = len(records)
-    for i in range(n - 1):  # 最后一期只用于特征，没有对应的目标
-        feat = feat_fn(records, i + 1)  # 用第i+1期及之前计算特征（包含第i期信息）
+    for i in range(n - 1):
+        # 特征：用第i期（含）之前的数据，idx=i+1表示窗口截止到第i期
+        feat = feat_fn(records, i + 1)
         if feat is None:
             continue
-        # 目标是第i+1期的值
+        # 目标：第i+1期的真实值（未来，模型未见过）
         tgt = tgt_fn(records[i + 1])
+        # ★关键检查：特征里绝对不能包含第i+1期的号码
+        # feat_fn(records, i+1) 内部用 records[max(0,i+1-WINDOW):i+1]
+        # 即窗口是 [i+1-WINDOW, i+1)，最后一条是records[i]，正确！
         X.append(list(feat.values()))
         for k in keys:
             Y[k].append(tgt[k])
-    # 最后一条特征：用全部数据计算，用于预测真正的下一期
-    last_feat = feat_fn(records, n)  # idx=n表示用全量数据作为窗口
+
+    # 预测用特征：用全量数据（窗口截止到最新一期records[n-1]）
+    # feat_fn(records, n) 内部用 records[max(0,n-WINDOW):n]，最后一条是records[n-1]
+    last_feat = feat_fn(records, n)
     if last_feat is None:
         last_feat = feat_fn(records, n - 1)
     last_X = np.array([list(last_feat.values())], dtype=float) if last_feat else None
-    # 获取特征名：找第一个不为None的特征
+
     names = []
     for _i in range(10, min(len(records), 100)):
         _f = feat_fn(records, _i)
