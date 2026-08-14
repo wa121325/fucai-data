@@ -361,8 +361,16 @@ def train_target(X, y, feat_names, last_X, tname, model_cache):
     X[i] = 第i期特征, y[i] = 第i+1期目标 → 真正预测下一期
     last_X = 最新一期特征 → 预测真正未开奖的下一期
     """
+    from sklearn.preprocessing import LabelEncoder
     n=len(X); MIN=60
     if n<MIN+5: return None
+
+    # LabelEncoder 把任意类别映射到 0..N-1，解决 XGB 不支持非0起始类别的问题
+    le = LabelEncoder()
+    y_enc = le.fit_transform(y)  # 编码
+    classes_orig = le.classes_.tolist()  # 原始类别（用于输出预测值）
+    from sklearn.preprocessing import LabelEncoder
+    le=LabelEncoder(); y_enc=le.fit_transform(y); classes_orig=le.classes_.tolist()
     cache_key=tname; cached=model_cache.get(cache_key,{})
     cached_n=cached.get('trained_n',0); new_data=n-cached_n
 
@@ -371,7 +379,7 @@ def train_target(X, y, feat_names, last_X, tname, model_cache):
         final=cached['models']; acc=cached.get('accuracy',{}); fi=cached.get('feature_importance',[])
         bt_start=max(MIN,n-10); all_true=[]; preds_by={k:[] for k in final}
         for end in range(bt_start,n):
-            Xtr,ytr=X[:end],y[:end]; Xte,yte=X[end:end+1],y[end:end+1]
+            Xtr,ytr=X[:end],y_enc[:end]; Xte,yte=X[end:end+1],y_enc[end:end+1]
             for mname,m in final.items():
                 try: preds_by.setdefault(mname,[]).extend(m.predict(Xte).tolist())
                 except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
@@ -381,12 +389,12 @@ def train_target(X, y, feat_names, last_X, tname, model_cache):
         print(f"    [{tname}] 全量训练（{n}期，新增{new_data}期）")
         final={}
         for mname,m in make_models().items():
-            try: m.fit(X,y); final[mname]=m
+            try: m.fit(X,y_enc); final[mname]=m
             except Exception as e: print(f"      {mname}失败:{e}")
         if not final: return None
         bt_start=max(MIN,n-100); all_true=[]; preds_by={k:[] for k in final}
         for end in range(bt_start,n):
-            Xtr,ytr=X[:end],y[:end]; Xte,yte=X[end:end+1],y[end:end+1]
+            Xtr,ytr=X[:end],y_enc[:end]; Xte,yte=X[end:end+1],y_enc[end:end+1]
             for mname,m in make_models().items():
                 try:
                     m2=type(m)(**m.get_params()); m2.fit(Xtr,ytr)
@@ -421,18 +429,21 @@ def train_target(X, y, feat_names, last_X, tname, model_cache):
             if classes is None: classes=m.classes_.tolist()
         except: pass
     if not all_probs or classes is None: return None
-    avg_prob=np.mean(all_probs,axis=0); pred_cls=classes[int(np.argmax(avg_prob))]
+    avg_prob=np.mean(all_probs,axis=0)
+    pred_enc=classes[int(np.argmax(avg_prob))]
+    pred_cls=int(le.inverse_transform([pred_enc])[0])
+    orig_probs={str(int(le.inverse_transform([c])[0])):round(float(p)*100,1) for c,p in zip(classes,avg_prob)}
     bt_detail=[]
     for i in range(max(0,len(all_true)-10),len(all_true)):
-        row={'true':int(all_true[i])}
+        row={'true':int(le.inverse_transform([all_true[i]])[0])}
         for mname,ps in preds_by.items():
-            if len(ps)>i: row[f'pred_{mname}']=int(ps[i])
+            if len(ps)>i: row[f'pred_{mname}']=int(le.inverse_transform([ps[i]])[0])
         row['hit']=int(row['true']==row.get('pred_rf',row.get('pred_xgb',-1)))
         bt_detail.append(row)
     return {'target':tname,'data_used':n,'backtest_periods':len(all_true),
             'accuracy':acc,'feature_importance':fi,
-            'prediction':{'value':int(pred_cls),'confidence':round(float(max(avg_prob))*100,1),
-                          'probs':{str(c):round(float(p)*100,1) for c,p in zip(classes,avg_prob)}},
+            'prediction':{'value':pred_cls,'confidence':round(float(max(avg_prob))*100,1),
+                          'probs':orig_probs},
             'bt_detail':bt_detail,'_needs_save':needs_save}
 
 def tgt3d(r): b,s,g=r['digits']; sm=b+s+g; return {'bai':b,'shi':s,'ge':g,'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),'odd':sum(1 for x in [b,s,g] if x%2!=0)}
