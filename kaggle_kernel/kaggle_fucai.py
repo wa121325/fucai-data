@@ -280,13 +280,31 @@ def fkl8(records, idx):
     f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
     return f
 
-def build_dataset(records, feat_fn):
-    X, idx = [], []
-    for i in range(len(records)):
-        feat=feat_fn(records, i)
-        if feat is not None: X.append(list(feat.values())); idx.append(i)
-    names=list(feat_fn(records, idx[0]).keys()) if idx else []
-    return np.array(X, dtype=float), idx, names
+def build_dataset(records, feat_fn, tgt_fn, keys):
+    """
+    正确的时序对齐：
+    X[i] = 第i期的特征（用第i期及之前数据计算）
+    y[i] = 第i+1期的目标值（预测未来）
+    最后一条 X[-1] 用于预测真正的下一期（未开奖）
+    """
+    X, Y = [], {k:[] for k in keys}
+    n = len(records)
+    for i in range(n - 1):  # 最后一期只用于特征，没有对应的目标
+        feat = feat_fn(records, i + 1)  # 用第i+1期及之前计算特征（包含第i期信息）
+        if feat is None:
+            continue
+        # 目标是第i+1期的值
+        tgt = tgt_fn(records[i + 1])
+        X.append(list(feat.values()))
+        for k in keys:
+            Y[k].append(tgt[k])
+    # 最后一条特征：用全部数据计算，用于预测真正的下一期
+    last_feat = feat_fn(records, n)  # idx=n表示用全量数据作为窗口
+    if last_feat is None:
+        last_feat = feat_fn(records, n - 1)
+    last_X = np.array([list(last_feat.values())], dtype=float) if last_feat else None
+    names = list(feat_fn(records, 1).keys()) if len(records) > 1 else []
+    return np.array(X, dtype=float), Y, names, last_X
 
 def make_models():
     ms={}
@@ -332,7 +350,11 @@ def save_model_cache(cache):
         with urllib.request.urlopen(req,timeout=30): print("  ✓ models_cache.pkl 已推送")
     except Exception as e: print(f"  ! 缓存推送失败: {e}")
 
-def train_target(X, y, feat_names, tname, model_cache):
+def train_target(X, y, feat_names, last_X, tname, model_cache):
+    """
+    X[i] = 第i期特征, y[i] = 第i+1期目标 → 真正预测下一期
+    last_X = 最新一期特征 → 预测真正未开奖的下一期
+    """
     n=len(X); MIN=60
     if n<MIN+5: return None
     cache_key=tname; cached=model_cache.get(cache_key,{})
@@ -348,6 +370,7 @@ def train_target(X, y, feat_names, tname, model_cache):
                 try: preds_by.setdefault(mname,[]).extend(m.predict(Xte).tolist())
                 except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
             all_true.extend(yte.tolist())
+        needs_save=False
     else:
         print(f"    [{tname}] 全量训练（{n}期，新增{new_data}期）")
         final={}
@@ -380,13 +403,15 @@ def train_target(X, y, feat_names, tname, model_cache):
             imp=final['rf'].feature_importances_
             fi=[{'name':str(k),'score':round(float(v),4)} for k,v in sorted(zip(feat_names,imp),key=lambda x:-x[1])[:5]]
         model_cache[cache_key]={'models':final,'trained_n':n,'accuracy':acc,'feature_importance':fi}
+        needs_save=True
 
-    if not all_true:
-        all_true=[]; preds_by={k:[] for k in final}
-    last_X=X[-1:]; all_probs=[]; classes=None
+    if not all_true: all_true=[]; preds_by={k:[] for k in final}
+    # ★ 用 last_X 预测真正的下一期（未开奖）
+    px = last_X if last_X is not None else X[-1:]
+    all_probs=[]; classes=None
     for m in final.values():
         try:
-            p=m.predict_proba(last_X)[0]; all_probs.append(p)
+            p=m.predict_proba(px)[0]; all_probs.append(p)
             if classes is None: classes=m.classes_.tolist()
         except: pass
     if not all_probs or classes is None: return None
@@ -402,10 +427,8 @@ def train_target(X, y, feat_names, tname, model_cache):
             'accuracy':acc,'feature_importance':fi,
             'prediction':{'value':int(pred_cls),'confidence':round(float(max(avg_prob))*100,1),
                           'probs':{str(c):round(float(p)*100,1) for c,p in zip(classes,avg_prob)}},
-            'bt_detail':bt_detail}
+            'bt_detail':bt_detail,'_needs_save':needs_save}
 
-
-# 目标变量
 def tgt3d(r): b,s,g=r['digits']; sm=b+s+g; return {'bai':b,'shi':s,'ge':g,'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),'odd':sum(1 for x in [b,s,g] if x%2!=0)}
 def tgtssq(r): sm=sum(r['red']); return {'blue':r['blue'],'odd':sum(1 for x in r['red'] if x%2!=0),'sum_grp':0 if sm<70 else(1 if sm<100 else 2)}
 def tgtkl8(r):
@@ -414,14 +437,7 @@ def tgtkl8(r):
     tt=sum(r['numbers'])
     return {'odd_grp':0 if odd<9 else(1 if odd<=11 else 2),'zone_dom':int(np.argmax(zn)),'tot_grp':0 if tt<640 else(1 if tt<820 else 2)}
 
-def build_targets(records, tgt_fn, keys):
-    t={k:[] for k in keys}
-    for r in records:
-        vals=tgt_fn(r)
-        for k in keys: t[k].append(vals[k])
-    return t
-
-# 马尔可夫
+# 目标变量（单条记录）
 def markov3d(records):
     trans=[defaultdict(Counter) for _ in range(3)]
     for i in range(1,len(records)):
@@ -625,20 +641,18 @@ def run_ml(history):
         if not isinstance(records,list) or len(records)<65:
             print(f"\n── {game}: 数据不足({len(records) if isinstance(records,list) else 0}期)，跳过"); continue
         print(f"\n── {game}: {len(records)}期数据")
-        X,idx,names=build_dataset(records,feat_fn)
-        tgts=build_targets(records,tgt_fn,tkeys)
+        # ★ 新的build_dataset：X[i]对应y[i+1]，last_X用于预测真正下一期
+        X, Y, names, last_X = build_dataset(records, feat_fn, tgt_fn, tkeys)
         ml_res={'data_count':len(records),'updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),'models':{}}
         for tname in tkeys:
-            y=np.array([tgts[tname][i] for i in idx])
-            # 传入 model_cache，支持增量训练
-            r=train_target(X,y,names,f"{game}_{tname}",model_cache)
+            y = np.array(Y[tname])
+            r=train_target(X, y, names, last_X, f"{game}_{tname}", model_cache)
             if r:
                 if r.pop('_needs_save', False):
                     cache_updated = True
                 ml_res['models'][tname]=r
                 acc=r.get('accuracy',{}); pred=r.get('prediction',{})
-                mode = "增量" if model_cache.get(f"{game}_{tname}",{}).get('trained_n',0)==len(X) else "全量"
-                print(f"    集成{acc.get('ensemble',acc.get('ensemble_recent','—'))}%  预测→{pred.get('value','?')}({pred.get('confidence','?')}%)")
+                print(f"    集成{acc.get('ensemble',acc.get('ensemble_recent','—'))}%  预测下一期→{pred.get('value','?')}(置信{pred.get('confidence','?')}%)")
         if game=='3d':
             mk=markov3d(records); om=omit3d(records)
             rec=rec3d(records,ml_res['models'],mk,om)
