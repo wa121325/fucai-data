@@ -1,0 +1,51 @@
+name: 每周 DL+RL 集成训练
+
+on:
+  schedule:
+    - cron: '0 14 * * 0'    # 每周日 UTC 14:00 = 北京时间 22:00
+  workflow_dispatch:         # 支持手动触发
+
+jobs:
+  trigger-kaggle-dl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Kaggle CLI
+        run: pip install kaggle
+
+      - name: 配置 Kaggle 凭据
+        run: |
+          mkdir -p ~/.kaggle
+          echo "${{ secrets.KAGGLE_TOKEN }}" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
+
+      - name: 把 DL+RL 脚本推送到 Kaggle 并触发运行
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+        run: |
+          kaggle kernels push -p ./kaggle_dl_kernel/
+          echo "✓ DL+RL 脚本已推送到 Kaggle，开始运行"
+
+      - name: 等待 Kaggle 运行完成（最多90分钟）
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+        run: |
+          KERNEL="wa121325/fucai-dl-rl"
+          echo "监控 $KERNEL 运行状态…"
+          for i in $(seq 1 90); do
+            sleep 60
+            STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
+            echo "$(date +'%H:%M:%S') [$i/90min] $STATUS"
+            if echo "$STATUS" | grep -qi "complete"; then
+              echo "✓ DL+RL 训练完成"
+              exit 0
+            fi
+            if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then
+              echo "✗ 运行失败，查看: https://www.kaggle.com/code/wa121325/fucai-dl-rl"
+              exit 1
+            fi
+          done
+          echo "⚠️ 超时90分钟（DL训练正常较慢，可去 Kaggle 查看进度）"
+          exit 0
