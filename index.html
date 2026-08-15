@@ -504,48 +504,7 @@
   .tabContent.active{display:block;}
 
   /* ── 走势图表格 ── */
-  /* ── 预测报告 ── */
-  .pred-model-card{
-    background:#faf9f6;border:1px solid #e3e0d8;border-radius:10px;
-    padding:12px;margin-bottom:10px;
-  }
-  .pred-model-title{font-size:13px;font-weight:700;color:var(--ink);margin-bottom:8px;}
-  .pred-acc-row{display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
-  .pred-acc-badge{
-    padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700;
-    background:#1a1a2e;color:#f1d688;
-  }
-  .pred-prob-bar{margin:4px 0;}
-  .pred-prob-label{font-size:11px;color:#666;margin-bottom:2px;}
-  .pred-bar-wrap{background:#eee;border-radius:4px;height:14px;overflow:hidden;}
-  .pred-bar-fill{height:14px;border-radius:4px;background:#c81e1e;transition:width .4s;}
-  .rec-group{
-    display:inline-block;margin:4px;padding:6px 10px;
-    background:#1a1a2e;border-radius:8px;color:#f1d688;
-    font-size:13px;font-weight:700;letter-spacing:.05em;
-  }
-  .rec-group .ball-r{
-    display:inline-block;width:22px;height:22px;line-height:22px;
-    border-radius:50%;background:#c81e1e;color:#fff;
-    font-size:11px;font-weight:700;text-align:center;margin:1px;
-  }
-  .rec-group .ball-b{
-    display:inline-block;width:22px;height:22px;line-height:22px;
-    border-radius:50%;background:#1560c8;color:#fff;
-    font-size:11px;font-weight:700;text-align:center;margin:1px;
-  }
-  .rec-group .ball-g{
-    display:inline-block;width:22px;height:22px;line-height:22px;
-    border-radius:50%;background:#c8940f;color:#fff;
-    font-size:11px;font-weight:700;text-align:center;margin:1px;
-  }
-  .bt-hit{color:#1a7a4c;font-weight:700;}
-  .bt-miss{color:#aaa;}
-  .feat-imp{font-size:12px;color:#555;margin:2px 0;}
-  .bt-row{display:flex;gap:8px;margin:4px 0;font-size:12px;flex-wrap:wrap;}
-  .bt-tag{padding:2px 8px;border-radius:4px;font-size:11px;}
-  .bt-tag.hit{background:#e8f5e9;color:#1a7a4c;}
-  .bt-tag.miss{background:#fafafa;color:#aaa;}
+  /* ── 走势图预览容器 ── */
   #trendWrap{
     font-size:13px;
     width:100%;
@@ -890,7 +849,6 @@
     <div class="mainTabs">
       <div class="mainTab active" data-tab="poster">🎨 海报生成</div>
       <div class="mainTab" data-tab="trend">📊 走势图</div>
-      <div class="mainTab" data-tab="predict">🤖 ML预测报告</div>
     </div>
 
     <!-- 海报Tab内容 -->
@@ -1027,9 +985,6 @@
           <input type="text" id="gwModelInput" placeholder="auto" value="auto" style="font-family:monospace;font-size:12px;">
         </div>
         <div class="status" style="margin-bottom:10px;">Gateway 地址和密钥保存在本地浏览器，不会上传任何服务器。支持所有 OpenAI 兼容模型。</div>
-        <div class="status" style="margin-bottom:8px;font-size:12px;">
-          💡 提示：先切到「🤖 ML预测报告」Tab 加载数据，再回来生成解读，AI 将同时融合走势统计 + 机器学习模型（马尔可夫/遗漏/RF/XGB/LGB）双重分析，解读更深入。
-        </div>
         <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
         <div class="status" id="aiStatus" style="margin-top:8px;"></div>
 
@@ -1063,50 +1018,6 @@
 
     </div><!-- end tabTrend -->
 
-    <!-- ═══════════ ML预测报告 Tab ═══════════ -->
-    <div id="tabPredict" class="tabContent">
-      <p class="appSub">基于 XGBoost + 随机森林 + 时间序列回测，每日自动生成。数据来自 GitHub 仓库 prediction.json。</p>
-
-      <div class="panel">
-        <h2>加载预测报告</h2>
-        <button class="btn secondary" id="loadPredictBtn">📥 加载今日预测报告</button>
-        <div class="status" id="predictStatus" style="margin-top:8px;"></div>
-      </div>
-
-      <div id="predictContent" style="display:none;">
-        <!-- 回测报告 -->
-        <div class="panel" id="backtestPanel">
-          <h2>📋 昨日预测回测结果</h2>
-          <div id="backtestContent"></div>
-        </div>
-        <!-- 各彩种预测 -->
-        <div id="gamePredict3d" style="display:none;">
-          <div class="panel">
-            <h2>🎯 福彩3D · 今日预测</h2>
-            <div id="predict3dContent"></div>
-          </div>
-        </div>
-        <div id="gamePredictSSQ" style="display:none;">
-          <div class="panel">
-            <h2>🔴 双色球 · 今日预测</h2>
-            <div id="predictSSQContent"></div>
-          </div>
-        </div>
-        <div id="gamePredictKL8" style="display:none;">
-          <div class="panel">
-            <h2>🟡 快乐8 · 今日预测</h2>
-            <div id="predictKL8Content"></div>
-          </div>
-        </div>
-        <div class="status" style="color:#1a7a4c;font-size:12px;margin-top:8px;padding:8px;background:#f0fff4;border-radius:8px;border:1px solid #c3e6cb;">
-          💡 已加载ML预测数据。切换到「走势图」Tab 生成 AI 专家解读时，将自动融合机器学习的马尔可夫/遗漏/模型预测结果，解读质量更高。
-        </div>
-        <div class="status" style="color:#aaa;font-size:11px;margin-top:6px;padding:0 4px;">
-          ⚠️ 以上预测基于历史数据的机器学习模型，彩票开奖具有完全随机性，预测结果不具有实际意义，仅供数据分析娱乐参考，请勿作为投注依据。
-        </div>
-      </div>
-    </div><!-- end tabPredict -->
-
   </div><!-- end left panel -->
 
   <!-- ===================== PREVIEW ===================== -->
@@ -1119,6 +1030,39 @@
 </div>
 
 <script>
+const AI_CACHE_KEY = 'fucaiAiReadingCache';
+const aiCache = { '3d': null, 'ssq': null, 'kl8': null };
+function saveAiCache(){
+  try{ localStorage.setItem(AI_CACHE_KEY, JSON.stringify(aiCache)); } catch(e){}
+}
+function loadAiCache(){
+  try{
+    const c = JSON.parse(localStorage.getItem(AI_CACHE_KEY)||'{}');
+    ['3d','ssq','kl8'].forEach(g=>{ if(c[g]) aiCache[g] = c[g]; });
+  } catch(e){}
+}
+function restoreAiResult(game){
+  const cache = aiCache[game];
+  const resultEl = document.getElementById('aiResult');
+  const statusEl = document.getElementById('aiStatus');
+  if(!resultEl || !statusEl) return;
+  if(cache){
+    const t = document.getElementById('aiResultTitle');
+    const d = document.getElementById('aiResultDate');
+    const c = document.getElementById('aiResultContent');
+    if(t) t.textContent = cache.title || '';
+    if(d) d.textContent = cache.date  || '';
+    if(c) c.innerHTML  = cache.content|| '';
+    resultEl.style.display = 'block';
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ 已恢复${cache.gameLabel||''}的解读（${cache.savedAt||''}）`;
+  } else {
+    resultEl.style.display = 'none';
+    statusEl.className = 'status';
+    statusEl.textContent = '';
+  }
+}
+
 const state = {
   type: 'ssq',
   style: 'fest',
@@ -1465,240 +1409,85 @@ function loadGwConfig(){
   document.getElementById(id)?.addEventListener('input', saveGwConfig);
 });
 
-function buildPrompt(type, records, mlContext=''){
+function buildPrompt(type, records){
   const latest = records[records.length-1];
-  const n = records.length;
   const gameNames = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
   const name = gameNames[type];
 
   let dataDesc = '';
-
   if(type==='3d'){
-    // 最近10期详细数据（含所有新特征）
-    const recent = records.slice(-10).map((r,i,arr)=>{
-      const prev = i>0 ? arr[i-1].digits : null;
-      const m = calc3D(r.digits, prev);
-      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): ${r.digits.join('')} ` +
-        `和值${m.sum}(尾${m.sumTail}) 跨度${m.span} ${m.oddEven} ${m.bigSmall} ` +
-        `012路[${m.road012.join('')}] ${m.groupType}` +
-        (m.repeat>0?` 重号${m.repeat}个`:'') +
-        (m.isArith?' 斜连✓':'') +
-        ` 百十距${m.gapBS} 十个距${m.gapSG}`;
+    const rows = records.slice(-10).map(r=>{
+      const m = calc3D(r.digits);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): ${r.digits.join('')} 和值${m.sum} 跨度${m.span} ${m.oddEven} ${m.bigSmall}`;
     });
-
-    // 全量统计
-    const allRows = records.map((r,i,arr)=>({...r,...calc3D(r.digits, i>0?arr[i-1].digits:null)}));
-    const sumAvg = (allRows.reduce((s,r)=>s+r.sum,0)/n).toFixed(1);
-    const sumTailCount={}, spanCount={}, oeCount={}, bsCount={}, gtCount={'组三':0,'组六':0,'豹子':0};
-    const gapBSCount={}, gapSGCount={};
-    let repeatTotal=0, arithTotal=0;
-    allRows.forEach(r=>{
-      sumTailCount[r.sumTail]=(sumTailCount[r.sumTail]||0)+1;
-      spanCount[r.span]=(spanCount[r.span]||0)+1;
-      oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1;
-      bsCount[r.bigSmall]=(bsCount[r.bigSmall]||0)+1;
-      gtCount[r.groupType]++;
-      gapBSCount[r.gapBS]=(gapBSCount[r.gapBS]||0)+1;
-      gapSGCount[r.gapSG]=(gapSGCount[r.gapSG]||0)+1;
-      if(r.repeat>0) repeatTotal++;
-      if(r.isArith) arithTotal++;
-    });
+    const allRows = records.map(r=>({...r,...calc3D(r.digits)}));
+    const sumAvg = (allRows.reduce((s,r)=>s+r.sum,0)/allRows.length).toFixed(1);
+    const spanCount={};
+    allRows.forEach(r=>{ spanCount[r.span]=(spanCount[r.span]||0)+1; });
     const topSpan = Object.entries(spanCount).sort((a,b)=>b[1]-a[1])[0];
+    const oeCount={};
+    allRows.forEach(r=>{ oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1; });
     const topOE = Object.entries(oeCount).sort((a,b)=>b[1]-a[1])[0];
-    const topBS = Object.entries(bsCount).sort((a,b)=>b[1]-a[1])[0];
-    const topTail = Object.entries(sumTailCount).sort((a,b)=>b[1]-a[1])[0];
-    const topGapBS = Object.entries(gapBSCount).sort((a,b)=>b[1]-a[1])[0];
-    const topGapSG = Object.entries(gapSGCount).sort((a,b)=>b[1]-a[1])[0];
-    // 各位频率TOP3
-    const posFreq = [0,1,2].map(col=>{
-      const cnt={};
-      allRows.forEach(r=>{ cnt[r.digits[col]]=(cnt[r.digits[col]]||0)+1; });
-      return Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${k}(${v}次)`).join('、');
-    });
-    // 最近连续走势（最后5期和值趋势）
-    const last5sum = allRows.slice(-5).map(r=>r.sum);
-    const sumTrend = last5sum.map((v,i)=> i===0?'-':(v>last5sum[i-1]?'↑':(v<last5sum[i-1]?'↓':'→'))).join('');
-
-    dataDesc =
-`【最近10期明细】
-${recent.join('\n')}
-
-【近${n}期统计摘要】
-• 和值：均值${sumAvg}，最近5期走势${sumTrend}（${last5sum.join('→')}）
-• 和值尾数：最热尾${topTail[0]}(${topTail[1]}次)
-• 跨度：最频繁跨度${topSpan[0]}(${topSpan[1]}次)
-• 组型：组三${gtCount['组三']}次 组六${gtCount['组六']}次 豹子${gtCount['豹子']}次
-• 奇偶：最常见${topOE[0]}(${topOE[1]}次)
-• 大小：最常见${topBS[0]}(${topBS[1]}次)
-• 重号：近${n}期出现${repeatTotal}次(占比${(repeatTotal/n*100).toFixed(1)}%)
-• 斜连：近${n}期出现${arithTotal}次(占比${(arithTotal/n*100).toFixed(1)}%)
-• 百十间距：最常见距${topGapBS[0]}(${topGapBS[1]}次)
-• 十个间距：最常见距${topGapSG[0]}(${topGapSG[1]}次)
-• 百位热号：${posFreq[0]}
-• 十位热号：${posFreq[1]}
-• 个位热号：${posFreq[2]}`;
-
+    dataDesc = `最近10期开奖：\n${rows.join('\n')}\n\n近${records.length}期统计：和值均值${sumAvg}，最频繁跨度${topSpan[0]}(${topSpan[1]}次)，最常见奇偶组合${topOE[0]}(${topOE[1]}次)`;
   } else if(type==='ssq'){
-    const recent = records.slice(-8).map(r=>{
-      const m = calcSSQ(r.red, r.blue);
-      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 红[${r.red.join(',')}] 蓝${r.blue} ` +
-        `和值${m.sumVal} ${m.odd}奇${m.even}偶 ${m.big}大${m.small}小 AC值${m.ac} ` +
-        `连号${m.consec} 三区[${m.zone1}/${m.zone2}/${m.zone3}] 最大距${m.maxGap} ` +
-        `蓝:${m.blueOdd}${m.blueBig}`;
+    const rows = records.slice(-8).map(r=>{
+      const m = calcSSQ(r.red,r.blue);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 红[${r.red.join(',')}] 蓝${r.blue} ${m.odd}奇${m.even}偶 AC值${m.ac} 连号${m.consec}`;
     });
-
-    const allRows = records.map(r=>({...r,...calcSSQ(r.red,r.blue)}));
-    const redCnt={}, blueCnt={};
-    const oeMap={}, bsMap={}, acMap={}, sumGroups={'低':0,'中':0,'高':0};
-    let zone1t=0, zone2t=0, zone3t=0, consecTotal=0, blueOddCnt=0, blueBigCnt=0, maxGapSum=0;
-    allRows.forEach(r=>{
-      r.red.forEach(n=>{ redCnt[n]=(redCnt[n]||0)+1; });
-      blueCnt[r.blue]=(blueCnt[r.blue]||0)+1;
-      const oeK=`${r.odd}奇${r.even}偶`; oeMap[oeK]=(oeMap[oeK]||0)+1;
-      const bsK=`${r.big}大${r.small}小`; bsMap[bsK]=(bsMap[bsK]||0)+1;
-      acMap[r.ac]=(acMap[r.ac]||0)+1;
-      if(r.sumVal<70)sumGroups['低']++; else if(r.sumVal<100)sumGroups['中']++; else sumGroups['高']++;
-      zone1t+=r.zone1; zone2t+=r.zone2; zone3t+=r.zone3;
-      if(r.consec>0) consecTotal++;
-      if(r.blueOdd==='奇') blueOddCnt++;
-      if(r.blueBig==='大') blueBigCnt++;
-      maxGapSum+=r.maxGap;
-    });
+    const redCnt={};
+    records.forEach(r=>r.red.forEach(n=>{ redCnt[n]=(redCnt[n]||0)+1; }));
     const hot5 = Object.entries(redCnt).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
     const cold5 = Object.entries(redCnt).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
-    const hotBlue = Object.entries(blueCnt).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${k}号(${v}次)`).join('、');
-    const topOE = Object.entries(oeMap).sort((a,b)=>b[1]-a[1])[0];
-    const topBS = Object.entries(bsMap).sort((a,b)=>b[1]-a[1])[0];
-    const topAC = Object.entries(acMap).sort((a,b)=>b[1]-a[1])[0];
-
-    dataDesc =
-`【最近8期明细】
-${recent.join('\n')}
-
-【近${n}期统计摘要】
-• 红球热号TOP5：${hot5}
-• 红球冷号TOP5：${cold5}
-• 蓝球热号TOP3：${hotBlue}；奇数蓝球${blueOddCnt}次 大号蓝球(9-16)${blueBigCnt}次
-• 奇偶比：最常见${topOE[0]}(${topOE[1]}次)
-• 大小比：最常见${topBS[0]}(${topBS[1]}次)
-• AC值：最常见${topAC[0]}(${topAC[1]}次)
-• 和值分布：低(<70)${sumGroups['低']}次 中(70-99)${sumGroups['中']}次 高(≥100)${sumGroups['高']}次
-• 三区均落球：一区${(zone1t/n).toFixed(1)}个 二区${(zone2t/n).toFixed(1)}个 三区${(zone3t/n).toFixed(1)}个
-• 平均最大间距：${(maxGapSum/n).toFixed(1)}
-• 含连号期数：${consecTotal}次(占比${(consecTotal/n*100).toFixed(1)}%)`;
-
+    dataDesc = `最近8期开奖：\n${rows.join('\n')}\n\n近${records.length}期红球热号：${hot5}\n冷号：${cold5}`;
   } else if(type==='kl8'){
-    const recent = records.slice(-5).map(r=>{
+    const rows = records.slice(-5).map(r=>{
       const m = calcKL8(r.numbers);
-      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 号码[${r.numbers.join(',')}] ` +
-        `总和${m.total} 最小${m.minN} 最大${m.maxN} ` +
-        `区间[${m.zones.join('/')}] 五行[${m.five.join('/')}] ` +
-        `${m.odd}奇${m.even}偶 ${m.big}大${m.small}小 连续号组${m.consecGroups}`;
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 号码[${r.numbers.join(',')}] 区间[${m.zones.join('/')}] ${m.odd}奇${m.even}偶`;
     });
-
-    const allRows = records.map(r=>({...r,...calcKL8(r.numbers)}));
     const cnt={};
-    let totalSum=0, consecSum=0, minSum=0, maxSum=0;
-    const zoneT=[0,0,0,0], fiveT=[0,0,0,0,0];
-    const oeMap={}, bsMap={};
-    allRows.forEach(r=>{
-      r.numbers.forEach(n=>{ cnt[n]=(cnt[n]||0)+1; });
-      totalSum+=r.total; consecSum+=r.consecGroups;
-      minSum+=r.minN; maxSum+=r.maxN;
-      r.zones.forEach((v,i)=>{ zoneT[i]+=v; });
-      r.five.forEach((v,i)=>{ fiveT[i]+=v; });
-      const oeK=`${r.odd}奇${r.even}偶`; oeMap[oeK]=(oeMap[oeK]||0)+1;
-      const bsK=`${r.big}大${r.small}小`; bsMap[bsK]=(bsMap[bsK]||0)+1;
-    });
-    const hot10 = Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([k,v])=>`${k}(${v}次)`).join('、');
-    const cold10 = Object.entries(cnt).sort((a,b)=>a[1]-b[1]).slice(0,10).map(([k,v])=>`${k}(${v}次)`).join('、');
-    const topOE = Object.entries(oeMap).sort((a,b)=>b[1]-a[1])[0];
-    const topBS = Object.entries(bsMap).sort((a,b)=>b[1]-a[1])[0];
-    const zoneNames=['1-20','21-40','41-60','61-80'];
-    const fiveNames=['1-16','17-32','33-48','49-64','65-80'];
-    // 最近5期总和走势
-    const last5total = allRows.slice(-5).map(r=>r.total);
-
-    dataDesc =
-`【最近5期明细】
-${recent.join('\n')}
-
-【近${n}期统计摘要】
-• 热号TOP10：${hot10}
-• 冷号TOP10：${cold10}
-• 奇偶比：最常见${topOE[0]}(${topOE[1]}次)
-• 大小比：最常见${topBS[0]}(${topBS[1]}次)
-• 号码总和：均值${(totalSum/n).toFixed(0)}，最近5期：${last5total.join('→')}
-• 最小值均值：${(minSum/n).toFixed(1)}；最大值均值：${(maxSum/n).toFixed(1)}
-• 区间均落球：${zoneNames.map((z,i)=>`${z}区${(zoneT[i]/n).toFixed(1)}个`).join(' ')}
-• 五行均落球：${fiveNames.map((z,i)=>`${z}段${(fiveT[i]/n).toFixed(1)}个`).join(' ')}
-• 平均连续号组数：${(consecSum/n).toFixed(1)}`;
+    records.forEach(r=>r.numbers.forEach(n=>{ cnt[n]=(cnt[n]||0)+1; }));
+    const hot5 = Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    const cold5 = Object.entries(cnt).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    dataDesc = `最近5期开奖：\n${rows.join('\n')}\n\n近${records.length}期热号：${hot5}\n冷号：${cold5}`;
   }
 
-  const system = `你是一位资深彩票数据分析专家，同时具备机器学习结果解读能力。
-你的分析结合两类数据：①人工统计走势特征 ②机器学习模型预测结果（随机森林+XGBoost+LightGBM+马尔可夫转移+遗漏分析）。
+  const system = `你是一位资深彩票数据分析专家，擅长从历史开奖数据中总结统计特征、冷热变化、遗漏走势和号码分布规律。
 
 要求：
-1. 自然融合统计走势与ML模型两类信息，不要割裂成"走势部分"和"ML部分"。
-2. 提到ML预测时，用"模型分析"/"统计模型"等表述，不夸大准确性。
-3. 所有观点均基于提供的数据，不虚构规律，不保证命中率。
-4. 结构清晰，语言生动，像专业彩票资讯网站的每日深度解读。
-5. 全文400字左右。
-6. 最后必须附上免责声明："彩票开奖具有完全随机性，本分析为历史数据统计与模型演示，仅供娱乐参考，请理性购彩。"`;
+1. 使用专业、自然、生动、有参考价值的中文。
+2. 所有观点均基于提供的数据分析，不要虚构不存在的规律。
+3. 不要保证命中率，也不要暗示能够预测开奖结果。
+4. 分析结构自然流畅，避免模板化表达。
+5. 全文控制在200字以内。
+6. 最后必须添加一句：
+"彩票开奖结果具有随机性，本分析仅基于历史数据统计，仅供参考。"`;
 
-  const user = `请根据以下${name}近期开奖数据和机器学习分析结果，撰写一篇今日专家深度解读。
 
-【走势历史数据】
+const user = `请根据以下${name}近期开奖数据，撰写一篇今日专家解读分析。
+
+历史数据：
 ${dataDesc}
 
-${mlContext ? `【机器学习模型分析结果】
-${mlContext}
+最新一期（${latest.date}）已开奖。
 
-` : ''}最新一期（${latest.date}）已开奖。
+请结合历史数据，自然完成一篇分析文章，内容需要覆盖但不限于：
+
+- 最近走势特征与规律
+- 各项指标值得关注的变化
+- 近期号码分布特点（冷热、遗漏、奇偶、大小、区间、和值、跨度等）
+- 今日整体走势总结
+- 根据历史统计，列出近期值得关注的号码，然后再有针对性推荐五组以上参考号码组合
 
 写作要求：
-- 自然融合走势规律与模型分析两类视角，不要分成两块各说各的。
-- 使用2~4个小标题，内容覆盖：走势规律观察、冷热遗漏变化、模型信号解读、综合号码建议。
-- 推荐号码（5组以上）结合走势+模型双重依据给出，标注是"直选"还是"复式"。
-- 每个观点结合具体数字，避免空洞表述。
-- 语言流畅自然，像资深分析师的每日解读稿。
+- 必须随机自由调整分析顺序，自然衔接各个观点，例如先分析走势，再结合号码分布，最后总结并给出参考号码。
+- 各项分析内容应自然融合在正文中，不要让读者感觉是在完成一份提纲。
+- 可以使用2~4个符合内容的小标题，但小标题不要直接对应上述要求，应更像彩票资讯网站每日专家解读，例如："走势观察"、"冷热变化"、"近期焦点"、"综合判断"等。
+- 推荐号码随便放，以"参考号码"或"关注号码"形式展示即可。
+- 每个观点尽量结合数据说明原因，避免空洞描述。
+- 整体风格参考专业彩票资讯网站的每日行情解读，语言自然、有节奏，像资深分析师撰写，而不是AI按要求逐项作答。
 - 请使用中文回答。`;
 
   return { system, user };
-}
-
-// 供 generateAIReading 调用：从已加载的 prediction.json 中提取 ai_context
-function getMlContext(type){
-  try{
-    const pred = window._lastPrediction;
-    if(!pred || !pred.predictions || !pred.predictions[type]) return '';
-    const ctx = pred.predictions[type].ai_context;
-    if(!ctx) return '';
-
-    const lines = [];
-    if(type==='3d'){
-      lines.push(`数据量：${ctx.data_count}期全量训练`);
-      lines.push(`最优模型：${ctx.ml_top_accuracy}`);
-      if(ctx.markov_summary?.length) lines.push(`马尔可夫转移预测：${ctx.markov_summary.join('；')}`);
-      if(ctx.overdue_summary?.length) lines.push(`遗漏号码：${ctx.overdue_summary.join('；')}`);
-      if(ctx.sum_pred) lines.push(`ML预测和值区间：${ctx.sum_pred}`);
-      if(ctx.recommend_groups?.length) lines.push(`ML综合推荐号码：${ctx.recommend_groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
-    } else if(type==='ssq'){
-      lines.push(`数据量：${ctx.data_count}期全量训练`);
-      if(ctx.blue_recommend?.length) lines.push(`ML蓝球推荐：${ctx.blue_recommend.join('、')}`);
-      if(ctx.overdue_blue?.length) lines.push(`蓝球遗漏号：${ctx.overdue_blue.join('、')}`);
-      if(ctx.red_overdue?.length) lines.push(`红球遗漏号（回补关注）：${ctx.red_overdue.join('、')}`);
-      if(ctx.odd_pred!==undefined) lines.push(`ML预测奇数个数：${ctx.odd_pred}个`);
-      if(ctx.sum_pred) lines.push(`ML预测和值区间：${ctx.sum_pred}`);
-    } else if(type==='kl8'){
-      lines.push(`数据量：${ctx.data_count}期全量训练`);
-      if(ctx.zone_pred) lines.push(`ML预测主落区：${ctx.zone_pred}`);
-      if(ctx.total_pred) lines.push(`ML预测总和区间：${ctx.total_pred}`);
-      if(ctx.overdue_top10?.length) lines.push(`遗漏较久号码（回补关注）：${ctx.overdue_top10.join('、')}`);
-      if(ctx.hot_nums?.length) lines.push(`近期热号：${ctx.hot_nums.join('、')}`);
-    }
-    return lines.join('\n');
-  } catch(e){ return ''; }
 }
 
 // 把AI返回的纯文本渲染成带格式的HTML
@@ -1742,8 +1531,7 @@ async function generateAIReading(){
   try{
     saveGwConfig();
 
-    const mlContext = getMlContext(window._trendType);
-    const {system, user} = buildPrompt(window._trendType, window._trendRecords, mlContext);
+    const {system, user} = buildPrompt(window._trendType, window._trendRecords);
     const messages = [
       {role:'system', content: system},
       {role:'user',   content: user},
@@ -2110,263 +1898,24 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
     tab.classList.add('active');
     const which = tab.dataset.tab;
     document.getElementById('tab' + which.charAt(0).toUpperCase() + which.slice(1)).classList.add('active');
-    const stage     = document.getElementById('stage');
+    const stage = document.getElementById('stage');
     const trendWrap = document.getElementById('trendWrap');
-    const credit    = document.getElementById('previewCredit');
+    const credit = document.getElementById('previewCredit');
     if(which === 'trend'){
-      stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
-    } else if(which === 'predict'){
-      stage.style.display='none'; trendWrap.style.display='none'; credit.style.display='none';
+      stage.style.display = 'none';
+      trendWrap.style.display = 'block';
+      credit.style.display = 'none';
     } else {
-      stage.style.display=''; trendWrap.style.display='none'; credit.style.display='';
+      stage.style.display = '';
+      trendWrap.style.display = 'none';
+      credit.style.display = '';
       renderPoster();
     }
   });
 });
 
-/* ═══════════════════════════════════════════════════
-   ML 预测报告
-═══════════════════════════════════════════════════ */
-document.getElementById('loadPredictBtn').addEventListener('click', loadPrediction);
-
-async function loadPrediction(){
-  const statusEl = document.getElementById('predictStatus');
-  const btn = document.getElementById('loadPredictBtn');
-  const repo = (localStorage.getItem('fucaiGithubRepo')||'').trim();
-  if(!repo){
-    statusEl.className='status err';
-    statusEl.textContent='请先在「海报生成」→「数据来源」里填写并保存 GitHub 仓库地址';
-    return;
-  }
-  btn.disabled=true;
-  statusEl.className='status';
-  statusEl.textContent='正在加载预测报告…';
-  try{
-    const url=`https://raw.githubusercontent.com/${repo}/main/prediction.json?t=${Date.now()}`;
-    const resp=await fetch(url);
-    if(!resp.ok) throw new Error('HTTP '+resp.status+' — prediction.json 是否已生成？先手动触发一次 Actions');
-    const data=await resp.json();
-    window._lastPrediction = data;  // 供AI解读的getMlContext()使用
-    renderBacktest(data.backtest||{});
-    renderGamePredict('3d',  data.predictions?.['3d']);
-    renderGamePredict('ssq', data.predictions?.ssq);
-    renderGamePredict('kl8', data.predictions?.kl8);
-    document.getElementById('predictContent').style.display='block';
-    statusEl.className='status ok';
-    statusEl.textContent=`✓ 预测报告加载成功（更新于 ${data.updated_at||'未知'}）`;
-  } catch(e){
-    statusEl.className='status err';
-    statusEl.textContent='加载失败：'+e.message;
-  }
-  btn.disabled=false;
-}
-
-function renderBacktest(bt){
-  const el=document.getElementById('backtestContent');
-  if(!bt||!bt.games||Object.keys(bt.games).length===0){
-    el.innerHTML='<div class="status">暂无回测数据（首次运行时无上期预测可对比）</div>'; return;
-  }
-  let html=`<div style="font-size:12px;color:#888;margin-bottom:10px;">回测日期：${bt.date||'未知'}</div>`;
-  const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
-  for(const [game,info] of Object.entries(bt.games)){
-    html+=`<div class="pred-model-card"><div class="pred-model-title">${gNames[game]||game} 回测</div>`;
-    if(game==='3d'){
-      html+=`<div>实际开奖：<b>${(info.actual||[]).join(' ')}</b></div>`;
-      html+=`<div>完全命中：<span class="${info.hit_count>0?'bt-hit':'bt-miss'}">${info.hit_count}注</span>`;
-      html+=` 部分命中(≥2位)：<span class="${info.partial_count>0?'bt-hit':'bt-miss'}">${info.partial_count}注</span></div>`;
-    } else if(game==='ssq'){
-      html+=`<div>实际红球：<b>${(info.actual_red||[]).join(', ')}</b> 蓝球：<b>${info.actual_blue}</b></div>`;
-      html+=`<div>最佳命中红球：<span class="${(info.best_red_hit||0)>=3?'bt-hit':'bt-miss'}">${info.best_red_hit||0}个</span></div>`;
-      if(info.group_results){
-        html+='<div class="bt-row">';
-        info.group_results.forEach((g,i)=>{
-          html+=`<span class="bt-tag ${g.red_hit>=3?'hit':'miss'}">第${i+1}注 红${g.red_hit}蓝${g.blue_hit}</span>`;
-        });
-        html+='</div>';
-      }
-    } else if(game==='kl8'){
-      html+=`<div style="margin-bottom:6px;">实际开奖20个球（部分）：<b style="font-size:11px;">${(info.actual||[]).slice(0,10).join(' ')} …</b></div>`;
-      html+=`<div style="font-size:12px;color:#888;margin-bottom:6px;">最佳命中：<span class="${(info.best_hit||0)>=9?'bt-hit':'bt-miss'}">${info.best_hit||0}球</span>（各玩法按全中判断）</div>`;
-      const playResults = info.play_results || {};
-      const playOrder = ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'];
-      playOrder.forEach(pk=>{
-        const pr = playResults[pk];
-        if(!pr) return;
-        html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#1a1a2e;">${pr.name}（选${pr.balls}个）：</span>`;
-        html += '<div class="bt-row">';
-        (pr.groups||[]).forEach((g,i)=>{
-          const label = pr.name.includes('复式')?'复式':(`第${i+1}注`);
-          html += `<span class="bt-tag ${g.won?'hit':'miss'}">${label} 中${g.hit}/${g.balls}${g.won?' ✓':''}</span>`;
-        });
-        html += '</div></div>';
-      });
-    }
-    html+='</div>';
-  }
-  el.innerHTML=html;
-}
-
-function factorial(n){ let r=1; for(let i=2;i<=n;i++) r*=i; return r; }
-
-function renderGamePredict(game, data){
-  const panelIds   = {'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
-  const contentIds = {'3d':'predict3dContent','ssq':'predictSSQContent','kl8':'predictKL8Content'};
-  const panel     = document.getElementById(panelIds[game]);
-  const contentEl = document.getElementById(contentIds[game]);
-  if(!data||!data.models){panel.style.display='none';return;}
-  panel.style.display='block';
-
-  const modelLabels={
-    bai:'百位数字', shi:'十位数字', ge:'个位数字',
-    sum_group:'和值区间', odd_cnt:'奇数个数',
-    blue:'蓝球号码',
-    odd_group:'奇数区间', zone_dom:'主落区', total_group:'总和区间'
-  };
-
-  let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">全量${data.data_count||'—'}期训练 · ${data.updated_at||''}</div>`;
-
-  // ── 各模型卡片 ──
-  for(const [mname,mdata] of Object.entries(data.models||{})){
-    if(!mdata||!mdata.accuracy) continue;
-    const acc  = mdata.accuracy || {};
-    const pred = mdata.prediction || {};
-    html+=`<div class="pred-model-card">`;
-    html+=`<div class="pred-model-title">预测目标：${modelLabels[mname]||mname}</div>`;
-    html+=`<div class="pred-acc-row">`;
-    if(acc.rf!==undefined)       html+=`<span class="pred-acc-badge">随机森林 ${acc.rf}%</span>`;
-    if(acc.xgb!==undefined)      html+=`<span class="pred-acc-badge" style="background:#1a3a8b;">XGBoost ${acc.xgb}%</span>`;
-    if(acc.lgb!==undefined)      html+=`<span class="pred-acc-badge" style="background:#1a6b1a;">LightGBM ${acc.lgb}%</span>`;
-    if(acc.ensemble!==undefined) html+=`<span class="pred-acc-badge" style="background:#6b3a9b;">集成 ${acc.ensemble}%</span>`;
-    html+=`</div>`;
-    if(pred.value!==undefined){
-      html+=`<div style="font-size:12px;margin-bottom:6px;">预测下一期：`;
-      html+=`<b style="color:#c81e1e;font-size:15px;">${pred.value}</b>`;
-      html+=`（置信度 ${pred.confidence??'—'}%）</div>`;
-    }
-    if(pred.probs&&Object.keys(pred.probs).length){
-      const top=Object.entries(pred.probs).sort((a,b)=>b[1]-a[1]).slice(0,6);
-      const maxV=Math.max(...top.map(x=>+x[1]));
-      top.forEach(([k,v])=>{
-        html+=`<div class="pred-prob-bar">`;
-        html+=`<div class="pred-prob-label">${k} — ${v}%</div>`;
-        html+=`<div class="pred-bar-wrap"><div class="pred-bar-fill" style="width:${Math.min(+v,100)}%;background:${+v===maxV?'#c81e1e':'#8a97b3'}"></div></div>`;
-        html+=`</div>`;
-      });
-    }
-    const fi=mdata.feat_imp||mdata.feature_importance||[];
-    if(fi.length){
-      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">关键特征：`;
-      html+=fi.map(f=>`${f.name}(${((f.score||0)*100).toFixed(1)}%)`).join(' · ');
-      html+=`</div>`;
-    }
-    const btd=mdata.bt_detail||mdata.backtest_latest||[];
-    if(btd.length){
-      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">近期回测：`;
-      html+=btd.slice(-5).map(b=>{
-        const actual=b.true??'?';
-        const predicted=b.pred??b.pred_ensemble??'?';
-        const hit=b.hit===1||(b.true!==undefined&&b.true===b.pred);
-        return `<span class="bt-tag ${hit?'hit':'miss'}">${actual}→${predicted}${hit?' ✓':''}</span>`;
-      }).join(' ');
-      html+=`</div>`;
-    }
-    html+=`</div>`;
-  }
-
-  // ── 推荐区 ──
-  const rec=data.recommendation||{};
-  html+=`<div style="margin-top:16px;">`;
-  html+=`<div class="sectionTitle" style="font-size:13px;">🎯 综合推荐（预测下一期）</div>`;
-  html+=`<div style="margin:10px 0;">`;
-
-  if(game==='3d'){
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">预测和值区间：<b>${rec.sum_pred||rec.sum_range_pred||'—'}</b></div>`;
-    const cands=rec.pos_candidates||[];
-    if(cands.length===3)
-      html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">候选号：百[${cands[0].join('/')}] 十[${cands[1].join('/')}] 个[${cands[2].join('/')}]</div>`;
-    (rec.groups||[]).forEach((g,i)=>{
-      html+=`<div class="rec-group">第${i+1}注：${(Array.isArray(g)?g:[]).map(n=>`<span class="ball-r">${n}</span>`).join('')}</div>`;
-    });
-
-  } else if(game==='ssq'){
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">`;
-    html+=`蓝球推荐：<b>${(rec.blue_recommend||[]).join('、')||'—'}</b>`;
-    html+=` · 预测奇数：<b>${rec.odd_pred??rec.odd_cnt_pred??'—'}</b>个`;
-    html+=` · 和值：<b>${rec.sum_pred||rec.sum_range_pred||'—'}</b></div>`;
-    const hot=rec.hot_red||[]; const od=rec.overdue_red||rec.cold_red||[];
-    if(hot.length) html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">热号：${hot.slice(0,12).join(' ')}</div>`;
-    if(od.length)  html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">遗漏回补：${od.slice(0,8).join(' ')}</div>`;
-    (rec.groups||[]).forEach((g,i)=>{
-      const red=g.red||[]; const blue=g.blue||0;
-      html+=`<div class="rec-group">第${i+1}注：`;
-      html+=red.map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('');
-      html+=`<span class="ball-b">${String(blue).padStart(2,'0')}</span></div>`;
-    });
-
-  } else if(game==='kl8'){
-    html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">主落区：<b>${rec.zone_dominant_pred||'—'}</b> · 总和：<b>${rec.total_range_pred||'—'}</b></div>`;
-    const hot=rec.hot_nums||rec.hot20||[];
-    const ov=rec.overdue||[];
-    if(hot.length) html+=`<div style="font-size:12px;color:#666;margin-bottom:4px;">热号：`+
-      hot.slice(0,12).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#c81e1e;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')+`</div>`;
-    if(ov.length) html+=`<div style="font-size:12px;color:#666;margin-bottom:8px;">遗漏回补：`+
-      ov.slice(0,8).map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#9b59b6;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')+`</div>`;
-    const plays=rec.plays||{};
-    const order=['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'];
-    const colors={xuan4:'#c81e1e',xuan5:'#1560c8',xuan5_fu:'#9b59b6',xuan6:'#1a7a4c',xuan9:'#e87d00',xuan10:'#7a1233'};
-    order.forEach(pk=>{
-      const play=plays[pk]; if(!play) return;
-      const color=colors[pk]||'#333';
-      html+=`<div style="border:1px solid ${color};border-radius:10px;margin-bottom:10px;overflow:hidden;">`;
-      html+=`<div style="background:${color};color:#fff;padding:7px 12px;font-size:13px;font-weight:700;">`;
-      html+=`${play.name}（选${play.balls}球）<span style="font-size:10px;opacity:.85;margin-left:8px;">${play.tip||''}</span></div>`;
-      html+=`<div style="padding:10px 12px;">`;
-      (play.groups||[]).forEach((g,i)=>{
-        const nums=Array.isArray(g)?g:[];
-        const label=play.name.includes('复式')?`复式${nums.length}球`:`第${i+1}注`;
-        html+=`<div style="margin-bottom:6px;"><span style="font-size:11px;color:#666;margin-right:4px;">${label}：</span>`;
-        nums.forEach(n=>{ html+=`<span style="display:inline-block;width:24px;height:24px;line-height:24px;border-radius:50%;background:${color};color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`; });
-        if(play.name.includes('复式')&&nums.length>0&&play.balls>0){
-          html+=`<span style="font-size:10px;color:#888;margin-left:6px;">C(${nums.length},${play.balls})=${factorial(nums.length)/(factorial(play.balls)*factorial(nums.length-play.balls))}注</span>`;
-        }
-        html+=`</div>`;
-      });
-      html+=`</div></div>`;
-    });
-  }
-
-  html+=`</div>`;
-  html+=`<div style="font-size:11px;color:#aaa;margin-top:6px;">${rec.note||''}</div>`;
-  html+=`</div>`;
-  contentEl.innerHTML=html;
-}
-
-function saveAiCache(){
-  try{ localStorage.setItem(AI_CACHE_KEY, JSON.stringify(aiCache)); } catch(e){}
-}
-function loadAiCache(){
-  try{
-    const c = JSON.parse(localStorage.getItem(AI_CACHE_KEY)||'{}');
-    ['3d','ssq','kl8'].forEach(g=>{ if(c[g]) aiCache[g] = c[g]; });
-  } catch(e){}
-}
-function restoreAiResult(game){
-  const cache = aiCache[game];
-  const resultEl = document.getElementById('aiResult');
-  const statusEl = document.getElementById('aiStatus');
-  if(cache){
-    document.getElementById('aiResultTitle').textContent   = cache.title;
-    document.getElementById('aiResultDate').textContent    = cache.date;
-    document.getElementById('aiResultContent').innerHTML   = cache.content;
-    resultEl.style.display = 'block';
-    statusEl.className = 'status ok';
-    statusEl.textContent = `✓ 已恢复${cache.gameLabel}的解读（${cache.savedAt}）`;
-  } else {
-    resultEl.style.display = 'none';
-    statusEl.className = 'status';
-    statusEl.textContent = '';
-  }
-}
+// 走势图彩种切换
+let trendType = '3d';
 
 loadAiCache();
 
@@ -2432,30 +1981,14 @@ async function loadTrend(){
 }
 
 /* ── 3D 指标计算 ── */
-function calc3D(digits, prevDigits){
+function calc3D(digits){
   const [b, s, g] = digits;
   const sum = b + s + g;
   const span = Math.max(b,s,g) - Math.min(b,s,g);
   const oddEven = digits.map(d => d%2===0 ? '偶' : '奇').join('');
   const bigSmall = digits.map(d => d>=5 ? '大' : '小').join('');
   const road = digits.map(d => d%3);
-  const sumTail = sum % 10;
-  // 组型
-  const isTriplet = b===s && s===g;
-  const isGroup3 = (b===s || s===g || b===g) && !isTriplet;
-  const groupType = isTriplet ? '豹子' : isGroup3 ? '组三' : '组六';
-  // 012路比
-  const road012 = digits.map(d => d%3);
-  const roadCount = [0,1,2].map(v => road012.filter(x=>x===v).length);
-  // 重号：与上期相同的数字个数
-  const repeat = prevDigits ? digits.filter((d,i) => prevDigits[i]===d).length : 0;
-  // 百十间距、十个间距
-  const gapBS = Math.abs(b - s);
-  const gapSG = Math.abs(s - g);
-  // 斜连：三个数字是否构成等差数列（公差相同）
-  const sorted3 = [...digits].sort((a,b)=>a-b);
-  const isArith = (sorted3[1]-sorted3[0]) === (sorted3[2]-sorted3[1]) && sorted3[2]-sorted3[0] > 0;
-  return { sum, span, oddEven, bigSmall, road, sumTail, groupType, road012, roadCount, repeat, gapBS, gapSG, isArith };
+  return { sum, span, oddEven, bigSmall, road };
 }
 
 /* ── 渲染总入口 ── */
@@ -2488,10 +2021,17 @@ function renderTrendHTML(type, records){
    福彩 3D 走势图
 ════════════════════════════ */
 function render3DTrend(records){
-  // 传入上一期digits，用于计算重号
-  const rows = records.map((r, i)=>{
-    const prev = i>0 ? records[i-1].digits : null;
-    return {...r, ...calc3D(r.digits, prev)};
+  const rows = records.map(r=>{
+    const m = calc3D(r.digits);
+    const [b,s,g] = r.digits;
+    const sumTail = m.sum % 10;
+    const isGroup3 = (b===s || s===g || b===g) && !(b===s && s===g);
+    const isGroup6 = b!==s && s!==g && b!==g;
+    const isTriplet = b===s && s===g;
+    const groupType = isTriplet?'豹子': isGroup3?'组三':'组六';
+    const road012 = r.digits.map(d=>d%3);
+    const roadCount = [0,1,2].map(v=>road012.filter(x=>x===v).length);
+    return {...r, ...m, sumTail, groupType, road012, roadCount};
   });
   const n = rows.length;
 
@@ -2504,14 +2044,14 @@ function render3DTrend(records){
   html += '<th colspan="10" style="background:#1a3a8b">十位</th>';
   html += '<th colspan="10" style="background:#1a6b1a">个位</th>';
   html += '<th>和值</th><th>和尾</th><th>跨度</th>';
-  html += '<th>奇偶</th><th>大小</th><th>012路</th><th>组型</th>';
-  html += '<th>重号</th><th>百十距</th><th>十个距</th><th>斜连</th>';
+  html += '<th>奇偶</th><th>大小</th><th>012路</th>';
+  html += '<th>组型</th>';
   html += '</tr><tr><th></th><th></th>';
   for(let col=0;col<3;col++){
     const bg=col===0?'#8b1a1a':col===1?'#1a3a8b':'#1a6b1a';
     for(let d=0;d<=9;d++) html+=`<th style="background:${bg};">${d}</th>`;
   }
-  html += '<th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>';
+  html += '<th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>';
 
   rows.forEach(r=>{
     html += '<tr>';
@@ -2533,10 +2073,6 @@ function render3DTrend(records){
     html += `<td>${r.road012.map(v=>`<span style="color:${['#9b59b6','#e74c3c','#3498db'][v]};font-weight:700">${v}</span>`).join('')}</td>`;
     const gtColor = r.groupType==='豹子'?'#e67e22':r.groupType==='组三'?'#c81e1e':'#1560c8';
     html += `<td style="font-weight:700;color:${gtColor};font-size:11px;">${r.groupType}</td>`;
-    html += `<td style="font-weight:700;color:${r.repeat>0?'#e74c3c':'#aaa'};">${r.repeat>0?r.repeat+'重':'—'}</td>`;
-    html += `<td style="color:#555;">${r.gapBS}</td>`;
-    html += `<td style="color:#555;">${r.gapSG}</td>`;
-    html += `<td style="font-weight:700;color:${r.isArith?'#16a085':'#aaa'};">${r.isArith?'✓':'—'}</td>`;
     html += '</tr>';
   });
   html += '</tbody></table></div>';
@@ -2545,38 +2081,29 @@ function render3DTrend(records){
   html += '<div class="sectionTitle" style="margin-top:18px">指标统计</div>';
   html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px;">';
 
+  // 和值分布
   const sumGroups={'0-9':0,'10-17':0,'18-27':0};
   rows.forEach(r=>{ if(r.sum<=9)sumGroups['0-9']++; else if(r.sum<=17)sumGroups['10-17']++; else sumGroups['18-27']++; });
   html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`));
 
+  // 和值尾数
   const tailCount={};
   rows.forEach(r=>{ tailCount[r.sumTail]=(tailCount[r.sumTail]||0)+1; });
   html += statCard('和值尾数TOP5', Object.entries(tailCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`尾${k}: ${v}期`), '#9b59b6');
 
+  // 跨度分布
   const spanCount={};
   rows.forEach(r=>{ spanCount[r.span]=(spanCount[r.span]||0)+1; });
   html += statCard('跨度分布', Object.entries(spanCount).sort((a,b)=>+a[0]-+b[0]).map(([k,v])=>`跨度${k}: ${v}期`), '#6b3a9b');
 
+  // 组型分布
   const gtCount={'组三':0,'组六':0,'豹子':0};
   rows.forEach(r=>{ gtCount[r.groupType]=(gtCount[r.groupType]||0)+1; });
   html += statCard('组型分布', Object.entries(gtCount).map(([k,v])=>`${k}: ${v}期`), '#e67e22');
 
-  // 新增：重号统计
-  const repeatCount={'无重号':0,'1重':0,'2重':0,'全重(豹子)':0};
-  rows.forEach(r=>{
-    if(r.repeat===0) repeatCount['无重号']++;
-    else if(r.repeat===1) repeatCount['1重']++;
-    else if(r.repeat===2) repeatCount['2重']++;
-    else repeatCount['全重(豹子)']++;
-  });
-  html += statCard('重号分布', Object.entries(repeatCount).map(([k,v])=>`${k}: ${v}期`), '#e74c3c');
-
-  // 新增：斜连统计
-  const arithCount = rows.filter(r=>r.isArith).length;
-  html += statCard('斜连(等差)统计', [`近${n}期出现斜连: ${arithCount}次`, `占比: ${(arithCount/n*100).toFixed(1)}%`, `最近一次: ${rows.slice().reverse().find(r=>r.isArith)?.qihao.slice(-3)||'无'}期`], '#16a085');
-
   html += '</div>';
 
+  // 奇偶/大小/012路
   html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px;">';
   const oeCount={},bsCount={},roadStat={'0路':0,'1路':0,'2路':0};
   rows.forEach(r=>{
@@ -2589,6 +2116,7 @@ function render3DTrend(records){
   html += statCard('012路出现次数', Object.entries(roadStat).map(([k,v])=>`${k}: ${v}次`), '#9b59b6');
   html += '</div>';
 
+  // 各位频率
   html += '<div class="sectionTitle">各位号码频率</div>';
   html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">';
   ['百位','十位','个位'].forEach((label,col)=>{
@@ -2598,51 +2126,26 @@ function render3DTrend(records){
       col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c');
   });
   html += '</div>';
-
-  // 新增：百十间距 / 十个间距 分布
-  html += '<div class="sectionTitle">相邻位间距分布</div>';
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px;">';
-  const gbsCount={}, gsgCount={};
-  rows.forEach(r=>{
-    gbsCount[r.gapBS]=(gbsCount[r.gapBS]||0)+1;
-    gsgCount[r.gapSG]=(gsgCount[r.gapSG]||0)+1;
-  });
-  html += statCard('百位-十位间距TOP5', Object.entries(gbsCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`间距${k}: ${v}期`), '#8b1a1a');
-  html += statCard('十位-个位间距TOP5', Object.entries(gsgCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`间距${k}: ${v}期`), '#1a6b1a');
-  html += '</div>';
-
   return html;
 }
 
 /* ════════════════════════════
    双色球 走势图
 ════════════════════════════ */
-function calcSSQ(red, blue, allRecords, curIdx){
+function calcSSQ(red, blue){
   const odd = red.filter(n=>n%2!==0).length;
   const big = red.filter(n=>n>16).length;
+  // 连号：相差1的相邻号码对数
   const sorted = [...red].sort((a,b)=>a-b);
-  // 连号
   let consec = 0;
   for(let i=0;i<sorted.length-1;i++) if(sorted[i+1]-sorted[i]===1) consec++;
-  // AC值
+  // AC值：红球两两之差的绝对值去重后的个数 - (红球数-1)
   const diffs = new Set();
   for(let i=0;i<sorted.length;i++)
     for(let j=i+1;j<sorted.length;j++)
       diffs.add(sorted[j]-sorted[i]);
   const ac = diffs.size - (red.length-1);
-  // 和值
-  const sumVal = red.reduce((a,b)=>a+b, 0);
-  // 三区分布（1-11 / 12-22 / 23-33）
-  const zone1 = red.filter(n=>n<=11).length;
-  const zone2 = red.filter(n=>n>=12&&n<=22).length;
-  const zone3 = red.filter(n=>n>=23).length;
-  // 最大间距（相邻红球最大差值）
-  let maxGap = 0;
-  for(let i=0;i<sorted.length-1;i++) maxGap = Math.max(maxGap, sorted[i+1]-sorted[i]);
-  // 蓝球奇偶和大小（1-8小，9-16大）
-  const blueOdd = blue%2!==0 ? '奇' : '偶';
-  const blueBig = blue>=9 ? '大' : '小';
-  return { odd, even:6-odd, big, small:6-big, consec, ac, sumVal, zone1, zone2, zone3, maxGap, blueOdd, blueBig };
+  return { odd, even:6-odd, big, small:6-big, consec, ac };
 }
 
 function renderSSQTrend(records){
@@ -2657,7 +2160,6 @@ function renderSSQTrend(records){
   for(let i=1;i<=33;i++) html += `<th style="background:#8b1a1a;">${String(i).padStart(2,'0')}</th>`;
   html += '<th style="background:#1a3a8b;">蓝</th>';
   html += '<th>奇偶</th><th>大小</th><th>连号</th><th>AC值</th>';
-  html += '<th>和值</th><th>一区</th><th>二区</th><th>三区</th><th>最大距</th><th>蓝奇偶</th><th>蓝大小</th>';
   html += '</tr></thead><tbody>';
 
   rows.forEach(r=>{
@@ -2674,15 +2176,6 @@ function renderSSQTrend(records){
     html += `<td style="font-weight:700;font-size:11px;color:#e87d00;">${r.big}大${r.small}小</td>`;
     html += `<td style="font-weight:700;color:${r.consec>0?'#e74c3c':'#aaa'};">${r.consec>0?r.consec+'连':'无'}</td>`;
     html += `<td style="font-weight:700;color:#9b59b6;">${r.ac}</td>`;
-    // 新增列
-    const sumColor = r.sumVal>=100?'#e87d00':r.sumVal>=70?'#1a7a4c':'#1560c8';
-    html += `<td style="font-weight:700;color:${sumColor};">${r.sumVal}</td>`;
-    html += `<td style="font-weight:700;color:#8b1a1a;">${r.zone1}</td>`;
-    html += `<td style="font-weight:700;color:#1a3a8b;">${r.zone2}</td>`;
-    html += `<td style="font-weight:700;color:#1a6b1a;">${r.zone3}</td>`;
-    html += `<td style="font-weight:700;color:#6b3a9b;">${r.maxGap}</td>`;
-    html += `<td style="font-weight:700;color:${r.blueOdd==='奇'?'#c81e1e':'#1560c8'};">${r.blueOdd}</td>`;
-    html += `<td style="font-weight:700;color:${r.blueBig==='大'?'#e87d00':'#1a7a4c'};">${r.blueBig}</td>`;
     html += '</tr>';
   });
   html += '</tbody></table></div>';
@@ -2691,47 +2184,29 @@ function renderSSQTrend(records){
   html += '<div class="sectionTitle" style="margin-top:18px">特征统计</div>';
   html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px;">';
 
+  // 奇偶比
   const oeMap={};
   rows.forEach(r=>{ const k=`${r.odd}奇${r.even}偶`; oeMap[k]=(oeMap[k]||0)+1; });
   html += statCard('奇偶比TOP5', Object.entries(oeMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#c81e1e');
 
+  // 大小比
   const bsMap={};
   rows.forEach(r=>{ const k=`${r.big}大${r.small}小`; bsMap[k]=(bsMap[k]||0)+1; });
   html += statCard('大小比TOP5', Object.entries(bsMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#e87d00');
 
+  // 连号分布
   const consecMap={'无连号':0,'1连':0,'2连及以上':0};
   rows.forEach(r=>{ if(r.consec===0)consecMap['无连号']++; else if(r.consec===1)consecMap['1连']++; else consecMap['2连及以上']++; });
   html += statCard('连号分布', Object.entries(consecMap).map(([k,v])=>`${k}: ${v}期`), '#e74c3c');
 
+  // AC值
   const acMap={};
   rows.forEach(r=>{ acMap[r.ac]=(acMap[r.ac]||0)+1; });
   html += statCard('AC值分布TOP5', Object.entries(acMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`AC=${k}: ${v}期`), '#9b59b6');
 
-  // 新增统计
-  const sumGroups={'低(<70)':0,'中(70-99)':0,'高(≥100)':0};
-  rows.forEach(r=>{ if(r.sumVal<70)sumGroups['低(<70)']++; else if(r.sumVal<100)sumGroups['中(70-99)']++; else sumGroups['高(≥100)']++; });
-  html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`), '#1560c8');
-
-  // 三区分布
-  const zoneAvg = ['一区(1-11)','二区(12-22)','三区(23-33)'].map((z,i)=>{
-    const key = ['zone1','zone2','zone3'][i];
-    const avg = (rows.reduce((s,r)=>s+r[key],0)/n).toFixed(1);
-    return `${z}: 均${avg}个`;
-  });
-  html += statCard('三区平均落球', zoneAvg, '#1a6b1a');
-
-  // 蓝球奇偶大小
-  let blueOddCnt=0, blueBigCnt=0;
-  rows.forEach(r=>{ if(r.blueOdd==='奇')blueOddCnt++; if(r.blueBig==='大')blueBigCnt++; });
-  html += statCard('蓝球属性', [`奇数: ${blueOddCnt}次 偶数: ${n-blueOddCnt}次`,`大(9-16): ${blueBigCnt}次 小(1-8): ${n-blueBigCnt}次`], '#1a3a8b');
-
-  // 最大间距
-  const gapMap={};
-  rows.forEach(r=>{ gapMap[r.maxGap]=(gapMap[r.maxGap]||0)+1; });
-  html += statCard('最大间距TOP5', Object.entries(gapMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`间距${k}: ${v}期`), '#6b3a9b');
-
   html += '</div>';
 
+  // 蓝球频率
   html += '<div class="sectionTitle">蓝球出现频率</div>';
   const blueCnt={};
   rows.forEach(r=>{ blueCnt[r.blue]=(blueCnt[r.blue]||0)+1; });
@@ -2746,6 +2221,7 @@ function renderSSQTrend(records){
   }
   html += '</div>';
 
+  // 红球频率
   html += '<div class="sectionTitle">红球出现频率</div>';
   const redCnt={};
   rows.forEach(r=>r.red.forEach(i=>{ redCnt[i]=(redCnt[i]||0)+1; }));
@@ -2773,23 +2249,7 @@ function calcKL8(numbers){
     if(n%2!==0) odd++;
     if(n>40) big++;
   });
-  const sorted = [...numbers].sort((a,b)=>a-b);
-  // 总和
-  const total = numbers.reduce((a,b)=>a+b, 0);
-  // 最大最小值
-  const maxN = sorted[sorted.length-1];
-  const minN = sorted[0];
-  // 连续号组数（相邻差为1的连续段数量）
-  let consecGroups = 0;
-  let inConsec = false;
-  for(let i=0;i<sorted.length-1;i++){
-    if(sorted[i+1]-sorted[i]===1){ if(!inConsec){ consecGroups++; inConsec=true; } }
-    else { inConsec=false; }
-  }
-  // 五行分布（按 1-16/17-32/33-48/49-64/65-80 五段）
-  const five = [0,0,0,0,0];
-  numbers.forEach(n=>{ five[Math.min(4, Math.floor((n-1)/16))]++; });
-  return { zones, odd, even:20-odd, big, small:20-big, total, maxN, minN, consecGroups, five };
+  return { zones, odd, even:20-odd, big, small:20-big };
 }
 
 function renderKL8Trend(records){
@@ -2801,6 +2261,7 @@ function renderKL8Trend(records){
   html += '<div class="trendScrollBox"><table class="trendTable">';
   html += '<thead><tr>';
   html += '<th>期号</th><th>日期</th>';
+  // 按区间分组加背景色
   const zoneBg=['#1a3a8b','#8b1a1a','#1a6b1a','#7a1233'];
   for(let i=1;i<=80;i++){
     const zi=Math.floor((i-1)/20);
@@ -2811,9 +2272,6 @@ function renderKL8Trend(records){
   html += '<th style="background:#8b1a1a;font-size:10px;">21-40</th>';
   html += '<th style="background:#1a6b1a;font-size:10px;">41-60</th>';
   html += '<th style="background:#7a1233;font-size:10px;">61-80</th>';
-  // 新增列
-  html += '<th>总和</th><th>最小</th><th>最大</th><th>连续组</th>';
-  html += '<th style="font-size:9px;">五行1</th><th style="font-size:9px;">五行2</th><th style="font-size:9px;">五行3</th><th style="font-size:9px;">五行4</th><th style="font-size:9px;">五行5</th>';
   html += '</tr></thead><tbody>';
 
   rows.forEach(r=>{
@@ -2828,15 +2286,9 @@ function renderKL8Trend(records){
     }
     html += `<td style="font-weight:700;font-size:11px;color:#c81e1e;">${r.odd}奇${r.even}偶</td>`;
     html += `<td style="font-weight:700;font-size:11px;color:#e87d00;">${r.big}大${r.small}小</td>`;
-    r.zones.forEach((z,zi)=>{ html += `<td style="font-weight:700;color:${zoneBg[zi]};">${z}</td>`; });
-    // 新增列
-    const totalColor = r.total>=820?'#e87d00':r.total>=640?'#1a7a4c':'#1560c8';
-    html += `<td style="font-weight:700;color:${totalColor};font-size:11px;">${r.total}</td>`;
-    html += `<td style="color:#555;">${r.minN}</td>`;
-    html += `<td style="color:#555;">${r.maxN}</td>`;
-    html += `<td style="font-weight:700;color:${r.consecGroups>2?'#e74c3c':'#555'};">${r.consecGroups}</td>`;
-    const fiveColors=['#1a3a8b','#8b1a1a','#1a6b1a','#7a1233','#6b3a9b'];
-    r.five.forEach((v,fi)=>{ html += `<td style="font-weight:700;color:${fiveColors[fi]};">${v}</td>`; });
+    r.zones.forEach((z,zi)=>{
+      html += `<td style="font-weight:700;color:${zoneBg[zi]};">${z}</td>`;
+    });
     html += '</tr>';
   });
   html += '</tbody></table></div>';
@@ -2845,42 +2297,34 @@ function renderKL8Trend(records){
   html += '<div class="sectionTitle" style="margin-top:18px">特征统计</div>';
   html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px;">';
 
-  const zoneAvg = [0,1,2,3].map(zi=>(rows.reduce((s,r)=>s+r.zones[zi],0)/n).toFixed(1));
+  // 区间分布均值
+  const zoneAvg = [0,1,2,3].map(zi=> {
+    const total = rows.reduce((s,r)=>s+r.zones[zi],0);
+    return (total/n).toFixed(1);
+  });
   const zoneNames=['1-20','21-40','41-60','61-80'];
-  html += statCard('区间平均落球数', zoneNames.map((z,i)=>`${z}区: 均${zoneAvg[i]}个`), '#1a3a8b');
+  html += statCard('区间平均落球数', zoneNames.map((z,i)=>`${z}区: 平均${zoneAvg[i]}个`), '#1a3a8b');
 
+  // 奇偶比
   const oeMap={};
   rows.forEach(r=>{ const k=`${r.odd}奇${r.even}偶`; oeMap[k]=(oeMap[k]||0)+1; });
   html += statCard('奇偶比TOP5', Object.entries(oeMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#c81e1e');
 
+  // 大小比
   const bsMap={};
   rows.forEach(r=>{ const k=`${r.big}大${r.small}小`; bsMap[k]=(bsMap[k]||0)+1; });
   html += statCard('大小比TOP5', Object.entries(bsMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#e87d00');
 
-  // 新增：总和分布
-  const totalGroups={'低(<640)':0,'中(640-819)':0,'高(≥820)':0};
-  rows.forEach(r=>{ if(r.total<640)totalGroups['低(<640)']++; else if(r.total<820)totalGroups['中(640-819)']++; else totalGroups['高(≥820)']++; });
-  html += statCard('号码总和分布', Object.entries(totalGroups).map(([k,v])=>`${k}: ${v}期`), '#1560c8');
-
-  // 连续号组数
-  const consecMap={};
-  rows.forEach(r=>{ consecMap[r.consecGroups]=(consecMap[r.consecGroups]||0)+1; });
-  html += statCard('连续号组数', Object.entries(consecMap).sort((a,b)=>+a[0]-+b[0]).map(([k,v])=>`${k}组: ${v}期`), '#e74c3c');
-
-  // 五行分布均值
-  const fiveAvg = [0,1,2,3,4].map(fi=>(rows.reduce((s,r)=>s+r.five[fi],0)/n).toFixed(1));
-  const fiveNames=['1-16','17-32','33-48','49-64','65-80'];
-  html += statCard('五行平均落球', fiveNames.map((z,i)=>`${z}: 均${fiveAvg[i]}个`), '#6b3a9b');
-
   // 冷热号
   const cnt={};
   rows.forEach(r=>r.numbers.forEach(i=>{ cnt[i]=(cnt[i]||0)+1; }));
-  const sortedCnt=Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
-  html += statCard('🔥 热号TOP10', sortedCnt.slice(0,10).map(([k,v])=>`${k}号: ${v}次`), '#c81e1e');
-  html += statCard('❄️ 冷号TOP10', sortedCnt.slice(-10).reverse().map(([k,v])=>`${k}号: ${v}次`), '#1560c8');
+  const sorted=Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
+  html += statCard('🔥 热号TOP10', sorted.slice(0,10).map(([k,v])=>`${k}号: ${v}次`), '#c81e1e');
+  html += statCard('❄️ 冷号TOP10', sorted.slice(-10).reverse().map(([k,v])=>`${k}号: ${v}次`), '#1560c8');
 
   html += '</div>';
 
+  // 号码频率热图
   html += '<div class="sectionTitle">号码出现频率</div>';
   html += '<div style="display:grid;grid-template-columns:repeat(10,1fr);gap:4px;margin-bottom:18px;">';
   for(let i=1;i<=80;i++){
