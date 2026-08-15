@@ -372,108 +372,207 @@ def make_models():
     if HAS_LGB: ms['lgb']=lgb.LGBMClassifier(n_estimators=300,max_depth=6,learning_rate=0.05,num_leaves=31,random_state=42,verbose=-1)
     return ms
 
-CACHE_FILE = '/kaggle/working/models_cache.pkl'
-RETRAIN_THRESHOLD = 20  # 新数据超过20期才重新全量训练
 
-def load_model_cache():
-    import pickle
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE,'rb') as f: cache=pickle.load(f)
-            print(f"✓ 本地模型缓存已加载（{len(cache)}个目标）"); return cache
-        except Exception: pass
-    try:
-        url=f'https://raw.githubusercontent.com/{GH_REPO}/main/models_cache.pkl'
-        req=urllib.request.Request(url,headers={'Cache-Control':'no-cache','User-Agent':'kaggle-bot'})
-        with urllib.request.urlopen(req,timeout=30) as r: data=r.read()
-        with open(CACHE_FILE,'wb') as f: f.write(data)
-        import pickle
-        with open(CACHE_FILE,'rb') as f: cache=pickle.load(f)
-        print(f"✓ 从 GitHub 下载模型缓存（{len(cache)}个目标）"); return cache
-    except Exception as e:
-        print(f"  未找到模型缓存，将全量训练: {e}"); return {}
+# ══════════════════════════════════════════════════════
+#  模型缓存（Kaggle Dataset 持久化）
+# ══════════════════════════════════════════════════════
+import pickle, os, subprocess
 
-def save_model_cache(cache):
-    import pickle
-    with open(CACHE_FILE,'wb') as f: pickle.dump(cache,f)
-    try:
-        with open(CACHE_FILE,'rb') as f: content_b64=base64.b64encode(f.read()).decode()
-        sha=gh_get_sha('models_cache.pkl')
-        url=f'https://api.github.com/repos/{GH_REPO}/contents/models_cache.pkl'
-        data={'message':f"更新模型缓存 {datetime.now().strftime('%Y-%m-%d')}",
-              'content':content_b64,'branch':'main'}
-        if sha: data['sha']=sha
-        req=urllib.request.Request(url,data=json.dumps(data).encode(),method='PUT',headers={
-            'Authorization':f'token {GH_TOKEN}','Content-Type':'application/json',
-            'Accept':'application/vnd.github.v3+json','User-Agent':'kaggle-bot'})
-        with urllib.request.urlopen(req,timeout=30): print("  ✓ models_cache.pkl 已推送")
-    except Exception as e: print(f"  ! 缓存推送失败: {e}")
+# ── Kaggle Dataset 作为模型持久存储 ────────────────────
+# Dataset slug（你需要先手动在Kaggle创建一个私有dataset）
+DATASET_SLUG  = 'fucai-model-cache'          # dataset名称
+DATASET_ID    = f'wa121325/{DATASET_SLUG}'   # 完整ID
+LOCAL_CACHE   = '/kaggle/working/models_cache.pkl'
+DATASET_DIR   = '/kaggle/working/cache_upload/'
+# Kaggle Notebook 挂载路径：Add Data → 搜索 fucai-model-cache → 挂载
+MOUNTED_CACHE = f'/kaggle/input/{DATASET_SLUG}/models_cache.pkl'
+RETRAIN_EVERY = 20  # 新增超过20期才重新全量训练
 
-def train_target(X, y, feat_names, last_X, tname, model_cache):
+def load_cache():
+    """优先从挂载的Dataset读取模型缓存"""
+    for path in [LOCAL_CACHE, MOUNTED_CACHE]:
+        if os.path.exists(path):
+            try:
+                with open(path,'rb') as f: c=pickle.load(f)
+                print(f"✓ 模型缓存已加载：{path}（{len(c)}个目标，节省大量训练时间）")
+                import shutil
+                shutil.copy(path, LOCAL_CACHE)  # 确保本地有一份
+                return c
+            except Exception as e:
+                print(f"  缓存读取失败({path}): {e}")
+    print("  未找到缓存 → 首次全量训练")
+    return {}
+
+def save_cache_to_dataset(cache):
     """
-    X[i] = 第i期特征, y[i] = 第i+1期目标 → 真正预测下一期
-    last_X = 最新一期特征 → 预测真正未开奖的下一期
+    保存模型缓存到 Kaggle Dataset（持久存储）
+    用 Kaggle API 直接上传，自动处理 创建/更新
+    """
+    import shutil, base64, urllib.parse
+
+    try:
+        # 序列化缓存
+        with open(LOCAL_CACHE,'wb') as f: pickle.dump(cache,f)
+        size_mb = os.path.getsize(LOCAL_CACHE)/1024/1024
+        print(f"  模型缓存大小: {size_mb:.1f}MB")
+
+        kgat = get_secret('KAGGLE_TOKEN') or ''
+        if not kgat:
+            print("  ! 未配置 KAGGLE_TOKEN，跳过缓存保存")
+            return
+
+        headers_api = {
+            'Authorization': f'Bearer {kgat}',
+            'Content-Type': 'application/json',
+            'User-Agent': 'kaggle-bot/1.0',
+        }
+
+        # ── 1. 确保 Dataset 存在 ──────────────────────────
+        check_url = f'https://www.kaggle.com/api/v1/datasets/{DATASET_ID}'
+        req = urllib.request.Request(check_url, headers=headers_api)
+        dataset_exists = False
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                dataset_exists = r.status == 200
+        except Exception:
+            dataset_exists = False
+
+        if not dataset_exists:
+            print("  Dataset 不存在，正在创建…")
+            create_body = json.dumps({
+                "ownerSlug": DATASET_ID.split('/')[0],
+                "slug": DATASET_SLUG,
+                "title": "Fucai Model Cache",
+                "licenseName": "CC0-1.0",
+                "isPrivate": True,
+                "files": [{
+                    "token": "placeholder",
+                    "description": "model cache"
+                }]
+            }).encode()
+            req2 = urllib.request.Request(
+                'https://www.kaggle.com/api/v1/datasets/create/new',
+                data=create_body, method='POST', headers=headers_api
+            )
+            try:
+                with urllib.request.urlopen(req2, timeout=30) as r:
+                    print(f"  Dataset 创建: HTTP {r.status}")
+                    dataset_exists = True
+            except Exception as e:
+                print(f"  Dataset 创建失败: {e}")
+
+        # ── 2. 用 CLI 推送（最可靠的方式）──────────────────
+        os.makedirs(DATASET_DIR, exist_ok=True)
+        shutil.copy(LOCAL_CACHE, os.path.join(DATASET_DIR, 'models_cache.pkl'))
+        meta = {"title":"Fucai Model Cache","id":DATASET_ID,"licenses":[{"name":"CC0-1.0"}]}
+        with open(os.path.join(DATASET_DIR,'dataset-metadata.json'),'w') as f:
+            json.dump(meta,f)
+
+        env = os.environ.copy()
+        env['KAGGLE_API_TOKEN'] = kgat
+
+        # 先试 version（更新），失败了再试 create
+        for cmd in [
+            ['kaggle','datasets','version','-p',DATASET_DIR,'-m',f'daily-{date.today()}','--dir-mode','tar'],
+            ['kaggle','datasets','create', '-p',DATASET_DIR,'--dir-mode','tar'],
+        ]:
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
+            out = result.stdout.strip(); err = result.stderr.strip()
+            if result.returncode == 0:
+                print(f"  ✓ 模型缓存已保存到 Kaggle Dataset: {DATASET_ID}")
+                print(f"    请确认 Notebook 已挂载此 Dataset（Add Data → {DATASET_SLUG}）")
+                return
+            else:
+                print(f"  [{' '.join(cmd[1:3])}] returncode={result.returncode}")
+                if out: print(f"    stdout: {out[:150]}")
+                if err: print(f"    stderr: {err[:150]}")
+
+        print("  ! 两种方式均失败，本次缓存未持久化（不影响今日预测结果）")
+        print(f"    手动操作：在 Kaggle 创建名为 [{DATASET_SLUG}] 的私有 Dataset 后重跑")
+
+    except Exception as e:
+        import traceback
+        print(f"  ! 缓存保存异常: {e}")
+        traceback.print_exc()
+
+model_cache = load_cache()
+
+# ══════════════════════════════════════════════════════
+#  训练函数（增量智能：有缓存→跳过重训，只预测）
+# ══════════════════════════════════════════════════════
+
+def train_target(X, y, feat_names, last_X, tname):
+    """
+    增量训练策略：
+    - 有缓存且新数据 < RETRAIN_EVERY：直接用缓存模型预测，只做最近10期回测
+    - 无缓存或新数据 ≥ RETRAIN_EVERY：全量训练一次，回测最近50期（不重复训练）
     """
     from sklearn.preprocessing import LabelEncoder
+    from collections import Counter as Ctr
+
     n=len(X); MIN=60
     if n<MIN+5: return None
 
-    # LabelEncoder 把任意类别映射到 0..N-1，解决 XGB 不支持非0起始类别的问题
-    le = LabelEncoder()
-    y_enc = le.fit_transform(y)  # 编码
-    classes_orig = le.classes_.tolist()  # 原始类别（用于输出预测值）
-    from sklearn.preprocessing import LabelEncoder
-    le=LabelEncoder(); y_enc=le.fit_transform(y); classes_orig=le.classes_.tolist()
-    cache_key=tname; cached=model_cache.get(cache_key,{})
-    cached_n=cached.get('trained_n',0); new_data=n-cached_n
+    le=LabelEncoder(); y_enc=le.fit_transform(y)
+    classes_enc = le.classes_.tolist()
 
-    if cached.get('models') and new_data<RETRAIN_THRESHOLD:
-        print(f"    [{tname}] 增量模式（缓存{cached_n}期→当前{n}期，新增{new_data}期）")
-        final=cached['models']; acc=cached.get('accuracy',{}); fi=cached.get('feature_importance',[])
-        bt_start=max(MIN,n-10); all_true=[]; preds_by={k:[] for k in final}
-        for end in range(bt_start,n):
-            Xtr,ytr=X[:end],y_enc[:end]; Xte,yte=X[end:end+1],y_enc[end:end+1]
-            for mname,m in final.items():
-                try: preds_by.setdefault(mname,[]).extend(m.predict(Xte).tolist())
-                except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
-            all_true.extend(yte.tolist())
-        needs_save=False
+    def decode(val):
+        return int(le.inverse_transform([val])[0])
+
+    cached = model_cache.get(tname, {})
+    cached_n = cached.get('trained_n', 0)
+    new_data  = n - cached_n
+    has_cache = bool(cached.get('models'))
+
+    if has_cache and new_data < RETRAIN_EVERY:
+        # ── 增量模式：直接用缓存模型 ──
+        print(f"    [{tname}] 缓存模式（缓存{cached_n}期，新增{new_data}期，跳过重训）")
+        final = cached['models']
+        acc   = cached.get('accuracy', {})
+        fi    = cached.get('feature_importance', [])
+        # 只回测最新10期
+        bt_start = max(MIN, n-10)
     else:
-        print(f"    [{tname}] 全量训练（{n}期，新增{new_data}期）")
+        # ── 全量训练（只训练一次！）──
+        print(f"    [{tname}] 全量训练（{n}期）…")
         final={}
         for mname,m in make_models().items():
             try: m.fit(X,y_enc); final[mname]=m
             except Exception as e: print(f"      {mname}失败:{e}")
         if not final: return None
-        bt_start=max(MIN,n-100); all_true=[]; preds_by={k:[] for k in final}
-        for end in range(bt_start,n):
-            Xtr,ytr=X[:end],y_enc[:end]; Xte,yte=X[end:end+1],y_enc[end:end+1]
-            for mname,m in make_models().items():
-                try:
-                    m2=type(m)(**m.get_params()); m2.fit(Xtr,ytr)
-                    preds_by.setdefault(mname,[]).extend(m2.predict(Xte).tolist())
-                except: preds_by.setdefault(mname,[]).extend([int(ytr[-1])])
-            all_true.extend(yte.tolist())
-        acc={}
+
+        # 回测：用已训练好的模型滚动预测（不重复fit！）
+        # 只看模型对最近50期的预测表现
+        bt_start = max(MIN, n-50)
+        acc={}; fi=[]
+
+    # ── 回测（用已有 final 模型，不重新训练）──
+    all_true=[]; preds_by={k:[] for k in final}
+    for end in range(bt_start, n):
+        Xte = X[end:end+1]; yte = y_enc[end:end+1]
+        for mname,m in final.items():
+            try: preds_by[mname].extend(m.predict(Xte).tolist())
+            except: preds_by[mname].extend([int(y_enc[end-1])])
+        all_true.extend(yte.tolist())
+
+    if all_true:
         for mname,ps in preds_by.items():
-            if len(ps)==len(all_true) and all_true:
+            if len(ps)==len(all_true):
                 acc[mname]=round(accuracy_score(all_true,ps)*100,1)
-        if all_true:
-            from collections import Counter as Ctr
-            ens=[]
-            for i in range(len(all_true)):
-                vs=[preds_by[m][i] for m in preds_by if len(preds_by[m])>i]
-                ens.append(Ctr(vs).most_common(1)[0][0] if vs else all_true[i])
-            acc['ensemble']=round(accuracy_score(all_true,ens)*100,1)
-        fi=[]
+        ens=[]
+        for i in range(len(all_true)):
+            vs=[preds_by[m][i] for m in preds_by if len(preds_by[m])>i]
+            ens.append(Ctr(vs).most_common(1)[0][0] if vs else all_true[i])
+        acc['ensemble']=round(accuracy_score(all_true,ens)*100,1)
+
+    if not has_cache or new_data >= RETRAIN_EVERY:
         if 'rf' in final and hasattr(final['rf'],'feature_importances_'):
             imp=final['rf'].feature_importances_
             fi=[{'name':str(k),'score':round(float(v),4)} for k,v in sorted(zip(feat_names,imp),key=lambda x:-x[1])[:5]]
-        model_cache[cache_key]={'models':final,'trained_n':n,'accuracy':acc,'feature_importance':fi}
-        needs_save=True
+        # 更新缓存
+        model_cache[tname]={'models':final,'trained_n':n,'accuracy':acc,'feature_importance':fi}
 
-    if not all_true: all_true=[]; preds_by={k:[] for k in final}
-    # ★ 用 last_X 预测真正的下一期（未开奖）
+    # ── 用 last_X 预测真正下一期 ──
     px = last_X if last_X is not None else X[-1:]
     all_probs=[]; classes=None
     for m in final.values():
@@ -482,22 +581,27 @@ def train_target(X, y, feat_names, last_X, tname, model_cache):
             if classes is None: classes=m.classes_.tolist()
         except: pass
     if not all_probs or classes is None: return None
-    avg_prob=np.mean(all_probs,axis=0)
-    pred_enc=classes[int(np.argmax(avg_prob))]
-    pred_cls=int(le.inverse_transform([pred_enc])[0])
-    orig_probs={str(int(le.inverse_transform([c])[0])):round(float(p)*100,1) for c,p in zip(classes,avg_prob)}
+
+    avg_prob  = np.mean(all_probs,axis=0)
+    pred_enc  = classes[int(np.argmax(avg_prob))]
+    pred_cls  = decode(pred_enc)
+    orig_probs= {str(decode(c)):round(float(p)*100,1) for c,p in zip(classes,avg_prob)}
+
     bt_detail=[]
     for i in range(max(0,len(all_true)-10),len(all_true)):
-        row={'true':int(le.inverse_transform([all_true[i]])[0])}
+        row={'true':decode(all_true[i])}
         for mname,ps in preds_by.items():
-            if len(ps)>i: row[f'pred_{mname}']=int(le.inverse_transform([ps[i]])[0])
+            if len(ps)>i: row[f'pred_{mname}']=decode(ps[i])
         row['hit']=int(row['true']==row.get('pred_rf',row.get('pred_xgb',-1)))
         bt_detail.append(row)
+
     return {'target':tname,'data_used':n,'backtest_periods':len(all_true),
             'accuracy':acc,'feature_importance':fi,
-            'prediction':{'value':pred_cls,'confidence':round(float(max(avg_prob))*100,1),
+            'prediction':{'value':pred_cls,
+                          'confidence':round(float(max(avg_prob))*100,1),
                           'probs':orig_probs},
-            'bt_detail':bt_detail,'_needs_save':needs_save}
+            'bt_detail':bt_detail}
+
 
 def tgt3d(r): b,s,g=r['digits']; sm=b+s+g; return {'bai':b,'shi':s,'ge':g,'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),'odd':sum(1 for x in [b,s,g] if x%2!=0)}
 def tgtssq(r): sm=sum(r['red']); return {'blue':r['blue'],'odd':sum(1 for x in r['red'] if x%2!=0),'sum_grp':0 if sm<70 else(1 if sm<100 else 2)}
@@ -849,10 +953,6 @@ def run_ml(history):
 
     bt=daily_backtest(history, prev_pred)
 
-    # 加载模型缓存
-    model_cache = load_model_cache()
-    cache_updated = False
-
     cfg=[
         ('3d',  f3d,   tgt3d,  ['bai','shi','ge','sum_grp','odd']),
         ('ssq', fssq,  tgtssq, ['blue','odd','sum_grp']),
@@ -864,18 +964,15 @@ def run_ml(history):
         if not isinstance(records,list) or len(records)<65:
             print(f"\n── {game}: 数据不足({len(records) if isinstance(records,list) else 0}期)，跳过"); continue
         print(f"\n── {game}: {len(records)}期数据")
-        # ★ 新的build_dataset：X[i]对应y[i+1]，last_X用于预测真正下一期
         X, Y, names, last_X = build_dataset(records, feat_fn, tgt_fn, tkeys)
         ml_res={'data_count':len(records),'updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),'models':{}}
         for tname in tkeys:
             y = np.array(Y[tname])
-            r=train_target(X, y, names, last_X, f"{game}_{tname}", model_cache)
+            r=train_target(X, y, names, last_X, f"{game}_{tname}")
             if r:
-                if r.pop('_needs_save', False):
-                    cache_updated = True
                 ml_res['models'][tname]=r
                 acc=r.get('accuracy',{}); pred=r.get('prediction',{})
-                print(f"    集成{acc.get('ensemble',acc.get('ensemble_recent','—'))}%  预测下一期→{pred.get('value','?')}(置信{pred.get('confidence','?')}%)")
+                print(f"    集成{acc.get('ensemble','—')}%  预测下一期→{pred.get('value','?')}(置信{pred.get('confidence','?')}%)")
         if game=='3d':
             mk=markov3d(records); om=omit3d(records)
             rec=rec3d(records,ml_res['models'],mk,om)
@@ -897,12 +994,9 @@ def run_ml(history):
         predictions[game]={**ml_res,'recommendation':rec,'ai_context':ai_ctx}
         print(f"  ✓ {game} 完成")
 
-    # 有全量训练发生时才保存缓存
-    if cache_updated:
-        print("\n保存模型缓存…")
-        save_model_cache(model_cache)
-    else:
-        print("\n✓ 全部使用缓存模型，跳过缓存更新")
+    # 保存模型缓存到 Kaggle Dataset（下次运行直接读取，跳过全量训练）
+    print("\n保存模型缓存到 Kaggle Dataset…")
+    save_cache_to_dataset(model_cache)
 
     return predictions, bt
 
