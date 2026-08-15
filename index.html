@@ -1064,6 +1064,14 @@
         <div class="status" style="color:#1a7a4c;font-size:12px;margin-top:8px;padding:8px;background:#f0fff4;border-radius:8px;border:1px solid #c3e6cb;">
           💡 已加载ML预测数据后，切换到「走势图」Tab 生成 AI 专家解读，将自动融合机器学习结果，解读质量更高。
         </div>
+        <!-- DL+RL 结果展示区（运行 kaggle_dl_rl.py 后出现） -->
+        <div id="dlResultPanel" style="display:none;margin-top:14px;">
+          <div class="panel" style="border:2px solid #9b59b6;">
+            <h2>🧠 深度学习 + 强化学习（LSTM · Transformer · PPO）</h2>
+            <div style="font-size:12px;color:#888;margin-bottom:10px;" id="dlResultMeta"></div>
+            <div id="dlResultContent"></div>
+          </div>
+        </div>
         <div class="status" style="color:#aaa;font-size:11px;margin-top:6px;">
           ⚠️ 彩票开奖具有完全随机性，ML预测仅为数据统计演示，不具实际预测意义，仅供娱乐参考，请勿作为投注依据。
         </div>
@@ -1988,6 +1996,8 @@ async function loadPrediction(){
     renderGamePredict('3d',  data.predictions?.['3d']);
     renderGamePredict('ssq', data.predictions?.ssq);
     renderGamePredict('kl8', data.predictions?.kl8);
+    // DL+RL 结果（每周更新，有就显示）
+    if(data.dl_result) renderDLResult(data.dl_result);
     document.getElementById('predictContent').style.display='block';
     statusEl.className='status ok';
     statusEl.textContent=`✓ 预测报告加载成功（更新于 ${data.updated_at||'未知'}）`;
@@ -2021,7 +2031,7 @@ function renderBacktest(bt){
     } else if(game==='kl8'){
       html+=`<div>最佳命中：<span class="${(info.best_hit||0)>=9?'bt-hit':'bt-miss'}">${info.best_hit||0}球</span></div>`;
       const pr=info.play_results||{};
-      ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'].forEach(pk=>{
+      ['xuan4','xuan5','xuan5_fu','xuan6','xuan6_ppo','xuan6_dl','xuan9','xuan10'].forEach(pk=>{
         const p=pr[pk]; if(!p) return;
         html+=`<div style="margin-bottom:4px;font-size:11px;font-weight:700;">${p.name}：`;
         html+='<span class="bt-row" style="display:inline-flex;">';
@@ -2035,6 +2045,75 @@ function renderBacktest(bt){
 }
 
 function factorial(n){ let r=1; for(let i=2;i<=n;i++) r*=i; return r; }
+
+function renderDLResult(dl){
+  const panel = document.getElementById('dlResultPanel');
+  const meta  = document.getElementById('dlResultMeta');
+  const el    = document.getElementById('dlResultContent');
+  if(!dl || !dl.results){ panel.style.display='none'; return; }
+  panel.style.display='block';
+  meta.textContent = `更新时间：${dl.updated_at||'—'} · 模型：${dl.models||'—'} · 设备：${dl.device||'—'}`;
+
+  const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+  let html='';
+
+  for(const [game, gdata] of Object.entries(dl.results||{})){
+    html+=`<div style="margin-bottom:16px;border-bottom:1px solid #eee;padding-bottom:12px;">`;
+    html+=`<div style="font-size:14px;font-weight:700;color:#1a1a2e;margin-bottom:8px;">${gNames[game]||game}</div>`;
+
+    // 各目标LSTM/TFM准确率
+    const mres = gdata.model_results||{};
+    if(Object.keys(mres).length){
+      html+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">';
+      for(const [tname,tm] of Object.entries(mres)){
+        const la={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球','odd_cnt':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区'}[tname]||tname;
+        html+=`<span class="pred-acc-badge" style="background:#6b3a9b;font-size:11px;">
+          ${la} LSTM${tm.lstm_acc||'—'}% TFM${tm.tfm_acc||'—'}%
+          → <b>${tm.ensemble_pred??'—'}</b>(${tm.confidence||'—'}%)
+        </span>`;
+      }
+      html+='</div>';
+    }
+
+    // RL结果（快乐8）
+    const rl = gdata.rl_result;
+    if(rl){
+      html+=`<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
+        🤖 PPO强化学习策略：回测平均命中 <b>${rl.avg_hit_backtest}</b>球
+      </div>`;
+    }
+
+    // 推荐号码
+    const rec = gdata.recommendation;
+    if(rec){
+      html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">DL推荐号码：</div>`;
+      if(game==='3d'){
+        (rec.groups||[]).forEach((g,i)=>{
+          html+=`<div class="rec-group">第${i+1}注：${g.map(n=>`<span class="ball-r">${n}</span>`).join('')}</div>`;
+        });
+      } else if(game==='ssq'){
+        (rec.groups||[]).forEach((g,i)=>{
+          html+=`<div class="rec-group">第${i+1}注：${(g.red||[]).map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('')}<span class="ball-b">${String(g.blue||0).padStart(2,'0')}</span></div>`;
+        });
+      } else if(game==='kl8'){
+        const plays=rec.plays||{};
+        ['xuan6_dl','xuan6_rl','xuan4','xuan9'].forEach(pk=>{
+          const play=plays[pk]; if(!play) return;
+          const color=pk.includes('rl')?'#e87d00':'#6b3a9b';
+          html+=`<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:${color}">${play.name}（${play.tip}）：</span>`;
+          (play.groups||[]).forEach((g,i)=>{
+            const nums=Array.isArray(g)?g:[];
+            html+=`<div style="margin:2px 0;">${nums.map(n=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:${color};color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+          });
+          html+='</div>';
+        });
+      }
+      html+=`<div style="font-size:10px;color:#aaa;margin-top:4px;">${rec.note||''}</div>`;
+    }
+    html+='</div>';
+  }
+  el.innerHTML = html || '<div class="status">暂无DL结果</div>';
+}
 
 function renderGamePredict(game, data){
   const panelIds={'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
