@@ -37,10 +37,18 @@ def get_secret(name):
     print(f"  [Secret] {name} 未找到")
     return ''
 
-GH_TOKEN = get_secret('GH_TOKEN')
-GH_REPO  = get_secret('GH_REPO') or 'wa121325/fucai-data'
+# ── 读取 Secrets（兜底：直接写死，确保推送不失败）──────────
+# ── 直接硬编码，不依赖 Secrets 服务 ──────────────────────
+# 如果 Kaggle Secrets 服务不可用，直接用下面的值
+# 请把新生成的 GitHub Token 替换到这里
+_HARDCODED_TOKEN = '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'
+_HARDCODED_REPO  = 'wa121325/fucai-data'
+
+GH_TOKEN = get_secret('GH_TOKEN') or get_secret('gh_token') or _HARDCODED_TOKEN
+GH_REPO  = get_secret('GH_REPO')  or get_secret('gh_repo')  or _HARDCODED_REPO
+
 print(f"GitHub 仓库: {GH_REPO}")
-print(f"GH_TOKEN 已配置: {'是' if GH_TOKEN else '否（将跳过推送）'}")
+print(f"GH_TOKEN 已配置: {'是（长度'+str(len(GH_TOKEN))+'）' if GH_TOKEN else '否（将跳过推送）'}")
 
 # ══════════════════════════════════════════════════════
 #  GitHub API 工具
@@ -416,7 +424,7 @@ def save_cache_to_dataset(cache):
         size_mb = os.path.getsize(LOCAL_CACHE)/1024/1024
         print(f"  模型缓存大小: {size_mb:.1f}MB")
 
-        kgat = get_secret('KAGGLE_TOKEN') or ''
+        kgat = get_secret('KAGGLE_TOKEN') or get_secret('kaggle_token') or 'KGAT_0847d8a3c8619a4db2ff2c7c3e9e824f'
         if not kgat:
             print("  ! 未配置 KAGGLE_TOKEN，跳过缓存保存")
             return
