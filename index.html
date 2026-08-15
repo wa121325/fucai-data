@@ -1468,7 +1468,7 @@ function loadGwConfig(){
   document.getElementById(id)?.addEventListener('input', saveGwConfig);
 });
 
-function buildPrompt(type, records){
+function buildPrompt(type, records, mlContext=''){
   const latest = records[records.length-1];
   const gameNames = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
   const name = gameNames[type];
@@ -1510,16 +1510,21 @@ function buildPrompt(type, records){
     dataDesc = `最近5期开奖：\n${rows.join('\n')}\n\n近${records.length}期热号：${hot5}\n冷号：${cold5}`;
   }
 
-  const system = `你是一位资深彩票数据分析专家，擅长从历史开奖数据中总结统计特征、冷热变化、遗漏走势和号码分布规律。
+  const system = `你是一位资深彩票数据分析专家，同时具备机器学习、深度学习和强化学习结果的解读能力。
+
+你的分析结合三类数据：
+① 人工统计走势特征（和值/跨度/遗漏/冷热/马尔可夫等）
+② 传统机器学习（随机森林+XGBoost+LightGBM+马尔可夫链+遗漏贝叶斯）
+③ 深度学习+强化学习（LSTM序列建模+Transformer注意力+PPO强化学习选号策略，状态融合ML概率+LSTM隐层+遗漏向量）
 
 要求：
-1. 使用专业、自然、生动、有参考价值的中文。
-2. 所有观点均基于提供的数据分析，不要虚构不存在的规律。
-3. 不要保证命中率，也不要暗示能够预测开奖结果。
-4. 分析结构自然流畅，避免模板化表达。
-5. 全文控制在200字以内。
-6. 最后必须添加一句：
-"彩票开奖结果具有随机性，本分析仅基于历史数据统计，仅供参考。"`;
+1. 自然融合三类信息，不要割裂成独立板块，让分析有层次有深度。
+2. 提到模型时用"模型信号"/"深度学习信号"/"强化学习策略"等表述，不夸大准确性。
+3. 多模型一致时重点强调，分歧时如实说明各自倾向。
+4. 所有观点基于提供的数据，不虚构规律，不保证命中。
+5. 结构清晰，语言自然生动，像专业彩票资讯网站的每日深度解读。
+6. 全文400-500字。
+7. 最后必须附上："彩票开奖具有完全随机性，本分析结合统计模型与深度学习，仅供娱乐参考，请理性购彩。"`;
 
 
 const user = `请根据以下${name}近期开奖数据，撰写一篇今日专家解读分析。
@@ -1529,11 +1534,15 @@ ${dataDesc}
 
 最新一期（${latest.date}）已开奖。
 
-请结合历史数据，自然完成一篇分析文章，内容需要覆盖但不限于：
+${mlContext ? `【机器学习 + 深度学习 + 强化学习 分析结果】
+${mlContext}
+
+` : ''}请结合历史数据${mlContext?'和上方模型分析结果':''}，自然完成一篇分析文章，内容需要覆盖但不限于：
 
 - 最近走势特征与规律
 - 各项指标值得关注的变化
 - 近期号码分布特点（冷热、遗漏、奇偶、大小、区间、和值、跨度等）
+${mlContext ? '- 结合模型预测信号（ML/LSTM/TFM/RL）给出综合判断\n- 特别说明强化学习和深度学习的预测信号与走势统计是否吻合' : ''}
 - 今日整体走势总结
 - 根据历史统计，列出近期值得关注的号码，然后再有针对性推荐五组以上参考号码组合
 
@@ -1547,6 +1556,96 @@ ${dataDesc}
 - 请使用中文回答。`;
 
   return { system, user };
+}
+
+/* ── getMlContext：从 _lastPrediction 提取ML+DL+RL信息供AI解读 ── */
+function getMlContext(type){
+  try{
+    const pred = window._lastPrediction;
+    if(!pred) return '';
+    const lines = [];
+
+    // ── 基础ML部分 ──
+    const mlData = pred.predictions?.[type];
+    if(mlData){
+      lines.push(`【传统机器学习（RF/XGB/LGB）】`);
+      lines.push(`训练数据：${mlData.data_count||'—'}期  更新：${mlData.updated_at||'—'}`);
+      for(const [tname, mdata] of Object.entries(mlData.models||{})){
+        const lbl={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',
+                   blue:'蓝球',zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间'}[tname]||tname;
+        const pred_v = mdata.prediction?.value;
+        const conf   = mdata.prediction?.confidence;
+        const ens    = mdata.accuracy?.ensemble;
+        const top3probs = Object.entries(mdata.prediction?.probs||{})
+          .sort((a,b)=>b[1]-a[1]).slice(0,3)
+          .map(([k,v])=>`${k}(${v}%)`).join('、');
+        lines.push(`  ${lbl}：集成预测→${pred_v??'—'}（置信${conf??'—'}%，回测准确率${ens??'—'}%）  概率TOP3：${top3probs}`);
+      }
+      const rec = mlData.recommendation||{};
+      if(type==='3d' && rec.groups?.length){
+        lines.push(`  ML推荐号码：${rec.groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
+        if(rec.sum_pred) lines.push(`  和值区间预测：${rec.sum_pred}`);
+        if(rec.markov_hint?.length) lines.push(`  马尔可夫转移：${rec.markov_hint.join('；')}`);
+      } else if(type==='ssq' && rec.groups?.length){
+        lines.push(`  ML推荐蓝球：${(rec.blue_recommend||[]).join('、')}  奇偶预测：${rec.odd_pred??'—'}奇  和值：${rec.sum_pred||'—'}`);
+        lines.push(`  ML热号：${(rec.hot_red||[]).slice(0,8).join(' ')}  遗漏关注：${(rec.overdue_red||[]).slice(0,5).join(' ')}`);
+      } else if(type==='kl8' && rec.plays){
+        lines.push(`  ML区间预测：${rec.zone_dominant_pred||'—'}  总和区间：${rec.total_range_pred||'—'}`);
+        lines.push(`  ML热号：${(rec.hot_nums||[]).slice(0,10).join(' ')}  遗漏关注：${(rec.overdue||[]).slice(0,6).join(' ')}`);
+      }
+    }
+
+    // ── DL+RL部分 ──
+    const dlData = pred.dl_result?.results?.[type];
+    if(dlData){
+      lines.push(`\n【深度学习（LSTM + Transformer）】`);
+      lines.push(`更新：${pred.dl_result.updated_at||'—'}  架构：${pred.dl_result.architecture||'—'}`);
+      for(const [tname, tm] of Object.entries(dlData.model_results||{})){
+        const lbl={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区',blue:'蓝球',
+                   zone_dom:'主落区',tot_grp:'总和区',odd_grp:'奇数区',bai:'百位'}[tname]||tname;
+        lines.push(`  ${lbl}：LSTM准确率${tm.lstm_acc??'—'}%  TFM准确率${tm.tfm_acc??'—'}%  集成预测→${tm.ensemble_pred??'—'}（置信${tm.confidence??'—'}%）`);
+      }
+
+      // RL结果
+      const rl = dlData.rl_result;
+      if(rl){
+        lines.push(`\n【强化学习（PPO Agent）】`);
+        if(type==='kl8'){
+          lines.push(`  奖励函数：快乐8真实赔率净收益`);
+          lines.push(`  状态空间：原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量（分层融合）`);
+          lines.push(`  回测结果（近${rl.games_tested||'—'}期）：平均净收益${rl.avg_net_per_game??'—'}元/期  胜率${rl.win_rate_pct??'—'}%`);
+          if(rl.ppo_selected?.length) lines.push(`  PPO选号建议：${rl.ppo_selected.join(' ')}（${rl.ppo_selected.length}个）`);
+        } else if(type==='ssq'){
+          lines.push(`  任务：蓝球选号策略优化`);
+          lines.push(`  蓝球回测准确率：${rl.blue_acc_pct??'—'}%（随机基准6.25%）`);
+          lines.push(`  PPO推荐蓝球TOP5：${(rl.blue_top||[]).join('、')}`);
+        }
+        if(rl.note) lines.push(`  备注：${rl.note}`);
+      }
+
+      // DL推荐号码
+      const dlRec = dlData.recommendation;
+      if(dlRec){
+        if(type==='3d' && dlRec.groups?.length){
+          lines.push(`\n  DL推荐号码：${dlRec.groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
+        } else if(type==='ssq' && dlRec.groups?.length){
+          lines.push(`\n  DL+RL推荐蓝球：${(dlRec.blue_recommend||[]).join('、')}`);
+        } else if(type==='kl8' && dlRec.plays){
+          const ppo6 = dlRec.plays['xuan6_ppo'];
+          if(ppo6?.groups?.[0]) lines.push(`\n  PPO选六策略：${ppo6.groups[0].join(' ')}`);
+          const dl6 = dlRec.plays['xuan6_dl'];
+          if(dl6?.groups?.[0]) lines.push(`  DL选六推荐：${dl6.groups[0].join(' ')}`);
+        }
+      }
+    } else {
+      lines.push(`\n【深度学习/强化学习】暂无数据（每周更新，首次需手动运行 kaggle_dl_rl.py）`);
+    }
+
+    return lines.join('\n');
+  } catch(e){
+    console.warn('getMlContext错误:', e);
+    return '';
+  }
 }
 
 // 把AI返回的纯文本渲染成带格式的HTML
@@ -1590,7 +1689,8 @@ async function generateAIReading(){
   try{
     saveGwConfig();
 
-    const {system, user} = buildPrompt(window._trendType, window._trendRecords);
+    const mlContext = getMlContext(window._trendType);
+    const {system, user} = buildPrompt(window._trendType, window._trendRecords, mlContext);
     const messages = [
       {role:'system', content: system},
       {role:'user',   content: user},
