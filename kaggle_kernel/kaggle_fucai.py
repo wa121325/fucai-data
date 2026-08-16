@@ -954,7 +954,7 @@ def run_ml(history):
     print(f"{'='*50}")
 
     prev_pred={}
-    raw=gh_raw('prediction.json')
+    raw=gh_raw('ml_predictions.json')
     if raw:
         try: prev_pred=json.loads(raw).get('predictions',{})
         except Exception: pass
@@ -1027,7 +1027,7 @@ msg = f"Kaggle 自动更新 {ts}"
 
 if not GH_TOKEN or not GH_REPO:
     print("\n[DRY RUN] 未配置 GH_TOKEN/GH_REPO，跳过推送")
-    print("prediction.json 预览（前300字）:")
+    print("ml_predictions.json 预览（前300字）:")
     out = {'updated_at':ts,'source':'kaggle','predictions':predictions,'backtest':bt}
     print(json.dumps(out,ensure_ascii=False)[:300])
 else:
@@ -1039,24 +1039,11 @@ else:
     # history.json（不缩进节省体积）
     gh_put('history.json', json.dumps(history_out,ensure_ascii=False), msg)
     print("  ✓ history.json")
-    # prediction.json —— 先读取已有文件，保留 dl_result（LSTM周训练+PPO日训练的成果），避免被覆盖
-    existing_dl_result = None
-    try:
-        old_raw = gh_raw('prediction.json')
-        if old_raw:
-            old_data = json.loads(old_raw)
-            existing_dl_result = old_data.get('dl_result')
-            if existing_dl_result:
-                print(f"  已保留现有 dl_result（lstm_tfm/rl），避免被本次基础ML覆盖")
-    except Exception as e:
-        print(f"  读取旧 prediction.json 失败（不影响本次写入）: {e}")
-
+    # ml_predictions.json —— 独立文件，只属于本脚本，不再需要读取合并，速度更快
     pred_out={'updated_at':ts,'source':'kaggle',
               'models_used':{'rf':HAS_SKL,'xgb':HAS_XGB,'lgb':HAS_LGB,'ensemble':True,'markov':True,'omission':True},
               'predictions':predictions,'backtest':bt,
               'disclaimer':'彩票开奖具有完全随机性，ML预测仅为数据统计演示，仅供娱乐参考，请理性购彩。'}
-    if existing_dl_result:
-        pred_out['dl_result'] = existing_dl_result
-    gh_put('prediction.json', json.dumps(pred_out,ensure_ascii=False,indent=2), msg)
-    print("  ✓ prediction.json")
+    gh_put('ml_predictions.json', json.dumps(pred_out,ensure_ascii=False,indent=2), msg)
+    print("  ✓ ml_predictions.json")
     print(f"\n✅ 全部完成！{ts}")
