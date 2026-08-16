@@ -19,19 +19,45 @@ from datetime import datetime, date
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
-def get_secret(name, retries=3, delay=3):
+_secrets_client = None
+_secrets_client_ready = False
+
+def _get_secrets_client(retries=5, delay=4):
+    global _secrets_client, _secrets_client_ready
+    if _secrets_client_ready:
+        return _secrets_client
     for attempt in range(retries):
         try:
             from kaggle_secrets import UserSecretsClient
-            v = UserSecretsClient().get_secret(name)
-            if v:
-                return v
+            _secrets_client = UserSecretsClient()
+            _secrets_client_ready = True
+            print(f"  [Secrets] Client 连接成功（第{attempt+1}次尝试）")
+            return _secrets_client
         except Exception as e:
             if attempt < retries - 1:
-                print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                print(f"  [Secrets] Client 连接失败（第{attempt+1}次）: {e}，{delay}秒后重试…")
                 time.sleep(delay)
             else:
-                print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
+                print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
+    return None
+
+def get_secret(name, retries=3, delay=3):
+    client = _get_secrets_client()
+    if client is not None:
+        for attempt in range(retries):
+            try:
+                v = client.get_secret(name)
+                if v:
+                    return v
+                else:
+                    break
+            except Exception as e:
+                if attempt < retries - 1:
+                    print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                    time.sleep(delay)
+                else:
+                    print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
+    return os.environ.get(name, '')
     return os.environ.get(name, '')
 
 _HARDCODED_GH_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets      # ← 新的 GitHub Token
