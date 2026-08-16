@@ -43,7 +43,24 @@ def _get_secrets_client(retries=5, delay=4):
                 print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
     return None
 
+SECRETS_DATASET_MOUNT = '/kaggle/input/fucai-secrets/secrets.json'
+_dataset_secrets = None
+
+def _load_secrets_from_dataset():
+    """
+    从挂载的私有Dataset读取secrets.json（绕过Kaggle Secrets的API推送限制）
+    根本原因：kaggle kernels push（API方式）无法传递Kaggle Secrets，这是Kaggle官方已知限制
+    （GitHub issue Kaggle/kaggle-cli#582），Dataset挂载则不受此限制影响
+    """
+    try:
+        with open(SECRETS_DATASET_MOUNT) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
 def get_secret(name, retries=3, delay=3):
+    global _dataset_secrets
+    # 方式1：交互式Kaggle Secrets（手动Save&Run有效，API push时通常无效）
     client = _get_secrets_client()
     if client is not None:
         for attempt in range(retries):
@@ -52,14 +69,22 @@ def get_secret(name, retries=3, delay=3):
                 if v:
                     return v
                 else:
-                    # 空值：可能是该 Secret 没在此 Kernel 挂载，不必重试
                     break
             except Exception as e:
                 if attempt < retries - 1:
                     print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
                     time.sleep(delay)
                 else:
-                    print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
+                    print(f"  [Secret] {name} kaggle_secrets重试{retries}次仍失败: {e}")
+
+    # 方式2：挂载的私有Dataset secrets.json（API push场景下的正确方式）
+    if _dataset_secrets is None:
+        _dataset_secrets = _load_secrets_from_dataset()
+    if name in _dataset_secrets and _dataset_secrets[name]:
+        print(f"  [Secret] {name} 从 fucai-secrets Dataset 读取成功")
+        return _dataset_secrets[name]
+
+    # 方式3：环境变量兜底
     return os.environ.get(name, '')
 
 # ── 把你的 Token 填在这里（Kaggle Secrets 不稳定时的兜底）──
