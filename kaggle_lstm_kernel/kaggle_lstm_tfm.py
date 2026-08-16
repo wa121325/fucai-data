@@ -25,7 +25,7 @@ def get_secret(name):
     return os.environ.get(name, '')
 
 # ── 把你的 Token 填在这里（Kaggle Secrets 不稳定时的兜底）──
-_HARDCODED_GH_TOKEN = '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'      # ← 新的 GitHub Token
+_HARDCODED_GH_TOKEN = ''      # ← 新的 GitHub Token
 _HARDCODED_GH_REPO  = 'wa121325/fucai-data'
 _HARDCODED_KAGGLE_TOKEN = 'KGAT_0847d8a3c8619a4db2ff2c7c3e9e824f'
 
@@ -37,7 +37,19 @@ print(f"GitHub: {GH_REPO}  GH_TOKEN: {'✓('+str(len(GH_TOKEN))+')' if GH_TOKEN 
 try:
     import torch, torch.nn as nn, torch.optim as optim
     from torch.utils.data import DataLoader, TensorDataset
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def _cuda_actually_works():
+        """有些Kaggle环境torch.cuda.is_available()=True但实际算子跑不了，做个真实测试"""
+        if not torch.cuda.is_available():
+            return False
+        try:
+            x = torch.randn(4, 4, device='cuda')
+            _ = (x @ x).sum().item()
+            return True
+        except Exception as e:
+            print(f"  CUDA测试失败，自动降级到CPU: {e}")
+            return False
+
+    DEVICE = torch.device('cuda' if _cuda_actually_works() else 'cpu')
     print(f"PyTorch ✓ 设备:{DEVICE}")
 except ImportError:
     print("PyTorch ✗"); sys.exit(1)
