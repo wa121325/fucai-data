@@ -16,22 +16,45 @@ warnings.filterwarnings('ignore')
 # ══════════════════════════════════════════════════════
 #  读取 Kaggle Secrets
 # ══════════════════════════════════════════════════════
-def get_secret(name, retries=3, delay=3):
-    # 方式1：新版 Kaggle Secrets API（带重试，应对偶发连接失败）
+_secrets_client = None
+_secrets_client_ready = False
+
+def _get_secrets_client(retries=5, delay=4):
+    global _secrets_client, _secrets_client_ready
+    if _secrets_client_ready:
+        return _secrets_client
     for attempt in range(retries):
         try:
             from kaggle_secrets import UserSecretsClient
-            client = UserSecretsClient()
-            val = client.get_secret(name)
-            if val:
-                print(f"  [Secret] {name} 读取成功（kaggle_secrets，第{attempt+1}次尝试）")
-                return val
+            _secrets_client = UserSecretsClient()
+            _secrets_client_ready = True
+            print(f"  [Secrets] Client 连接成功（第{attempt+1}次尝试）")
+            return _secrets_client
         except Exception as e:
             if attempt < retries - 1:
-                print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                print(f"  [Secrets] Client 连接失败（第{attempt+1}次）: {e}，{delay}秒后重试…")
                 time.sleep(delay)
             else:
-                print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
+                print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
+    return None
+
+def get_secret(name, retries=3, delay=3):
+    client = _get_secrets_client()
+    if client is not None:
+        for attempt in range(retries):
+            try:
+                val = client.get_secret(name)
+                if val:
+                    print(f"  [Secret] {name} 读取成功（第{attempt+1}次）")
+                    return val
+                else:
+                    break
+            except Exception as e:
+                if attempt < retries - 1:
+                    print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                    time.sleep(delay)
+                else:
+                    print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
 
     # 方式2：环境变量
     val = os.environ.get(name, '')
