@@ -16,12 +16,24 @@ from datetime import datetime, date
 from collections import Counter
 warnings.filterwarnings('ignore')
 
-def get_secret(name):
-    try:
-        from kaggle_secrets import UserSecretsClient
-        v = UserSecretsClient().get_secret(name)
-        if v: return v
-    except Exception: pass
+def get_secret(name, retries=3, delay=3):
+    """
+    读取 Kaggle Secret，带重试机制。
+    kaggle_secrets 服务偶发 'Connection error trying to communicate with service'，
+    单次失败不代表 Secret 没挂载，重试几次通常就能成功。
+    """
+    for attempt in range(retries):
+        try:
+            from kaggle_secrets import UserSecretsClient
+            v = UserSecretsClient().get_secret(name)
+            if v:
+                return v
+        except Exception as e:
+            if attempt < retries - 1:
+                print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                time.sleep(delay)
+            else:
+                print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
     return os.environ.get(name, '')
 
 # ── 把你的 Token 填在这里（Kaggle Secrets 不稳定时的兜底）──
