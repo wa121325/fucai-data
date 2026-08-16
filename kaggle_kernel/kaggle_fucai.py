@@ -41,7 +41,7 @@ def get_secret(name):
 # ── 直接硬编码，不依赖 Secrets 服务 ──────────────────────
 # 如果 Kaggle Secrets 服务不可用，直接用下面的值
 # 请把新生成的 GitHub Token 替换到这里
-_HARDCODED_TOKEN = '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'
+_HARDCODED_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets
 _HARDCODED_REPO  = 'wa121325/fucai-data'
 
 GH_TOKEN = get_secret('GH_TOKEN') or get_secret('gh_token') or _HARDCODED_TOKEN
@@ -388,8 +388,8 @@ import pickle, os, subprocess
 
 # ── Kaggle Dataset 作为模型持久存储 ────────────────────
 # Dataset slug（你需要先手动在Kaggle创建一个私有dataset）
-DATASET_SLUG  = 'fucai-model-cache'          # dataset名称
-DATASET_ID    = f'wa121325/{DATASET_SLUG}'   # 完整ID
+DATASET_SLUG  = 'fucai-model-cache'
+DATASET_ID    = f'megskfdbbskeb/{DATASET_SLUG}'
 LOCAL_CACHE   = '/kaggle/working/models_cache.pkl'
 DATASET_DIR   = '/kaggle/working/cache_upload/'
 # Kaggle Notebook 挂载路径：Add Data → 搜索 fucai-model-cache → 挂载
