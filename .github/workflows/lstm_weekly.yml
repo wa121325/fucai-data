@@ -20,16 +20,21 @@ jobs:
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: kaggle kernels push -p ./kaggle_lstm_kernel/
+      - name: 等待 Kaggle 初始化 Kernel（首次创建需要更久）
+        run: sleep 90
       - name: 等待完成（最多60分钟）
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
           KERNEL="megskfdbbskeb/fucai-lstm-tfm"
           for i in $(seq 1 60); do
-            sleep 60
             STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
             echo "$(date +'%H:%M:%S') [$i/60] $STATUS"
             if echo "$STATUS" | grep -qi "complete"; then echo "✓完成"; exit 0; fi
             if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then echo "✗失败"; exit 1; fi
+            if echo "$STATUS" | grep -qi "404\|not found"; then
+              echo "  Kernel还在初始化中，继续等待…"
+            fi
+            sleep 60
           done
           echo "⚠️超时"; exit 0
