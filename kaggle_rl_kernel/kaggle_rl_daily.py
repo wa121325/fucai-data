@@ -618,9 +618,12 @@ raw = gh_raw('history.json')
 if not raw: print("失败"); sys.exit(1)
 history = json.loads(raw)
 
-raw_pred = gh_raw('prediction.json')
-existing = json.loads(raw_pred) if raw_pred else {}
-ml_preds = existing.get('predictions', {})
+# 读取 ml_predictions.json 取ML概率向量（RL状态的一部分）
+raw_ml = gh_raw('ml_predictions.json')
+ml_preds = {}
+if raw_ml:
+    try: ml_preds = json.loads(raw_ml).get('predictions', {})
+    except Exception: pass
 
 os.makedirs(RL_LOCAL_DIR, exist_ok=True)
 rl_results = {}
@@ -640,21 +643,20 @@ for game, run_fn in [('kl8', run_kl8_daily), ('ssq', run_ssq_daily)]:
 print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
 push_rl_dataset()
 
-# 更新 prediction.json
-existing.setdefault('dl_result', {})
-existing['dl_result']['rl'] = {
+# ── 写入独立文件 dl_rl.json（不再读取/合并 prediction.json，速度更快）──
+out = {
     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     'method': 'PPO强化学习（每日增量微调）',
     'state_composition': '原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量',
     'results': rl_results,
 }
-pred_json = json.dumps(existing, ensure_ascii=False, indent=2)
+out_json = json.dumps(out, ensure_ascii=False, indent=2)
 
 if not GH_TOKEN:
     print("\n[DRY RUN] 未配置 GH_TOKEN")
 else:
-    print("\n推送 prediction.json…")
-    gh_put('prediction.json', pred_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("\n推送 dl_rl.json…")
+    gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✓ 完成")
 
 print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
