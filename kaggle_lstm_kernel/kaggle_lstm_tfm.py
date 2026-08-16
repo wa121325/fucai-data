@@ -406,6 +406,26 @@ def _ssq_gap_grp(red):
     mg=max(sred[i+1]-sred[i] for i in range(len(sred)-1)) if len(sred)>1 else 0
     return 0 if mg<=5 else(1 if mg<=10 else 2)
 
+def _kl8_big_grp(nums):
+    big=sum(1 for x in nums if x>40)
+    return 0 if big<9 else(1 if big<=11 else 2)
+
+def _kl8_five_dom(nums):
+    five=[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
+    return int(np.argmax(five))
+
+def _kl8_consec_grp(nums):
+    sn=sorted(nums); cg=0; inc=False
+    for i in range(len(sn)-1):
+        if sn[i+1]-sn[i]==1:
+            if not inc: cg+=1; inc=True
+        else: inc=False
+    return 0 if cg==0 else(1 if cg<=2 else 2)
+
+def _kl8_range_grp(nums):
+    sn=sorted(nums); rng=sn[-1]-sn[0]
+    return 0 if rng<60 else(1 if rng<70 else 2)
+
 configs = {
     '3d':  (f3d,  {'bai':lambda r:r['digits'][0],'shi':lambda r:r['digits'][1],'ge':lambda r:r['digits'][2],
                     'sum_grp':lambda r:0 if sum(r['digits'])<=9 else(1 if sum(r['digits'])<=17 else 2)}),
@@ -414,8 +434,13 @@ configs = {
                     'ac_grp':lambda r:_ssq_ac_grp(r['red']),
                     'red_zone_dom':lambda r:_ssq_zone_dom(r['red']),
                     'gap_grp':lambda r:_ssq_gap_grp(r['red'])}),
-    'kl8': (fkl8, {'zone_dom':lambda r:int(np.argmax([sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]])),
-                    'tot_grp':lambda r:0 if sum(r['numbers'])<640 else(1 if sum(r['numbers'])<820 else 2)}),
+    'kl8': (fkl8, {'odd_grp':lambda r:0 if sum(1 for x in r['numbers'] if x%2!=0)<9 else(1 if sum(1 for x in r['numbers'] if x%2!=0)<=11 else 2),
+                    'zone_dom':lambda r:int(np.argmax([sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]])),
+                    'tot_grp':lambda r:0 if sum(r['numbers'])<640 else(1 if sum(r['numbers'])<820 else 2),
+                    'big_grp':lambda r:_kl8_big_grp(r['numbers']),
+                    'five_dom':lambda r:_kl8_five_dom(r['numbers']),
+                    'consec_grp':lambda r:_kl8_consec_grp(r['numbers']),
+                    'range_grp':lambda r:_kl8_range_grp(r['numbers'])}),
 }
 
 for game, (feat_fn, targets) in configs.items():
