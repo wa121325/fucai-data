@@ -1565,14 +1565,17 @@ function getMlContext(type){
     if(!pred) return '';
     const lines = [];
 
-    // ── 基础ML部分 ──
+    const tLabels={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',
+                   blue:'蓝球',red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
+                   zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间'};
+
+    // ── 基础ML部分（传统机器学习：RF/XGB/LGB，含全部特征工程后的预测目标）──
     const mlData = pred.predictions?.[type];
     if(mlData){
-      lines.push(`【传统机器学习（RF/XGB/LGB）】`);
+      lines.push(`【传统机器学习（RF/XGB/LGB，特征含AC值/三区分布/最大间距/重号/斜连/五行等完整特征工程）】`);
       lines.push(`训练数据：${mlData.data_count||'—'}期  更新：${mlData.updated_at||'—'}`);
       for(const [tname, mdata] of Object.entries(mlData.models||{})){
-        const lbl={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',
-                   blue:'蓝球',zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间'}[tname]||tname;
+        const lbl = tLabels[tname]||tname;
         const pred_v = mdata.prediction?.value;
         const conf   = mdata.prediction?.confidence;
         const ens    = mdata.accuracy?.ensemble;
@@ -1589,40 +1592,54 @@ function getMlContext(type){
       } else if(type==='ssq' && rec.groups?.length){
         lines.push(`  ML推荐蓝球：${(rec.blue_recommend||[]).join('、')}  奇偶预测：${rec.odd_pred??'—'}奇  和值：${rec.sum_pred||'—'}`);
         lines.push(`  ML热号：${(rec.hot_red||[]).slice(0,8).join(' ')}  遗漏关注：${(rec.overdue_red||[]).slice(0,5).join(' ')}`);
+        if(rec.ac_pred) lines.push(`  AC值预测：${rec.ac_pred}  红球主力区预测：${rec.red_zone_dom_pred||'—'}  最大间距预测：${rec.max_gap_pred||'—'}`);
       } else if(type==='kl8' && rec.plays){
         lines.push(`  ML区间预测：${rec.zone_dominant_pred||'—'}  总和区间：${rec.total_range_pred||'—'}`);
         lines.push(`  ML热号：${(rec.hot_nums||[]).slice(0,10).join(' ')}  遗漏关注：${(rec.overdue||[]).slice(0,6).join(' ')}`);
       }
     }
 
-    // ── DL+RL部分（匹配新结构：dl_result.lstm_tfm + dl_result.rl）──
+    // ── 深度学习部分（LSTM+Transformer，每周训练，特征工程与传统ML完全一致）──
     const lstmTfmGame = pred.dl_result?.lstm_tfm?.results?.[type];
+    if(lstmTfmGame){
+      lines.push(`\n【深度学习（LSTM + Transformer，每周训练，输入特征与传统ML完全一致）】`);
+      lines.push(`更新：${pred.dl_result.lstm_tfm.updated_at||'—'}`);
+      for(const [tname, tm] of Object.entries(lstmTfmGame)){
+        const lbl = tLabels[tname]||tname;
+        lines.push(`  ${lbl}：LSTM准确率${tm.lstm_acc??'—'}%  TFM准确率${tm.tfm_acc??'—'}%  集成预测→${tm.ensemble_pred??'—'}（置信${tm.confidence??'—'}%）`);
+      }
+    }
+
+    // ── 强化学习部分（PPO，每日增量微调，状态融合ML概率+LSTM隐层+遗漏向量）──
     const rlGame = pred.dl_result?.rl?.results?.[type];
-    if(lstmTfmGame || rlGame){
-      if(lstmTfmGame){
-        lines.push(`\n【深度学习（LSTM + Transformer，每周训练）】`);
-        lines.push(`更新：${pred.dl_result.lstm_tfm.updated_at||'—'}`);
-        for(const [tname, tm] of Object.entries(lstmTfmGame)){
-          const lbl={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区',blue:'蓝球',
-                     odd:'奇数',zone_dom:'主落区',tot_grp:'总和区',odd_grp:'奇数区'}[tname]||tname;
-          lines.push(`  ${lbl}：LSTM准确率${tm.lstm_acc??'—'}%  TFM准确率${tm.tfm_acc??'—'}%  集成预测→${tm.ensemble_pred??'—'}（置信${tm.confidence??'—'}%）`);
+    if(rlGame){
+      lines.push(`\n【强化学习（PPO Agent，每日增量微调，状态融合传统ML概率+LSTM隐层+Transformer特征+遗漏向量）】`);
+      lines.push(`更新：${pred.dl_result.rl.updated_at||'—'}`);
+      if(type==='3d'){
+        const md = rlGame.match_distribution||{};
+        lines.push(`  奖励函数：按位命中数给分，三位全中（直选）额外奖励`);
+        lines.push(`  回测（近${rlGame.games_tested??'—'}期）：平均命中${rlGame.avg_match_digits??'—'}位，全中率${rlGame.exact_hit_rate_pct??'—'}%`);
+        if(rlGame.ppo_pred) lines.push(`  PPO预测组合：${rlGame.ppo_pred.join('')}`);
+      } else if(type==='kl8'){
+        lines.push(`  方法：候选池打分排序（非直接组合选择），奖励函数=快乐8真实赔率净收益`);
+        lines.push(`  回测（近${rlGame.games_tested??'—'}期，选六标准）：平均净收益${rlGame.avg_net_per_game??'—'}元/期`);
+        const pbn = rlGame.picks_by_n;
+        if(pbn){
+          for(const n of [4,5,6,9,10]){
+            const nums = pbn[n]||pbn[String(n)];
+            if(nums?.length) lines.push(`  PPO选${['','','','','四','五','六','','','九','十'][n]}推荐：${nums.join(' ')}`);
+          }
         }
+      } else if(type==='ssq'){
+        lines.push(`  方法：红球候选池打分排序（Top6）+ 蓝球打分，联合优化，奖励按双色球真实奖级结构分级`);
+        lines.push(`  回测（近${rlGame.games_tested??'—'}期）：红球平均命中${rlGame.avg_red_hit??'—'}个  蓝球准确率${rlGame.blue_acc_pct??'—'}%（随机基准6.25%）`);
+        if(rlGame.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${rlGame.ppo_red_selected.join(' ')}`);
+        if(rlGame.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${rlGame.ppo_blue_pred}`);
       }
-      if(rlGame){
-        lines.push(`\n【强化学习（PPO Agent，每日增量微调）】`);
-        lines.push(`更新：${pred.dl_result.rl.updated_at||'—'}`);
-        if(type==='kl8'){
-          lines.push(`  奖励函数：快乐8真实赔率净收益`);
-          lines.push(`  回测（近${rlGame.games_tested??'—'}期）：平均净收益${rlGame.avg_net_per_game??'—'}元/期`);
-          if(rlGame.ppo_selected?.length) lines.push(`  PPO推荐号码：${rlGame.ppo_selected.join(' ')}（${rlGame.ppo_selected.length}个）`);
-        } else if(type==='ssq'){
-          lines.push(`  任务：蓝球选号策略优化`);
-          lines.push(`  蓝球回测准确率（近${rlGame.games_tested??'—'}期）：${rlGame.blue_acc_pct??'—'}%（随机基准6.25%）`);
-          if(rlGame.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${rlGame.ppo_blue_pred}`);
-        }
-        if(rlGame.note) lines.push(`  备注：${rlGame.note}`);
-      }
-    } else {
+      if(rlGame.note) lines.push(`  备注：${rlGame.note}`);
+    }
+
+    if(!lstmTfmGame && !rlGame){
       lines.push(`\n【深度学习/强化学习】暂无数据（LSTM每周、RL每日更新，需先运行 kaggle_lstm_tfm.py 和 kaggle_rl_daily.py）`);
     }
 
@@ -2179,7 +2196,8 @@ function renderDLResult(dlResult){
 
   const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
   const tLabels={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球',
-                 'odd':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区'};
+                 'odd':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区',
+                 'red_zone_dom':'红球主力区','ac_grp':'AC值区间','gap_grp':'最大间距区间'};
   let html='';
 
   // ── LSTM+Transformer 各目标准确率（每周） ──
@@ -2206,34 +2224,79 @@ function renderDLResult(dlResult){
     html += `<div class="sectionTitle" style="font-size:13px;margin-top:14px;">🤖 PPO 强化学习策略（每日增量微调）</div>`;
     html += `<div style="font-size:11px;color:#888;margin-bottom:10px;">${rl.state_composition||''}</div>`;
 
+    // 福彩3D
+    const d3Rl = rl.results['3d'];
+    if(d3Rl){
+      html += `<div style="margin-bottom:12px;">`;
+      html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">福彩3D</div>`;
+      const md = d3Rl.match_distribution||{};
+      html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
+        回测（近${d3Rl.games_tested??'—'}期）：平均命中<b>${d3Rl.avg_match_digits??'—'}</b>位，全中率<b>${d3Rl.exact_hit_rate_pct??'—'}%</b>（随机基准0.1%）
+        ${d3Rl.is_first_train?'（首次训练）':'（增量微调）'}
+      </div>`;
+      html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
+        命中分布：0位${md[0]??0}期 1位${md[1]??0}期 2位${md[2]??0}期 3位${md[3]??0}期
+      </div>`;
+      if(d3Rl.ppo_pred){
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO预测组合：</span></div>`;
+        html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
+      }
+      html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${d3Rl.note||''}</div>`;
+      html += `</div>`;
+    }
+
+    // 快乐8（候选池打分排序，支持所有玩法）
     const kl8Rl = rl.results.kl8;
     if(kl8Rl){
       html += `<div style="margin-bottom:12px;">`;
       html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">快乐8</div>`;
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
-        回测（近${kl8Rl.games_tested??'—'}期）平均净收益：<b>${kl8Rl.avg_net_per_game??'—'}</b>元/期
+        回测（近${kl8Rl.games_tested??'—'}期，选六标准）平均净收益：<b>${kl8Rl.avg_net_per_game??'—'}</b>元/期
         ${kl8Rl.is_first_train?'（首次训练）':'（增量微调）'}
       </div>`;
-      const sel = kl8Rl.ppo_selected||[];
-      if(sel.length){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐号码（${sel.length}个）：</span></div>`;
-        html += `<div class="rec-group" style="display:block;">${sel.map(n=>`<span class="ball-r" style="background:#e87d00;">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+      const picksByN = kl8Rl.picks_by_n;
+      if(picksByN){
+        const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+        for(const n of [4,5,6,9,10]){
+          const nums = picksByN[n]||picksByN[String(n)];
+          if(!nums || !nums.length) continue;
+          html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${playNames[n]}：</span>`;
+          html += nums.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+          html += `</div>`;
+        }
+      } else if(kl8Rl.ppo_selected?.length){
+        // 兼容旧结构
+        html += `<div class="rec-group" style="display:block;">${kl8Rl.ppo_selected.map(n=>`<span class="ball-r" style="background:#e87d00;">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
       }
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${kl8Rl.note||''}</div>`;
       html += `</div>`;
     }
 
+    // 双色球
     const ssqRl = rl.results.ssq;
     if(ssqRl){
       html += `<div style="margin-bottom:12px;">`;
       html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">双色球</div>`;
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
-        蓝球回测准确率（近${ssqRl.games_tested??'—'}期）：<b>${ssqRl.blue_acc_pct??'—'}%</b>（随机基准6.25%）
+        回测（近${ssqRl.games_tested??'—'}期）：红球平均命中<b>${ssqRl.avg_red_hit??'—'}</b>个　蓝球准确率<b>${ssqRl.blue_acc_pct??'—'}%</b>（随机基准6.25%）
         ${ssqRl.is_first_train?'（首次训练）':'（增量微调）'}
       </div>`;
-      if(ssqRl.ppo_blue_pred!=null){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐蓝球：</span>
-          <span class="ball-b">${String(ssqRl.ppo_blue_pred).padStart(2,'0')}</span></div>`;
+      const rhd = ssqRl.red_hit_distribution;
+      if(rhd){
+        html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
+          红球命中分布：${[0,1,2,3,4,5,6].map(k=>`${k}个${rhd[k]??rhd[String(k)]??0}期`).join(' ')}
+        </div>`;
+      }
+      if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐整注：</span></div>`;
+        html += `<div class="rec-group" style="display:block;">`;
+        (ssqRl.ppo_red_selected||[]).forEach(n=>{
+          html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`;
+        });
+        if(ssqRl.ppo_blue_pred!=null){
+          html += `<span class="ball-b">${String(ssqRl.ppo_blue_pred).padStart(2,'0')}</span>`;
+        }
+        html += `</div>`;
       }
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${ssqRl.note||''}</div>`;
       html += `</div>`;
@@ -2251,7 +2314,8 @@ function renderGamePredict(game, data){
   if(!data||!data.models){panel.style.display='none';return;}
   panel.style.display='block';
   const modelLabels={bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_grp:'和值区间',odd:'奇数个数',
-    blue:'蓝球号码',sum_grp:'和值区间',odd_grp:'奇数区间',zone_dom:'主落区',tot_grp:'总和区间'};
+    blue:'蓝球号码',odd_grp:'奇数区间',zone_dom:'主落区',tot_grp:'总和区间',
+    red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间'};
   let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">近${data.data_count||'—'}期数据 · 更新：${data.updated_at||'—'}</div>`;
   for(const [mname,mdata] of Object.entries(data.models)){
     if(!mdata||!mdata.accuracy) continue;
