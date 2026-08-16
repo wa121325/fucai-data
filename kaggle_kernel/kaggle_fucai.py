@@ -280,10 +280,13 @@ def f3d(records, idx):
         odds=[sum(1 for d in x['digits'] if d%2!=0) for x in chunk]
         bigs=[sum(1 for d in x['digits'] if d>=5) for x in chunk]
         tails=[sum(x['digits'])%10 for x in chunk]
+        gbs=[abs(x['digits'][0]-x['digits'][1]) for x in chunk]
+        gsg=[abs(x['digits'][1]-x['digits'][2]) for x in chunk]
         f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
         f[f'sp{sfx}']=float(np.mean(sps))
         f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
         f[f'tail{sfx}']=float(np.mean(tails))
+        f[f'gbs{sfx}']=float(np.mean(gbs)); f[f'gsg{sfx}']=float(np.mean(gsg))
         for ci,cn in enumerate(['b','s','g']):
             vals=[x['digits'][ci] for x in chunk]
             f[f'{cn}m{sfx}']=float(np.mean(vals))
@@ -292,8 +295,9 @@ def f3d(records, idx):
         s3=[sum(x['digits']) for x in w[-3:]]
         f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
     else: f['sm_trend']=0
+    w20 = w[-20:]; n20 = len(w20) or 1
     r0=r1=r2=0
-    for x in w[-20:]:
+    for x in w20:
         for d in x['digits']:
             if d%3==0: r0+=1
             elif d%3==1: r1+=1
@@ -301,19 +305,31 @@ def f3d(records, idx):
     total=r0+r1+r2 or 1
     f['road0']=r0/total; f['road1']=r1/total; f['road2']=r2/total
     g3=g6=gt=0
-    for x in w[-20:]:
+    for x in w20:
         b2,s2,g2=x['digits']
         if b2==s2==g2: gt+=1
         elif b2==s2 or s2==g2 or b2==g2: g3+=1
         else: g6+=1
-    f['grp3']=g3/20; f['grp6']=g6/20; f['grpt']=gt/20
+    f['grp3']=g3/n20; f['grp6']=g6/n20; f['grpt']=gt/n20
+    # 重号比例（与各自前一期比较，近20期）
+    rep_cnt=0; rep_n=0
+    for i in range(max(1,len(w)-20), len(w)):
+        prev=w[i-1]['digits']; cur=w[i]['digits']
+        rep_cnt += sum(1 for k in range(3) if prev[k]==cur[k])
+        rep_n += 1
+    f['repeat_ratio'] = rep_cnt/rep_n if rep_n else 0.0
+    # 斜连（三位等差数列）比例，近20期
+    arith_cnt=0
+    for x in w20:
+        s3d=sorted(x['digits'])
+        if (s3d[1]-s3d[0])==(s3d[2]-s3d[1]) and s3d[2]-s3d[0]>0: arith_cnt+=1
+    f['arith_ratio'] = arith_cnt/n20
     return f
+
 
 def fssq(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    # ★ 不直接用当期号码作特征（避免模型过拟合上一期具体值）
-    # 只用滑动窗口的统计量
     f={}
     for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
         chunk=w[-ws:]
@@ -322,18 +338,32 @@ def fssq(records, idx):
         odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
         bigs=[sum(1 for n in x['red'] if n>16) for x in chunk]
         z1s=[sum(1 for n in x['red'] if n<=11) for x in chunk]
+        z2s=[sum(1 for n in x['red'] if 12<=n<=22) for x in chunk]
         z3s=[sum(1 for n in x['red'] if n>=23) for x in chunk]
         consecs=[sum(1 for i in range(len(sorted(x['red']))-1) if sorted(x['red'])[i+1]-sorted(x['red'])[i]==1) for x in chunk]
-        f[f'sm_mean{sfx}']=float(np.mean(sms))
-        f[f'sm_std{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
-        f[f'bl_mean{sfx}']=float(np.mean(bls))
-        f[f'bl_std{sfx}']=float(np.std(bls)) if len(bls)>1 else 0.0
+        ac_vals=[]; max_gaps=[]
+        for x in chunk:
+            sred=sorted(x['red'])
+            diffs=set()
+            for i in range(len(sred)):
+                for j in range(i+1,len(sred)):
+                    diffs.add(sred[j]-sred[i])
+            ac_vals.append(len(diffs)-(len(sred)-1))
+            max_gaps.append(max(sred[k+1]-sred[k] for k in range(len(sred)-1)) if len(sred)>1 else 0)
+        blue_odds=[x['blue']%2 for x in chunk]
+        blue_bigs=[1 if x['blue']>=9 else 0 for x in chunk]
+        f[f'sm_mean{sfx}']=float(np.mean(sms)); f[f'sm_std{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
+        f[f'bl_mean{sfx}']=float(np.mean(bls)); f[f'bl_std{sfx}']=float(np.std(bls)) if len(bls)>1 else 0.0
         f[f'odd_mean{sfx}']=float(np.mean(odds))
         f[f'big_mean{sfx}']=float(np.mean(bigs))
         f[f'z1_mean{sfx}']=float(np.mean(z1s))
+        f[f'z2_mean{sfx}']=float(np.mean(z2s))
         f[f'z3_mean{sfx}']=float(np.mean(z3s))
         f[f'consec_mean{sfx}']=float(np.mean(consecs))
-    # 近期趋势
+        f[f'ac_mean{sfx}']=float(np.mean(ac_vals)); f[f'ac_std{sfx}']=float(np.std(ac_vals)) if len(ac_vals)>1 else 0.0
+        f[f'gap_mean{sfx}']=float(np.mean(max_gaps))
+        f[f'blodd_mean{sfx}']=float(np.mean(blue_odds))
+        f[f'blbig_mean{sfx}']=float(np.mean(blue_bigs))
     if len(w)>=3:
         s3=[sum(x['red']) for x in w[-3:]]
         f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
@@ -341,28 +371,39 @@ def fssq(records, idx):
         f['bl_trend']=1 if b3[-1]>b3[-2] else(-1 if b3[-1]<b3[-2] else 0)
     else:
         f['sm_trend']=0; f['bl_trend']=0
-    # 热区统计（近20期各区间出现频率）
     cnt=Counter(n for x in w[-20:] for n in x['red'])
     f['hot_z1']=sum(cnt.get(n,0) for n in range(1,12))
     f['hot_z2']=sum(cnt.get(n,0) for n in range(12,23))
     f['hot_z3']=sum(cnt.get(n,0) for n in range(23,34))
     bcnt=Counter(x['blue'] for x in w[-20:])
-    f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))   # 蓝球1-8
-    f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))  # 蓝球9-16
+    f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))
+    f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))
     return f
+
 
 def fkl8(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    # ★ 只用窗口统计量，不直接用当期号码
     f={}
     for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
         chunk=w[-ws:]
         tots=[sum(x['numbers']) for x in chunk]
         odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
         bigs=[sum(1 for n in x['numbers'] if n>40) for x in chunk]
+        mins=[min(x['numbers']) for x in chunk]
+        maxs=[max(x['numbers']) for x in chunk]
+        cgs=[]
+        for x in chunk:
+            sn=sorted(x['numbers']); cg=0; inc=False
+            for i in range(len(sn)-1):
+                if sn[i+1]-sn[i]==1:
+                    if not inc: cg+=1; inc=True
+                else: inc=False
+            cgs.append(cg)
         f[f'tm{sfx}']=float(np.mean(tots)); f[f'ts{sfx}']=float(np.std(tots)) if len(tots)>1 else 0.0
         f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
+        f[f'mn{sfx}']=float(np.mean(mins)); f[f'mx{sfx}']=float(np.mean(maxs))
+        f[f'cg{sfx}']=float(np.mean(cgs))
         for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
             zv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
             f[f'z{zi+1}m{sfx}']=float(np.mean(zv))
@@ -658,7 +699,24 @@ def train_target(X, y, feat_names, last_X, tname):
 
 
 def tgt3d(r): b,s,g=r['digits']; sm=b+s+g; return {'bai':b,'shi':s,'ge':g,'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),'odd':sum(1 for x in [b,s,g] if x%2!=0)}
-def tgtssq(r): sm=sum(r['red']); return {'blue':r['blue'],'odd':sum(1 for x in r['red'] if x%2!=0),'sum_grp':0 if sm<70 else(1 if sm<100 else 2)}
+def tgtssq(r):
+    red = sorted(r['red'])
+    sm = sum(red)
+    # AC值
+    diffs=set()
+    for i in range(len(red)):
+        for j in range(i+1,len(red)): diffs.add(red[j]-red[i])
+    ac = len(diffs)-(len(red)-1)
+    # 三区主力区
+    z1=sum(1 for x in red if x<=11); z2=sum(1 for x in red if 12<=x<=22); z3=sum(1 for x in red if x>=23)
+    zone_dom = int(np.argmax([z1,z2,z3]))
+    # 最大间距区间
+    max_gap = max(red[i+1]-red[i] for i in range(len(red)-1)) if len(red)>1 else 0
+    return {'blue':r['blue'],'odd':sum(1 for x in r['red'] if x%2!=0),
+            'sum_grp':0 if sm<70 else(1 if sm<100 else 2),
+            'ac_grp':0 if ac<=2 else(1 if ac<=5 else 2),
+            'red_zone_dom':zone_dom,
+            'gap_grp':0 if max_gap<=5 else(1 if max_gap<=10 else 2)}
 def tgtkl8(r):
     odd=sum(1 for x in r['numbers'] if x%2!=0)
     zn=[sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
@@ -1009,7 +1067,7 @@ def run_ml(history):
 
     cfg=[
         ('3d',  f3d,   tgt3d,  ['bai','shi','ge','sum_grp','odd']),
-        ('ssq', fssq,  tgtssq, ['blue','odd','sum_grp']),
+        ('ssq', fssq,  tgtssq, ['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']),
         ('kl8', fkl8,  tgtkl8, ['odd_grp','zone_dom','tot_grp']),
     ]
     predictions={}
@@ -1036,9 +1094,16 @@ def run_ml(history):
         elif game=='ssq':
             mk=markov_blue(records); om=omitssq(records)
             rec=recssq(records,ml_res['models'],om)
+            ac_m = ml_res['models'].get('ac_grp',{})
+            ac_label = {0:'低(≤2)',1:'中(3-5)',2:'高(≥6)'}.get(ac_m.get('prediction',{}).get('value',1) if ac_m else 1,'中(3-5)')
+            zd_m = ml_res['models'].get('red_zone_dom',{})
+            zd_label = {0:'一区(1-11)',1:'二区(12-22)',2:'三区(23-33)'}.get(zd_m.get('prediction',{}).get('value',1) if zd_m else 1,'—')
+            gap_m = ml_res['models'].get('gap_grp',{})
+            gap_label = {0:'小(≤5)',1:'中(6-10)',2:'大(≥11)'}.get(gap_m.get('prediction',{}).get('value',1) if gap_m else 1,'—')
             ai_ctx={'game':'双色球','data_count':len(records),'latest_date':records[-1]['date'],
                     'blue_recommend':rec.get('blue_recommend',[]),'overdue_red':rec.get('overdue_red',[]),
-                    'overdue_blue':rec.get('overdue_blue',[]),'odd_pred':rec.get('odd_pred',''),'sum_pred':rec.get('sum_pred','')}
+                    'overdue_blue':rec.get('overdue_blue',[]),'odd_pred':rec.get('odd_pred',''),'sum_pred':rec.get('sum_pred',''),
+                    'ac_pred':ac_label,'red_zone_dom_pred':zd_label,'max_gap_pred':gap_label}
         else:
             mk=None; om=omitkl8(records)
             rec=reckl8(records,ml_res['models'],om)
