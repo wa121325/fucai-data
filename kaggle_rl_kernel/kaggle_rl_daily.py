@@ -482,12 +482,13 @@ def build_ssq_red_pool(records, idx, pool_size=18):
 def extract_ml_prob_vec(ml_pred, game):
     vec = []
     models_data = ml_pred.get('models', {})
-    if game=='3d': tk=['bai','shi','ge','sum_grp','odd']; nc=[10,10,10,3,4]
-    elif game=='ssq': tk=['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']; nc=[16,7,3,3,3,3]
-    else: tk=['odd_grp','zone_dom','tot_grp']; nc=[3,4,3]
-    for tkey,n in zip(tk,nc):
+    # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
+    if game=='3d': tk=['bai','shi','ge','sum_grp','odd']; nc=[10,10,10,3,4]; offsets=[0,0,0,0,0]
+    elif game=='ssq': tk=['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']; nc=[16,7,3,3,3,3]; offsets=[1,0,0,0,0,0]
+    else: tk=['odd_grp','zone_dom','tot_grp']; nc=[3,4,3]; offsets=[0,0,0]
+    for tkey,n,off in zip(tk,nc,offsets):
         m = models_data.get(tkey,{}); probs = m.get('prediction',{}).get('probs',{})
-        vec.extend([float(probs.get(str(i),0.0))/100.0 for i in range(n)])
+        vec.extend([float(probs.get(str(i+off),0.0))/100.0 for i in range(n)])
     return np.array(vec, dtype=np.float32)
 
 # （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
