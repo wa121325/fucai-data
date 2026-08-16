@@ -453,11 +453,15 @@ for game, (feat_fn, targets) in configs.items():
 
         ens = lstm_p*0.6 + tfm_p*0.4
         classes = sorted(set(y.tolist()))
+        # 蓝球训练时做了 -1 偏移（1-16 → 0-15分类），这里显示前必须还原回真实号码，
+        # 否则会显示"预测值0"这种不存在的蓝球编号，造成误解
+        offset = 1 if tname == 'blue' else 0
+        pred_class = classes[int(np.argmax(ens))]
         game_results[tname] = {
             'lstm_acc':lstm_acc, 'tfm_acc':tfm_acc,
-            'ensemble_pred': int(classes[int(np.argmax(ens))]),
+            'ensemble_pred': int(pred_class) + offset,
             'confidence': round(float(max(ens))*100,1),
-            'probs': {str(c):round(float(p)*100,1) for c,p in zip(classes,ens)},
+            'probs': {str(int(c)+offset):round(float(p)*100,1) for c,p in zip(classes,ens)},
         }
 
     dl_results[game] = game_results
