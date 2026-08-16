@@ -1567,7 +1567,8 @@ function getMlContext(type){
 
     const tLabels={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',
                    blue:'蓝球',red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
-                   zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间'};
+                   zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间',
+                   big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
 
     // ── 基础ML部分（传统机器学习：RF/XGB/LGB，含全部特征工程后的预测目标）──
     const mlData = pred.predictions?.[type];
@@ -1595,6 +1596,7 @@ function getMlContext(type){
         if(rec.ac_pred) lines.push(`  AC值预测：${rec.ac_pred}  红球主力区预测：${rec.red_zone_dom_pred||'—'}  最大间距预测：${rec.max_gap_pred||'—'}`);
       } else if(type==='kl8' && rec.plays){
         lines.push(`  ML区间预测：${rec.zone_dominant_pred||'—'}  总和区间：${rec.total_range_pred||'—'}`);
+        lines.push(`  ML五行主力段：${rec.five_dominant_pred||'—'}  大数个数：${rec.big_count_pred||'—'}  连续号组：${rec.consec_pred||'—'}  极差：${rec.range_pred||'—'}`);
         lines.push(`  ML热号：${(rec.hot_nums||[]).slice(0,10).join(' ')}  遗漏关注：${(rec.overdue||[]).slice(0,6).join(' ')}`);
       }
     }
@@ -2197,7 +2199,8 @@ function renderDLResult(dlResult){
   const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
   const tLabels={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球',
                  'odd':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区',
-                 'red_zone_dom':'红球主力区','ac_grp':'AC值区间','gap_grp':'最大间距区间'};
+                 'red_zone_dom':'红球主力区','ac_grp':'AC值区间','gap_grp':'最大间距区间',
+                 'big_grp':'大数个数区','five_dom':'五行主力段','consec_grp':'连续号组区','range_grp':'极差区'};
   let html='';
 
   // ── LSTM+Transformer 各目标准确率（每周） ──
@@ -2315,7 +2318,8 @@ function renderGamePredict(game, data){
   panel.style.display='block';
   const modelLabels={bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_grp:'和值区间',odd:'奇数个数',
     blue:'蓝球号码',odd_grp:'奇数区间',zone_dom:'主落区',tot_grp:'总和区间',
-    red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间'};
+    red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
+    big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
   let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">近${data.data_count||'—'}期数据 · 更新：${data.updated_at||'—'}</div>`;
   for(const [mname,mdata] of Object.entries(data.models)){
     if(!mdata||!mdata.accuracy) continue;
