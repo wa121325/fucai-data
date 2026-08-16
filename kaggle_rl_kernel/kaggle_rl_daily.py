@@ -27,7 +27,7 @@ def get_secret(name):
     except Exception: pass
     return os.environ.get(name, '')
 
-_HARDCODED_GH_TOKEN = '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'      # ← 新的 GitHub Token
+_HARDCODED_GH_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets      # ← 新的 GitHub Token
 _HARDCODED_GH_REPO  = 'wa121325/fucai-data'
 _HARDCODED_KAGGLE_TOKEN = 'KGAT_0847d8a3c8619a4db2ff2c7c3e9e824f'
 
