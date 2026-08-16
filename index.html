@@ -2070,22 +2070,52 @@ async function loadPrediction(){
     statusEl.textContent='请先在「海报生成」→「数据来源」里填写并保存 GitHub 仓库地址';
     return;
   }
-  btn.disabled=true; statusEl.className='status'; statusEl.textContent='正在加载预测报告…';
+  btn.disabled=true; statusEl.className='status'; statusEl.textContent='正在并行加载三份预测文件…';
+
+  const fetchJson = async (name) => {
+    const url = `https://raw.githubusercontent.com/${repo}/main/${name}?t=${Date.now()}`;
+    try{
+      const resp = await fetch(url);
+      if(!resp.ok) return null;
+      return await resp.json();
+    } catch(e){ return null; }
+  };
+
   try{
-    const url=`https://raw.githubusercontent.com/${repo}/main/prediction.json?t=${Date.now()}`;
-    const resp=await fetch(url);
-    if(!resp.ok) throw new Error('HTTP '+resp.status+' — prediction.json 是否已生成？先手动触发一次 Kaggle 运行');
-    const data=await resp.json();
-    window._lastPrediction=data;
-    renderBacktest(data.backtest||{});
-    renderGamePredict('3d',  data.predictions?.['3d']);
-    renderGamePredict('ssq', data.predictions?.ssq);
-    renderGamePredict('kl8', data.predictions?.kl8);
-    // DL+RL 结果（每周更新，有就显示）
-    if(data.dl_result) renderDLResult(data.dl_result);
+    // 三个文件互相独立，并行拉取，任意一个缺失不影响其它部分展示
+    const [mlData, lstmData, rlData] = await Promise.all([
+      fetchJson('ml_predictions.json'),
+      fetchJson('dl_lstm_tfm.json'),
+      fetchJson('dl_rl.json'),
+    ]);
+
+    if(!mlData){
+      throw new Error('ml_predictions.json 加载失败 — 先手动触发一次 kaggle_fucai.py 运行');
+    }
+
+    // 拼装成原有渲染函数期望的结构，保持renderBacktest/renderGamePredict/renderDLResult不用改
+    const combined = {
+      ...mlData,
+      dl_result: (lstmData || rlData) ? {
+        lstm_tfm: lstmData || null,
+        rl: rlData || null,
+      } : null,
+    };
+    window._lastPrediction = combined;
+
+    renderBacktest(combined.backtest||{});
+    renderGamePredict('3d',  combined.predictions?.['3d']);
+    renderGamePredict('ssq', combined.predictions?.ssq);
+    renderGamePredict('kl8', combined.predictions?.kl8);
+    if(combined.dl_result) renderDLResult(combined.dl_result);
+
     document.getElementById('predictContent').style.display='block';
+
+    const parts = [`基础ML更新于 ${mlData.updated_at||'未知'}`];
+    if(lstmData) parts.push(`LSTM/TFM更新于 ${lstmData.updated_at||'未知'}`);
+    if(rlData)   parts.push(`RL更新于 ${rlData.updated_at||'未知'}`);
     statusEl.className='status ok';
-    statusEl.textContent=`✓ 预测报告加载成功（更新于 ${data.updated_at||'未知'}）`;
+    statusEl.textContent=`✓ 加载成功（${parts.join(' · ')}）`;
   } catch(e){
     statusEl.className='status err'; statusEl.textContent='加载失败：'+e.message;
   }
