@@ -1982,34 +1982,34 @@
   "disclaimer": "彩票开奖具有完全随机性，ML预测仅为数据统计演示，仅供娱乐参考，请理性购彩。",
   "dl_result": {
     "rl": {
-      "updated_at": "2026-08-16 04:17:35",
+      "updated_at": "2026-08-16 04:48:23",
       "method": "PPO强化学习（每日增量微调）",
       "state_composition": "原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量",
       "results": {
         "kl8": {
-          "avg_net_per_game": -1.86,
+          "avg_net_per_game": -2.0,
           "games_tested": 29,
           "ppo_selected": [
-            6,
-            8,
+            2,
+            5,
             9,
-            11,
             12,
             13,
-            14,
             15,
-            17,
-            19
+            16,
+            18,
+            20,
+            22
           ],
           "is_first_train": true,
-          "note": "PPO每日增量微调，回测净收益-1.86元/期"
+          "note": "PPO每日增量微调，回测净收益-2.0元/期"
         },
         "ssq": {
-          "blue_acc_pct": 0.0,
+          "blue_acc_pct": 3.4,
           "games_tested": 29,
-          "ppo_blue_pred": 9,
+          "ppo_blue_pred": 16,
           "is_first_train": true,
-          "note": "PPO每日增量微调，蓝球回测准确率0.0%"
+          "note": "PPO每日增量微调，蓝球回测准确率3.4%"
         }
       }
     }
