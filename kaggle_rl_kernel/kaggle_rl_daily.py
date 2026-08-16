@@ -19,12 +19,19 @@ from datetime import datetime, date
 from collections import Counter, defaultdict
 warnings.filterwarnings('ignore')
 
-def get_secret(name):
-    try:
-        from kaggle_secrets import UserSecretsClient
-        v = UserSecretsClient().get_secret(name)
-        if v: return v
-    except Exception: pass
+def get_secret(name, retries=3, delay=3):
+    for attempt in range(retries):
+        try:
+            from kaggle_secrets import UserSecretsClient
+            v = UserSecretsClient().get_secret(name)
+            if v:
+                return v
+        except Exception as e:
+            if attempt < retries - 1:
+                print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                time.sleep(delay)
+            else:
+                print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
     return os.environ.get(name, '')
 
 _HARDCODED_GH_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets      # ← 新的 GitHub Token
