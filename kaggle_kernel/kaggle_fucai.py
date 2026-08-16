@@ -621,10 +621,12 @@ def train_target(X, y, feat_names, last_X, tname):
 
     # 特征维度校验：若特征工程改了（当前维度与缓存时不一致），
     # 缓存模型对新特征向量会预测出错甚至崩溃，强制作废缓存重新全量训练
+    # 注意：旧缓存（本次修复之前保存的）没有 feat_count 字段，视为"维度不明"同样作废，
+    # 不能因为读不到就当作兼容——那样会直接用旧维度模型预测新维度特征导致报错
     cached_feat_n = cached.get('feat_count')
     cur_feat_n = X.shape[1] if hasattr(X, 'shape') else len(feat_names)
-    if has_cache and cached_feat_n is not None and cached_feat_n != cur_feat_n:
-        print(f"    [{tname}] 特征维度变化（缓存{cached_feat_n} → 当前{cur_feat_n}），缓存作废，强制全量重训")
+    if has_cache and cached_feat_n != cur_feat_n:
+        print(f"    [{tname}] 特征维度不匹配或未知（缓存{cached_feat_n} → 当前{cur_feat_n}），缓存作废，强制全量重训")
         has_cache = False
 
     if has_cache and new_data < RETRAIN_EVERY:
