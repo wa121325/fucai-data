@@ -16,17 +16,22 @@ warnings.filterwarnings('ignore')
 # ══════════════════════════════════════════════════════
 #  读取 Kaggle Secrets
 # ══════════════════════════════════════════════════════
-def get_secret(name):
-    # 方式1：新版 Kaggle Secrets API
-    try:
-        from kaggle_secrets import UserSecretsClient
-        client = UserSecretsClient()
-        val = client.get_secret(name)
-        if val:
-            print(f"  [Secret] {name} 读取成功（kaggle_secrets）")
-            return val
-    except Exception as e:
-        print(f"  [Secret] {name} kaggle_secrets失败: {e}")
+def get_secret(name, retries=3, delay=3):
+    # 方式1：新版 Kaggle Secrets API（带重试，应对偶发连接失败）
+    for attempt in range(retries):
+        try:
+            from kaggle_secrets import UserSecretsClient
+            client = UserSecretsClient()
+            val = client.get_secret(name)
+            if val:
+                print(f"  [Secret] {name} 读取成功（kaggle_secrets，第{attempt+1}次尝试）")
+                return val
+        except Exception as e:
+            if attempt < retries - 1:
+                print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                time.sleep(delay)
+            else:
+                print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
 
     # 方式2：环境变量
     val = os.environ.get(name, '')
