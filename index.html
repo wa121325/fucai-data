@@ -2084,13 +2084,13 @@ async function loadPrediction(){
   try{
     // 三个文件互相独立，并行拉取，任意一个缺失不影响其它部分展示
     const [mlData, lstmData, rlData] = await Promise.all([
-      fetchJson('ml_predictions.json'),
+      fetchJson('prediction.json'),
       fetchJson('dl_lstm_tfm.json'),
       fetchJson('dl_rl.json'),
     ]);
 
     if(!mlData){
-      throw new Error('ml_predictions.json 加载失败 — 先手动触发一次 kaggle_fucai.py 运行');
+      throw new Error('prediction.json 加载失败 — 先手动触发一次 kaggle_fucai.py 运行');
     }
 
     // 拼装成原有渲染函数期望的结构，保持renderBacktest/renderGamePredict/renderDLResult不用改
