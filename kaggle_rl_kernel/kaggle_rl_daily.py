@@ -318,13 +318,19 @@ class TransformerEncoder(nn.Module):
         return (logits,pooled) if return_hidden else logits
 
 
-def load_lstm_tfm(game):
+def load_lstm_tfm(game, current_feat_dim=None):
     """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重"""
     meta_path = f'{DL_MOUNTED}/{game}_meta.json'
     if not os.path.exists(meta_path):
         print(f"  ! 找不到 {game} 的LSTM/TFM权重（先运行 kaggle_lstm_tfm.py 并挂载 {DL_DATASET_SLUG}）")
         return None, None, None
     with open(meta_path) as f: meta = json.load(f)
+    # 特征维度校验：若当前特征函数产出维度与保存时不一致（特征工程改了），
+    # 直接跳过旧权重，避免运行到forward()时矩阵形状不匹配而崩溃
+    if current_feat_dim is not None and meta.get('feat_dim') != current_feat_dim:
+        print(f"  ! {game} 的LSTM/TFM权重特征维度({meta.get('feat_dim')})与当前特征工程({current_feat_dim})不一致")
+        print(f"    请先重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
+        return None, None, None
     lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
     lstm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu'))
     lstm.eval()
@@ -758,7 +764,8 @@ def push_rl_dataset():
 def run_kl8_daily(records, ml_pred):
     print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（候选池打分排序，{len(records)}期）\n{'='*50}")
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
-    lstm, tfm, meta = load_lstm_tfm('kl8')
+    _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
+    lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
@@ -779,6 +786,12 @@ def run_kl8_daily(records, ml_pred):
     model = load_ppo('kl8')
     is_new = model is None
     t0 = time.time()
+    if not is_new:
+        try:
+            model.set_env(vec_env)
+        except Exception as e:
+            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
+            model = None; is_new = True
     if is_new:
         print("  首次训练（20万步，候选池打分排序问题，学习难度远低于原MultiBinary(80)方案）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
@@ -786,7 +799,6 @@ def run_kl8_daily(records, ml_pred):
                     verbose=0, device='cpu')
         model.learn(total_timesteps=200000, progress_bar=False)
     else:
-        model.set_env(vec_env)
         print("  增量微调（2万步，基于最新数据）…")
         model.learn(total_timesteps=20000, reset_num_timesteps=False, progress_bar=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
@@ -845,7 +857,7 @@ def run_kl8_daily(records, ml_pred):
 def run_ssq_daily(records, ml_pred):
     print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球候选池打分+蓝球，{len(records)}期）\n{'='*50}")
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
-    lstm, tfm, meta = load_lstm_tfm('ssq')
+    lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=len(fssq(records, len(records)-1) or {}))
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
@@ -866,6 +878,12 @@ def run_ssq_daily(records, ml_pred):
     model = load_ppo('ssq')
     is_new = model is None
     t0 = time.time()
+    if not is_new:
+        try:
+            model.set_env(vec_env)
+        except Exception as e:
+            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
+            model = None; is_new = True
     if is_new:
         print("  首次训练（15万步，红球候选池排序+蓝球联合优化）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
@@ -873,7 +891,6 @@ def run_ssq_daily(records, ml_pred):
                     verbose=0, device='cpu')
         model.learn(total_timesteps=150000, progress_bar=False)
     else:
-        model.set_env(vec_env)
         print("  增量微调（1.5万步）…")
         model.learn(total_timesteps=15000, reset_num_timesteps=False, progress_bar=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
@@ -937,7 +954,7 @@ def run_ssq_daily(records, ml_pred):
 def run_3d_daily(records, ml_pred):
     print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
     ml_vec = extract_ml_prob_vec(ml_pred, '3d')
-    lstm, tfm, meta = load_lstm_tfm('3d')
+    lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=len(f3d(records, len(records)-1) or {}))
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
@@ -958,6 +975,12 @@ def run_3d_daily(records, ml_pred):
     model = load_ppo('3d')
     is_new = model is None
     t0 = time.time()
+    if not is_new:
+        try:
+            model.set_env(vec_env)
+        except Exception as e:
+            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
+            model = None; is_new = True
     if is_new:
         print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
@@ -965,7 +988,6 @@ def run_3d_daily(records, ml_pred):
                     verbose=0, device='cpu')
         model.learn(total_timesteps=100000, progress_bar=False)
     else:
-        model.set_env(vec_env)
         print("  增量微调（1万步）…")
         model.learn(total_timesteps=10000, reset_num_timesteps=False, progress_bar=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
