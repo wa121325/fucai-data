@@ -154,77 +154,155 @@ def gh_put(path, content_str, message):
 #  特征工程
 # ══════════════════════════════════════════════════════
 def f3d(records, idx):
-    w = records[max(0,idx-WINDOW):idx]
+    w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    d=w[-1]['digits']; b,s,g=d; sm=b+s+g; sp=max(d)-min(d)
-    prev=w[-2]['digits'] if len(w)>=2 else d
-    rep=sum(1 for i in range(3) if prev[i]==d[i])
-    s3=sorted(d); arith=int((s3[1]-s3[0])==(s3[2]-s3[1]) and s3[2]-s3[0]>0)
-    f={'sum':sm,'tail':sm%10,'span':sp,'odd':sum(1 for x in d if x%2!=0),
-       'big':sum(1 for x in d if x>=5),'r0':d[0]%3,'r1':d[1]%3,'r2':d[2]%3,
-       'b':b,'s':s,'g':g,'gbs':abs(b-s),'gsg':abs(s-g),
-       'grp':0 if b==s==g else(1 if(b==s or s==g or b==g)else 2),'rep':rep,'arith':arith}
-    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]; sms=[sum(x['digits']) for x in chunk]; sps=[max(x['digits'])-min(x['digits']) for x in chunk]
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        sms=[sum(x['digits']) for x in chunk]
+        sps=[max(x['digits'])-min(x['digits']) for x in chunk]
+        odds=[sum(1 for d in x['digits'] if d%2!=0) for x in chunk]
+        bigs=[sum(1 for d in x['digits'] if d>=5) for x in chunk]
+        tails=[sum(x['digits'])%10 for x in chunk]
+        gbs=[abs(x['digits'][0]-x['digits'][1]) for x in chunk]
+        gsg=[abs(x['digits'][1]-x['digits'][2]) for x in chunk]
         f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
         f[f'sp{sfx}']=float(np.mean(sps))
+        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
+        f[f'tail{sfx}']=float(np.mean(tails))
+        f[f'gbs{sfx}']=float(np.mean(gbs)); f[f'gsg{sfx}']=float(np.mean(gsg))
         for ci,cn in enumerate(['b','s','g']):
-            vals=[x['digits'][ci] for x in chunk]; f[f'{cn}m{sfx}']=float(np.mean(vals))
-    tr3=[sum(x['digits']) for x in w[-3:]] if len(w)>=3 else [sm]
-    f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
+            vals=[x['digits'][ci] for x in chunk]
+            f[f'{cn}m{sfx}']=float(np.mean(vals))
+            f[f'{cn}s{sfx}']=float(np.std(vals)) if len(vals)>1 else 0.0
+    if len(w)>=3:
+        s3=[sum(x['digits']) for x in w[-3:]]
+        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+    else: f['sm_trend']=0
+    w20 = w[-20:]; n20 = len(w20) or 1
+    r0=r1=r2=0
+    for x in w20:
+        for d in x['digits']:
+            if d%3==0: r0+=1
+            elif d%3==1: r1+=1
+            else: r2+=1
+    total=r0+r1+r2 or 1
+    f['road0']=r0/total; f['road1']=r1/total; f['road2']=r2/total
+    g3=g6=gt=0
+    for x in w20:
+        b2,s2,g2=x['digits']
+        if b2==s2==g2: gt+=1
+        elif b2==s2 or s2==g2 or b2==g2: g3+=1
+        else: g6+=1
+    f['grp3']=g3/n20; f['grp6']=g6/n20; f['grpt']=gt/n20
+    # 重号比例（与各自前一期比较，近20期）
+    rep_cnt=0; rep_n=0
+    for i in range(max(1,len(w)-20), len(w)):
+        prev=w[i-1]['digits']; cur=w[i]['digits']
+        rep_cnt += sum(1 for k in range(3) if prev[k]==cur[k])
+        rep_n += 1
+    f['repeat_ratio'] = rep_cnt/rep_n if rep_n else 0.0
+    # 斜连（三位等差数列）比例，近20期
+    arith_cnt=0
+    for x in w20:
+        s3d=sorted(x['digits'])
+        if (s3d[1]-s3d[0])==(s3d[2]-s3d[1]) and s3d[2]-s3d[0]>0: arith_cnt+=1
+    f['arith_ratio'] = arith_cnt/n20
     return f
+
 
 def fssq(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    r=w[-1]; red=sorted(r['red']); bl=r['blue']
-    sm=sum(red); odd=sum(1 for x in red if x%2!=0); big=sum(1 for x in red if x>16)
-    csc=sum(1 for i in range(len(red)-1) if red[i+1]-red[i]==1)
-    df=set()
-    for i in range(len(red)):
-        for j in range(i+1,len(red)): df.add(red[j]-red[i])
-    ac=len(df)-(len(red)-1)
-    z1=sum(1 for x in red if x<=11); z2=sum(1 for x in red if 12<=x<=22); z3=sum(1 for x in red if x>=23)
-    mg=max(red[i+1]-red[i] for i in range(len(red)-1)) if len(red)>1 else 0
-    f={'sm':sm,'odd':odd,'big':big,'consec':csc,'ac':ac,'z1':z1,'z2':z2,'z3':z3,'mg':mg,
-       'bl':bl,'bl_odd':bl%2,'bl_big':int(bl>=9),'rmax':red[-1],'rmin':red[0],'rsp':red[-1]-red[0]}
-    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]; sms=[sum(x['red']) for x in chunk]
-        bls=[x['blue'] for x in chunk]; odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
-        f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
-        f[f'bl{sfx}']=float(np.mean(bls)); f[f'od{sfx}']=float(np.mean(odds))
-    cnt=Counter(n for x in w for n in x['red'])
-    f['hz1']=sum(cnt.get(n,0) for n in range(1,12)); f['hz2']=sum(cnt.get(n,0) for n in range(12,23)); f['hz3']=sum(cnt.get(n,0) for n in range(23,34))
-    tr3=[sum(x['red']) for x in w[-3:]] if len(w)>=3 else [sm]
-    f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        sms=[sum(x['red']) for x in chunk]
+        bls=[x['blue'] for x in chunk]
+        odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
+        bigs=[sum(1 for n in x['red'] if n>16) for x in chunk]
+        z1s=[sum(1 for n in x['red'] if n<=11) for x in chunk]
+        z2s=[sum(1 for n in x['red'] if 12<=n<=22) for x in chunk]
+        z3s=[sum(1 for n in x['red'] if n>=23) for x in chunk]
+        consecs=[sum(1 for i in range(len(sorted(x['red']))-1) if sorted(x['red'])[i+1]-sorted(x['red'])[i]==1) for x in chunk]
+        ac_vals=[]; max_gaps=[]
+        for x in chunk:
+            sred=sorted(x['red'])
+            diffs=set()
+            for i in range(len(sred)):
+                for j in range(i+1,len(sred)):
+                    diffs.add(sred[j]-sred[i])
+            ac_vals.append(len(diffs)-(len(sred)-1))
+            max_gaps.append(max(sred[k+1]-sred[k] for k in range(len(sred)-1)) if len(sred)>1 else 0)
+        blue_odds=[x['blue']%2 for x in chunk]
+        blue_bigs=[1 if x['blue']>=9 else 0 for x in chunk]
+        f[f'sm_mean{sfx}']=float(np.mean(sms)); f[f'sm_std{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
+        f[f'bl_mean{sfx}']=float(np.mean(bls)); f[f'bl_std{sfx}']=float(np.std(bls)) if len(bls)>1 else 0.0
+        f[f'odd_mean{sfx}']=float(np.mean(odds))
+        f[f'big_mean{sfx}']=float(np.mean(bigs))
+        f[f'z1_mean{sfx}']=float(np.mean(z1s))
+        f[f'z2_mean{sfx}']=float(np.mean(z2s))
+        f[f'z3_mean{sfx}']=float(np.mean(z3s))
+        f[f'consec_mean{sfx}']=float(np.mean(consecs))
+        f[f'ac_mean{sfx}']=float(np.mean(ac_vals)); f[f'ac_std{sfx}']=float(np.std(ac_vals)) if len(ac_vals)>1 else 0.0
+        f[f'gap_mean{sfx}']=float(np.mean(max_gaps))
+        f[f'blodd_mean{sfx}']=float(np.mean(blue_odds))
+        f[f'blbig_mean{sfx}']=float(np.mean(blue_bigs))
+    if len(w)>=3:
+        s3=[sum(x['red']) for x in w[-3:]]
+        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+        b3=[x['blue'] for x in w[-3:]]
+        f['bl_trend']=1 if b3[-1]>b3[-2] else(-1 if b3[-1]<b3[-2] else 0)
+    else:
+        f['sm_trend']=0; f['bl_trend']=0
+    cnt=Counter(n for x in w[-20:] for n in x['red'])
+    f['hot_z1']=sum(cnt.get(n,0) for n in range(1,12))
+    f['hot_z2']=sum(cnt.get(n,0) for n in range(12,23))
+    f['hot_z3']=sum(cnt.get(n,0) for n in range(23,34))
+    bcnt=Counter(x['blue'] for x in w[-20:])
+    f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))
+    f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))
     return f
+
 
 def fkl8(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
-    r=w[-1]; nums=sorted(r['numbers']); tot=sum(nums)
-    odd=sum(1 for x in nums if x%2!=0); big=sum(1 for x in nums if x>40)
-    zn=[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
-    fv=[sum(1 for x in nums if lo<=x<=hi) for lo,hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
-    cg=0; inc=False
-    for i in range(len(nums)-1):
-        if nums[i+1]-nums[i]==1:
-            if not inc: cg+=1; inc=True
-        else: inc=False
-    f={'tot':tot,'odd':odd,'big':big,'mn':nums[0],'mx':nums[-1],
-       'z1':zn[0],'z2':zn[1],'z3':zn[2],'z4':zn[3],'f1':fv[0],'f2':fv[1],'f3':fv[2],'f4':fv[3],'f5':fv[4],'cg':cg}
-    for ws,sfx in [(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]; tots=[sum(x['numbers']) for x in chunk]
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        tots=[sum(x['numbers']) for x in chunk]
+        odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
+        bigs=[sum(1 for n in x['numbers'] if n>40) for x in chunk]
+        mins=[min(x['numbers']) for x in chunk]
+        maxs=[max(x['numbers']) for x in chunk]
+        cgs=[]
+        for x in chunk:
+            sn=sorted(x['numbers']); cg=0; inc=False
+            for i in range(len(sn)-1):
+                if sn[i+1]-sn[i]==1:
+                    if not inc: cg+=1; inc=True
+                else: inc=False
+            cgs.append(cg)
         f[f'tm{sfx}']=float(np.mean(tots)); f[f'ts{sfx}']=float(np.std(tots)) if len(tots)>1 else 0.0
+        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
+        f[f'mn{sfx}']=float(np.mean(mins)); f[f'mx{sfx}']=float(np.mean(maxs))
+        f[f'cg{sfx}']=float(np.mean(cgs))
         for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
             zv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
             f[f'z{zi+1}m{sfx}']=float(np.mean(zv))
-    cnt=Counter(n for x in w for n in x['numbers'])
+        for fi2,(lo,hi) in enumerate([(1,16),(17,32),(33,48),(49,64),(65,80)]):
+            fv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
+            f[f'f{fi2+1}m{sfx}']=float(np.mean(fv))
+    if len(w)>=3:
+        t3=[sum(x['numbers']) for x in w[-3:]]
+        f['tot_trend']=1 if t3[-1]>t3[-2] else(-1 if t3[-1]<t3[-2] else 0)
+    else: f['tot_trend']=0
+    cnt=Counter(n for x in w[-20:] for n in x['numbers'])
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'hz{zi+1}']=sum(cnt.get(n,0) for n in range(lo,hi+1))
-    tr3=[sum(x['numbers']) for x in w[-3:]] if len(w)>=3 else [tot]
-    f['trend']=1 if tr3[-1]>tr3[-2] else(-1 if tr3[-1]<tr3[-2] else 0)
     return f
+
 
 def build_seq_dataset(records, feat_fn, target_fn, seq_len=SEQ_LEN):
     X_list, y_list = [], []
@@ -312,11 +390,30 @@ history = json.loads(raw)
 os.makedirs(LOCAL_DIR, exist_ok=True)
 dl_results = {}
 
+def _ssq_ac_grp(red):
+    sred=sorted(red); diffs=set()
+    for i in range(len(sred)):
+        for j in range(i+1,len(sred)): diffs.add(sred[j]-sred[i])
+    ac=len(diffs)-(len(sred)-1)
+    return 0 if ac<=2 else(1 if ac<=5 else 2)
+
+def _ssq_zone_dom(red):
+    z1=sum(1 for x in red if x<=11); z2=sum(1 for x in red if 12<=x<=22); z3=sum(1 for x in red if x>=23)
+    return int(np.argmax([z1,z2,z3]))
+
+def _ssq_gap_grp(red):
+    sred=sorted(red)
+    mg=max(sred[i+1]-sred[i] for i in range(len(sred)-1)) if len(sred)>1 else 0
+    return 0 if mg<=5 else(1 if mg<=10 else 2)
+
 configs = {
     '3d':  (f3d,  {'bai':lambda r:r['digits'][0],'shi':lambda r:r['digits'][1],'ge':lambda r:r['digits'][2],
                     'sum_grp':lambda r:0 if sum(r['digits'])<=9 else(1 if sum(r['digits'])<=17 else 2)}),
     'ssq': (fssq, {'blue':lambda r:r['blue']-1,'odd':lambda r:sum(1 for x in r['red'] if x%2!=0),
-                    'sum_grp':lambda r:0 if sum(r['red'])<70 else(1 if sum(r['red'])<100 else 2)}),
+                    'sum_grp':lambda r:0 if sum(r['red'])<70 else(1 if sum(r['red'])<100 else 2),
+                    'ac_grp':lambda r:_ssq_ac_grp(r['red']),
+                    'red_zone_dom':lambda r:_ssq_zone_dom(r['red']),
+                    'gap_grp':lambda r:_ssq_gap_grp(r['red'])}),
     'kl8': (fkl8, {'zone_dom':lambda r:int(np.argmax([sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]])),
                     'tot_grp':lambda r:0 if sum(r['numbers'])<640 else(1 if sum(r['numbers'])<820 else 2)}),
 }
