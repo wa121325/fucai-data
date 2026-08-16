@@ -1039,11 +1039,24 @@ else:
     # history.json（不缩进节省体积）
     gh_put('history.json', json.dumps(history_out,ensure_ascii=False), msg)
     print("  ✓ history.json")
-    # prediction.json
+    # prediction.json —— 先读取已有文件，保留 dl_result（LSTM周训练+PPO日训练的成果），避免被覆盖
+    existing_dl_result = None
+    try:
+        old_raw = gh_raw('prediction.json')
+        if old_raw:
+            old_data = json.loads(old_raw)
+            existing_dl_result = old_data.get('dl_result')
+            if existing_dl_result:
+                print(f"  已保留现有 dl_result（lstm_tfm/rl），避免被本次基础ML覆盖")
+    except Exception as e:
+        print(f"  读取旧 prediction.json 失败（不影响本次写入）: {e}")
+
     pred_out={'updated_at':ts,'source':'kaggle',
               'models_used':{'rf':HAS_SKL,'xgb':HAS_XGB,'lgb':HAS_LGB,'ensemble':True,'markov':True,'omission':True},
               'predictions':predictions,'backtest':bt,
               'disclaimer':'彩票开奖具有完全随机性，ML预测仅为数据统计演示，仅供娱乐参考，请理性购彩。'}
+    if existing_dl_result:
+        pred_out['dl_result'] = existing_dl_result
     gh_put('prediction.json', json.dumps(pred_out,ensure_ascii=False,indent=2), msg)
     print("  ✓ prediction.json")
     print(f"\n✅ 全部完成！{ts}")
