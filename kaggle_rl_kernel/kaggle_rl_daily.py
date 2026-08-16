@@ -27,7 +27,7 @@ def get_secret(name):
     except Exception: pass
     return os.environ.get(name, '')
 
-_HARDCODED_GH_TOKEN = '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'      # ← 新的 GitHub Token
+_HARDCODED_GH_TOKEN = ''      # ← 新的 GitHub Token
 _HARDCODED_GH_REPO  = 'wa121325/fucai-data'
 _HARDCODED_KAGGLE_TOKEN = 'KGAT_0847d8a3c8619a4db2ff2c7c3e9e824f'
 
@@ -211,7 +211,7 @@ def load_lstm_tfm(game):
     return lstm, tfm, meta
 
 def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
-    """计算指定期数idx对应的隐层状态"""
+    """计算指定期数idx对应的隐层状态（单次调用，仅用于最后一期推荐）"""
     seq = []
     for j in range(idx-seq_len, idx):
         feat = feat_fn(records, j)
@@ -221,6 +221,81 @@ def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
     with torch.no_grad():
         _, h = model(x, return_hidden=True)
     return h.numpy()[0]
+
+
+def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256):
+    """
+    批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
+    返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
+    """
+    if model is None:
+        return None, {}
+    X, idxs = [], []
+    for idx in range(seq_len, len(records)):
+        seq = []; valid = True
+        for j in range(idx-seq_len, idx):
+            feat = feat_fn(records, j)
+            if feat is None: valid=False; break
+            seq.append(list(feat.values()))
+        if not valid: continue
+        X.append(seq); idxs.append(idx)
+    if not X:
+        return None, {}
+    X = np.array(X, dtype=np.float32)
+    model.eval()
+    hs = []
+    with torch.no_grad():
+        for i in range(0, len(X), batch_size):
+            xb = torch.FloatTensor(X[i:i+batch_size])
+            _, h = model(xb, return_hidden=True)
+            hs.append(h.numpy())
+    hs = np.vstack(hs)
+    idx_to_row = {idx:i for i,idx in enumerate(idxs)}
+    return hs, idx_to_row
+
+
+def precompute_omission_kl8(records):
+    """
+    批量一次性计算快乐8所有期数的遗漏向量（O(N*80)，而非原来每次调用O(N*80)倒序扫描导致的O(N²*80)）
+    返回数组 omit_arr[idx] = 80维遗漏归一化向量，与 omission_vec_kl8(records, idx) 完全等价
+    """
+    N = len(records)
+    last_seen = {}   # 号码 -> 最后出现的下标
+    omit_arr = np.zeros((N+1, 80), dtype=np.float32)
+    for idx in range(N+1):
+        avg = max(idx*20/80, 1)
+        for n in range(1, 81):
+            if n in last_seen:
+                omit_arr[idx, n-1] = min((idx-1-last_seen[n]) / avg, 3)
+            else:
+                omit_arr[idx, n-1] = 2.0
+        if idx < N:
+            for n in records[idx]['numbers']:
+                last_seen[n] = idx
+    return omit_arr
+
+
+def precompute_omission_ssq(records):
+    """双色球：33红球+16蓝球=49维遗漏向量，批量预计算"""
+    N = len(records)
+    last_seen_r = {}; last_seen_b = {}
+    omit_arr = np.zeros((N+1, 49), dtype=np.float32)
+    for idx in range(N+1):
+        avg_r = max(idx*6/33, 1); avg_b = max(idx/16, 1)
+        for n in range(1,34):
+            if n in last_seen_r:
+                omit_arr[idx, n-1] = min((idx-1-last_seen_r[n])/avg_r, 3)
+            else:
+                omit_arr[idx, n-1] = 2.0
+        for n in range(1,17):
+            if n in last_seen_b:
+                omit_arr[idx, 33+n-1] = min((idx-1-last_seen_b[n])/avg_b, 3)
+            else:
+                omit_arr[idx, 33+n-1] = 2.0
+        if idx < N:
+            for n in records[idx]['red']: last_seen_r[n]=idx
+            last_seen_b[records[idx]['blue']] = idx
+    return omit_arr
 
 # ══════════════════════════════════════════════════════
 #  ML概率向量 + 遗漏向量
@@ -236,25 +311,7 @@ def extract_ml_prob_vec(ml_pred, game):
         vec.extend([float(probs.get(str(i),0.0))/100.0 for i in range(n)])
     return np.array(vec, dtype=np.float32)
 
-def omission_vec_kl8(records, idx):
-    w = records[:idx]; avg = max(len(w)*20/80,1); vec=[]
-    for n in range(1,81):
-        for i in range(len(w)-1,-1,-1):
-            if n in w[i]['numbers']: vec.append((len(w)-1-i)/avg); break
-        else: vec.append(2.0)
-    return np.clip(vec,0,3).astype(np.float32)
-
-def omission_vec_ssq(records, idx):
-    w = records[:idx]; avg_r=max(len(w)*6/33,1); avg_b=max(len(w)/16,1); vec=[]
-    for n in range(1,34):
-        for i in range(len(w)-1,-1,-1):
-            if n in w[i]['red']: vec.append((len(w)-1-i)/avg_r); break
-        else: vec.append(2.0)
-    for n in range(1,17):
-        for i in range(len(w)-1,-1,-1):
-            if w[i]['blue']==n: vec.append((len(w)-1-i)/avg_b); break
-        else: vec.append(2.0)
-    return np.clip(vec,0,3).astype(np.float32)
+# （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
 
 # ══════════════════════════════════════════════════════
 #  快乐8真实赔率
@@ -271,14 +328,17 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 # ══════════════════════════════════════════════════════
 class IntegratedKL8Env(gym.Env):
     metadata={'render_modes':[]}
-    def __init__(self, records, feat_fn, ml_vec, lstm_model, tfm_model):
+    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        self.lstm_model=lstm_model; self.tfm_model=tfm_model
+        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
+        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
+        self.omit_arr=omit_arr
         self.start=SEQ_LEN+5; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
-        lstm_dim = lstm_model.norm.normalized_shape[0] if lstm_model else 0
-        tfm_dim  = tfm_model.proj.out_features if tfm_model else 0
+        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 80
         self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
@@ -288,11 +348,15 @@ class IntegratedKL8Env(gym.Env):
         feat=self.feat_fn(self.records,self.idx)
         if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
         raw=np.array(list(feat.values()),dtype=np.float32)
-        lh = compute_hidden(self.lstm_model,self.records,self.feat_fn,self.idx) if self.lstm_model else np.array([])
-        th = compute_hidden(self.tfm_model, self.records,self.feat_fn,self.idx) if self.tfm_model  else np.array([])
-        if lh is None: lh=np.zeros(64,dtype=np.float32)
-        if th is None: th=np.zeros(32,dtype=np.float32)
-        om = omission_vec_kl8(self.records,self.idx)
+        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
+            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
+        else:
+            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
+        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
+            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
+        else:
+            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
+        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
         state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
         return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
@@ -315,14 +379,17 @@ class IntegratedKL8Env(gym.Env):
 
 class IntegratedSSQEnv(gym.Env):
     metadata={'render_modes':[]}
-    def __init__(self, records, feat_fn, ml_vec, lstm_model, tfm_model):
+    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        self.lstm_model=lstm_model; self.tfm_model=tfm_model
+        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
+        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
+        self.omit_arr=omit_arr
         self.start=SEQ_LEN+5; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
-        lstm_dim = lstm_model.norm.normalized_shape[0] if lstm_model else 0
-        tfm_dim  = tfm_model.proj.out_features if tfm_model else 0
+        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 49
         self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
@@ -332,11 +399,15 @@ class IntegratedSSQEnv(gym.Env):
         feat=self.feat_fn(self.records,self.idx)
         if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
         raw=np.array(list(feat.values()),dtype=np.float32)
-        lh = compute_hidden(self.lstm_model,self.records,self.feat_fn,self.idx) if self.lstm_model else np.array([])
-        th = compute_hidden(self.tfm_model, self.records,self.feat_fn,self.idx) if self.tfm_model  else np.array([])
-        if lh is None: lh=np.zeros(64,dtype=np.float32)
-        if th is None: th=np.zeros(32,dtype=np.float32)
-        om = omission_vec_ssq(self.records,self.idx)
+        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
+            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
+        else:
+            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
+        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
+            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
+        else:
+            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
+        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
         state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
         return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
@@ -397,38 +468,55 @@ def run_kl8_daily(records, ml_pred):
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
     lstm, tfm, meta = load_lstm_tfm('kl8')
 
-    def make_env(): return IntegratedKL8Env(records, fkl8, ml_vec, lstm, tfm)
-    vec_env = make_vec_env(make_env, n_envs=2)
+    print("  批量预计算 LSTM/TFM 隐层状态…")
+    t0 = time.time()
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s（LSTM:{lstm_hidden.shape if lstm_hidden is not None else None} TFM:{tfm_hidden.shape if tfm_hidden is not None else None}）")
+
+    print("  批量预计算遗漏向量…")
+    t0 = time.time()
+    omit_arr = precompute_omission_kl8(records)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+
+    def make_env():
+        return IntegratedKL8Env(records, fkl8, ml_vec,
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+    vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('kl8')
     is_new = model is None
+    t0 = time.time()
     if is_new:
-        print("  首次训练（10万步）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
+        print("  首次训练（3万步）…")
+        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                    n_epochs=8, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
                     verbose=0, device='cpu')
-        model.learn(total_timesteps=100000, progress_bar=False)
+        model.learn(total_timesteps=30000, progress_bar=False)
     else:
         model.set_env(vec_env)
-        print("  增量微调（1万步，基于最新数据）…")
-        model.learn(total_timesteps=10000, reset_num_timesteps=False, progress_bar=False)
+        print("  增量微调（5000步，基于最新数据）…")
+        model.learn(total_timesteps=5000, reset_num_timesteps=False, progress_bar=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
 
     save_ppo(model, 'kl8')
+
+    def build_state(idx):
+        feat = fkl8(records, idx)
+        if feat is None: return None
+        raw = np.array(list(feat.values()),dtype=np.float32)
+        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
+        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
+        om = omit_arr[idx]
+        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
+        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
     # 回测最近30期
     start = max(SEQ_LEN+5, len(records)-30)
     total_net=0; games=0
     for idx in range(start, len(records)-1):
-        feat = fkl8(records, idx)
-        if feat is None: continue
-        raw = np.array(list(feat.values()),dtype=np.float32)
-        lh = compute_hidden(lstm,records,fkl8,idx) if lstm else np.zeros(64,dtype=np.float32)
-        th = compute_hidden(tfm, records,fkl8,idx) if tfm  else np.zeros(32,dtype=np.float32)
-        if lh is None: lh=np.zeros(64,dtype=np.float32)
-        if th is None: th=np.zeros(32,dtype=np.float32)
-        om = omission_vec_kl8(records, idx)
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        state = np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        state = build_state(idx)
+        if state is None: continue
         action,_ = model.predict(state, deterministic=True)
         selected=[i+1 for i in range(80) if action[i]]
         if len(selected)<4: selected=list(range(1,5))
@@ -441,17 +529,9 @@ def run_kl8_daily(records, ml_pred):
 
     # 今日推荐
     idx = len(records)-1
-    feat = fkl8(records, idx)
+    state = build_state(idx)
     selected = []
-    if feat:
-        raw = np.array(list(feat.values()),dtype=np.float32)
-        lh = compute_hidden(lstm,records,fkl8,idx) if lstm else np.zeros(64,dtype=np.float32)
-        th = compute_hidden(tfm, records,fkl8,idx) if tfm  else np.zeros(32,dtype=np.float32)
-        if lh is None: lh=np.zeros(64,dtype=np.float32)
-        if th is None: th=np.zeros(32,dtype=np.float32)
-        om = omission_vec_kl8(records, idx)
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        state = np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+    if state is not None:
         action,_ = model.predict(state, deterministic=True)
         selected = sorted([i+1 for i in range(80) if action[i]])
         if len(selected)<4: selected=list(range(1,5))
@@ -466,52 +546,63 @@ def run_ssq_daily(records, ml_pred):
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
     lstm, tfm, meta = load_lstm_tfm('ssq')
 
-    def make_env(): return IntegratedSSQEnv(records, fssq, ml_vec, lstm, tfm)
-    vec_env = make_vec_env(make_env, n_envs=2)
+    print("  批量预计算 LSTM/TFM 隐层状态…")
+    t0 = time.time()
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+
+    print("  批量预计算遗漏向量…")
+    t0 = time.time()
+    omit_arr = precompute_omission_ssq(records)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+
+    def make_env():
+        return IntegratedSSQEnv(records, fssq, ml_vec,
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+    vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('ssq')
     is_new = model is None
+    t0 = time.time()
     if is_new:
-        print("  首次训练（6万步）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
+        print("  首次训练（2万步）…")
+        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                    n_epochs=8, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
                     verbose=0, device='cpu')
-        model.learn(total_timesteps=60000, progress_bar=False)
+        model.learn(total_timesteps=20000, progress_bar=False)
     else:
         model.set_env(vec_env)
-        print("  增量微调（8000步）…")
-        model.learn(total_timesteps=8000, reset_num_timesteps=False, progress_bar=False)
+        print("  增量微调（3000步）…")
+        model.learn(total_timesteps=3000, reset_num_timesteps=False, progress_bar=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
 
     save_ppo(model, 'ssq')
 
+    def build_state(idx):
+        feat = fssq(records, idx)
+        if feat is None: return None
+        raw = np.array(list(feat.values()),dtype=np.float32)
+        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
+        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
+        om = omit_arr[idx]
+        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
+        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+
     start=max(SEQ_LEN+5, len(records)-30); correct=0; total=0
     for idx in range(start, len(records)-1):
-        feat = fssq(records, idx)
-        if feat is None: continue
-        raw = np.array(list(feat.values()),dtype=np.float32)
-        lh = compute_hidden(lstm,records,fssq,idx) if lstm else np.zeros(64,dtype=np.float32)
-        th = compute_hidden(tfm, records,fssq,idx) if tfm  else np.zeros(32,dtype=np.float32)
-        if lh is None: lh=np.zeros(64,dtype=np.float32)
-        if th is None: th=np.zeros(32,dtype=np.float32)
-        om = omission_vec_ssq(records, idx)
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        state = np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        state = build_state(idx)
+        if state is None: continue
         action,_ = model.predict(state, deterministic=True)
         if action+1==records[idx]['blue']: correct+=1
         total+=1
     blue_acc = round(correct/total*100,1) if total else 0
     print(f"  蓝球回测准确率（近{total}期）: {blue_acc}%（随机基准6.25%）")
 
-    idx=len(records)-1; feat=fssq(records,idx); blue_pred=None
-    if feat:
-        raw=np.array(list(feat.values()),dtype=np.float32)
-        lh = compute_hidden(lstm,records,fssq,idx) if lstm else np.zeros(64,dtype=np.float32)
-        th = compute_hidden(tfm, records,fssq,idx) if tfm  else np.zeros(32,dtype=np.float32)
-        if lh is None: lh=np.zeros(64,dtype=np.float32)
-        if th is None: th=np.zeros(32,dtype=np.float32)
-        om = omission_vec_ssq(records, idx)
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        state = np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+    idx=len(records)-1
+    state = build_state(idx)
+    blue_pred=None
+    if state is not None:
         action,_ = model.predict(state, deterministic=True)
         blue_pred = int(action)+1
 
