@@ -324,16 +324,8 @@ try:
 except Exception as e:
     print(f"  ! 异常: {e}")
 
-# ── 更新 prediction.json ──────────────────────────────
-print("\n读取现有 prediction.json…")
-existing = {}
-raw_pred = gh_raw('prediction.json')
-if raw_pred:
-    try: existing = json.loads(raw_pred)
-    except Exception: pass
-
-existing.setdefault('dl_result', {})
-existing['dl_result']['lstm_tfm'] = {
+# ── 写入独立文件 dl_lstm_tfm.json（不再读取/合并 prediction.json，速度更快）──
+out = {
     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     'models': 'LSTM + Transformer（每周全量训练）',
     'seq_len': SEQ_LEN, 'device': str(DEVICE),
@@ -341,12 +333,12 @@ existing['dl_result']['lstm_tfm'] = {
     'note': '权重已存入 Kaggle Dataset，供每日 PPO 强化学习加载使用。',
 }
 
-pred_json = json.dumps(existing, ensure_ascii=False, indent=2)
+out_json = json.dumps(out, ensure_ascii=False, indent=2)
 if not GH_TOKEN:
     print("\n[DRY RUN] 未配置 GH_TOKEN")
 else:
-    print("\n推送 prediction.json…")
-    gh_put('prediction.json', pred_json, f"LSTM+TFM每周训练 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("\n推送 dl_lstm_tfm.json…")
+    gh_put('dl_lstm_tfm.json', out_json, f"LSTM+TFM每周训练 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✓ 完成")
 
 print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
