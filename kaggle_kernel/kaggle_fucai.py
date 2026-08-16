@@ -619,6 +619,14 @@ def train_target(X, y, feat_names, last_X, tname):
     new_data  = n - cached_n
     has_cache = bool(cached.get('models'))
 
+    # 特征维度校验：若特征工程改了（当前维度与缓存时不一致），
+    # 缓存模型对新特征向量会预测出错甚至崩溃，强制作废缓存重新全量训练
+    cached_feat_n = cached.get('feat_count')
+    cur_feat_n = X.shape[1] if hasattr(X, 'shape') else len(feat_names)
+    if has_cache and cached_feat_n is not None and cached_feat_n != cur_feat_n:
+        print(f"    [{tname}] 特征维度变化（缓存{cached_feat_n} → 当前{cur_feat_n}），缓存作废，强制全量重训")
+        has_cache = False
+
     if has_cache and new_data < RETRAIN_EVERY:
         # ── 增量模式：直接用缓存模型 ──
         print(f"    [{tname}] 缓存模式（缓存{cached_n}期，新增{new_data}期，跳过重训）")
@@ -665,7 +673,7 @@ def train_target(X, y, feat_names, last_X, tname):
             imp=final['rf'].feature_importances_
             fi=[{'name':str(k),'score':round(float(v),4)} for k,v in sorted(zip(feat_names,imp),key=lambda x:-x[1])[:5]]
         # 更新缓存
-        model_cache[tname]={'models':final,'trained_n':n,'accuracy':acc,'feature_importance':fi}
+        model_cache[tname]={'models':final,'trained_n':n,'accuracy':acc,'feature_importance':fi,'feat_count':cur_feat_n}
 
     # ── 用 last_X 预测真正下一期 ──
     px = last_X if last_X is not None else X[-1:]
