@@ -41,7 +41,18 @@ def _get_secrets_client(retries=5, delay=4):
                 print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
     return None
 
+SECRETS_DATASET_MOUNT = '/kaggle/input/fucai-secrets/secrets.json'
+_dataset_secrets = None
+
+def _load_secrets_from_dataset():
+    try:
+        with open(SECRETS_DATASET_MOUNT) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
 def get_secret(name, retries=3, delay=3):
+    global _dataset_secrets
     client = _get_secrets_client()
     if client is not None:
         for attempt in range(retries):
@@ -56,8 +67,14 @@ def get_secret(name, retries=3, delay=3):
                     print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
                     time.sleep(delay)
                 else:
-                    print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
-    return os.environ.get(name, '')
+                    print(f"  [Secret] {name} kaggle_secrets重试{retries}次仍失败: {e}")
+
+    if _dataset_secrets is None:
+        _dataset_secrets = _load_secrets_from_dataset()
+    if name in _dataset_secrets and _dataset_secrets[name]:
+        print(f"  [Secret] {name} 从 fucai-secrets Dataset 读取成功")
+        return _dataset_secrets[name]
+
     return os.environ.get(name, '')
 
 _HARDCODED_GH_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets      # ← 新的 GitHub Token
