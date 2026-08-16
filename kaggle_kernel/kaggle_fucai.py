@@ -728,10 +728,25 @@ def tgtssq(r):
             'red_zone_dom':zone_dom,
             'gap_grp':0 if max_gap<=5 else(1 if max_gap<=10 else 2)}
 def tgtkl8(r):
+    nums = sorted(r['numbers'])
     odd=sum(1 for x in r['numbers'] if x%2!=0)
+    big=sum(1 for x in r['numbers'] if x>40)
     zn=[sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+    five=[sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
     tt=sum(r['numbers'])
-    return {'odd_grp':0 if odd<9 else(1 if odd<=11 else 2),'zone_dom':int(np.argmax(zn)),'tot_grp':0 if tt<640 else(1 if tt<820 else 2)}
+    cg=0; inc=False
+    for i in range(len(nums)-1):
+        if nums[i+1]-nums[i]==1:
+            if not inc: cg+=1; inc=True
+        else: inc=False
+    rng = nums[-1]-nums[0]
+    return {'odd_grp':0 if odd<9 else(1 if odd<=11 else 2),
+            'zone_dom':int(np.argmax(zn)),
+            'tot_grp':0 if tt<640 else(1 if tt<820 else 2),
+            'big_grp':0 if big<9 else(1 if big<=11 else 2),
+            'five_dom':int(np.argmax(five)),
+            'consec_grp':0 if cg==0 else(1 if cg<=2 else 2),
+            'range_grp':0 if rng<60 else(1 if rng<70 else 2)}
 
 # 目标变量（单条记录）
 def markov3d(records):
@@ -983,8 +998,28 @@ def reckl8(records, ml, om):
     tot_label = {0:'低(<640)', 1:'中(640-819)', 2:'高(≥820)'}.get(
         tot_m.get('prediction', {}).get('value', 1) if tot_m else 1, '中(640-819)')
 
-    # 候选池：热号+遗漏+近10期热号
-    pool = list(set([x[0] for x in freq10.most_common(12)] + hot[:18] + overdue[:10]))
+    # 五行分布ML预测：给预测出的主力段额外加权候选
+    five_m = ml.get('five_dom', {})
+    five_pred = five_m.get('prediction', {}).get('value', 2) if five_m else 2
+    five_ranges = [(1,16),(17,32),(33,48),(49,64),(65,80)]
+    five_name = ['1-16','17-32','33-48','49-64','65-80'][five_pred if 0<=five_pred<=4 else 2]
+    five_lo, five_hi = five_ranges[five_pred if 0<=five_pred<=4 else 2]
+    five_bonus = [n for n in range(five_lo, five_hi+1) if freq30.get(n,0)>0][:6]
+
+    big_m = ml.get('big_grp', {})
+    big_pred = big_m.get('prediction', {}).get('value', 1) if big_m else 1
+    big_label = {0:'少(<9个)',1:'中(9-11个)',2:'多(≥12个)'}.get(big_pred, '中(9-11个)')
+
+    consec_m = ml.get('consec_grp', {})
+    consec_label = {0:'无连续',1:'少量连续(1-2组)',2:'较多连续(≥3组)'}.get(
+        consec_m.get('prediction',{}).get('value',1) if consec_m else 1, '少量连续(1-2组)')
+
+    range_m = ml.get('range_grp', {})
+    range_label = {0:'集中(极差<60)',1:'适中(60-69)',2:'分散(≥70)'}.get(
+        range_m.get('prediction',{}).get('value',1) if range_m else 1, '适中(60-69)')
+
+    # 候选池：热号+遗漏+近10期热号+ML预测主力五行段加权
+    pool = list(set([x[0] for x in freq10.most_common(12)] + hot[:18] + overdue[:10] + five_bonus))
     if len(pool) < 35:
         pool += random.sample([n for n in range(1, 81) if n not in pool], 35 - len(pool))
 
@@ -1029,10 +1064,14 @@ def reckl8(records, ml, om):
         'plays':              plays,
         'zone_dominant_pred': zone_name,
         'total_range_pred':   tot_label,
+        'five_dominant_pred': five_name,
+        'big_count_pred':     big_label,
+        'consec_pred':        consec_label,
+        'range_pred':         range_label,
         'hot_nums':  [int(x) for x in hot[:15]],
         'cold_nums': [int(x) for x in [x[0] for x in freq30.most_common()[-10:]]],
         'overdue':   [int(x) for x in overdue[:10]],
-        'note': '综合ML区间预测+遗漏分析+区间均衡，选四3注/选五3注/复式1注/选六3注/选九2注/选十1注，仅供娱乐。'
+        'note': '综合ML区间预测(区间/五行/大数/连续/极差)+遗漏分析+区间均衡，选四3注/选五3注/复式1注/选六3注/选九2注/选十1注，仅供娱乐。'
     }
 
 # 回测
@@ -1078,7 +1117,7 @@ def run_ml(history):
     cfg=[
         ('3d',  f3d,   tgt3d,  ['bai','shi','ge','sum_grp','odd']),
         ('ssq', fssq,  tgtssq, ['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']),
-        ('kl8', fkl8,  tgtkl8, ['odd_grp','zone_dom','tot_grp']),
+        ('kl8', fkl8,  tgtkl8, ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']),
     ]
     predictions={}
     for game,feat_fn,tgt_fn,tkeys in cfg:
@@ -1119,6 +1158,8 @@ def run_ml(history):
             rec=reckl8(records,ml_res['models'],om)
             ai_ctx={'game':'快乐8','data_count':len(records),'latest_date':records[-1]['date'],
                     'zone_pred':rec.get('zone_dominant_pred',''),'total_pred':rec.get('total_range_pred',''),
+                    'five_pred':rec.get('five_dominant_pred',''),'big_pred':rec.get('big_count_pred',''),
+                    'consec_pred':rec.get('consec_pred',''),'range_pred':rec.get('range_pred',''),
                     'overdue':rec.get('overdue',[]),'hot_nums':rec.get('hot_nums',[])}
         predictions[game]={**ml_res,'recommendation':rec,'ai_context':ai_ctx}
         print(f"  ✓ {game} 完成")
