@@ -16,24 +16,50 @@ from datetime import datetime, date
 from collections import Counter
 warnings.filterwarnings('ignore')
 
-def get_secret(name, retries=3, delay=3):
+_secrets_client = None
+_secrets_client_ready = False
+
+def _get_secrets_client(retries=5, delay=4):
     """
-    读取 Kaggle Secret，带重试机制。
-    kaggle_secrets 服务偶发 'Connection error trying to communicate with service'，
-    单次失败不代表 Secret 没挂载，重试几次通常就能成功。
+    只创建一次 UserSecretsClient 实例并复用。
+    每次 UserSecretsClient() 都要重新握手，是导致偶发连接失败的根源，
+    改成全局只连一次、所有 Secret 共用这个连接，大幅降低失败率。
     """
+    global _secrets_client, _secrets_client_ready
+    if _secrets_client_ready:
+        return _secrets_client
     for attempt in range(retries):
         try:
             from kaggle_secrets import UserSecretsClient
-            v = UserSecretsClient().get_secret(name)
-            if v:
-                return v
+            _secrets_client = UserSecretsClient()
+            _secrets_client_ready = True
+            print(f"  [Secrets] Client 连接成功（第{attempt+1}次尝试）")
+            return _secrets_client
         except Exception as e:
             if attempt < retries - 1:
-                print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                print(f"  [Secrets] Client 连接失败（第{attempt+1}次）: {e}，{delay}秒后重试…")
                 time.sleep(delay)
             else:
-                print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
+                print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
+    return None
+
+def get_secret(name, retries=3, delay=3):
+    client = _get_secrets_client()
+    if client is not None:
+        for attempt in range(retries):
+            try:
+                v = client.get_secret(name)
+                if v:
+                    return v
+                else:
+                    # 空值：可能是该 Secret 没在此 Kernel 挂载，不必重试
+                    break
+            except Exception as e:
+                if attempt < retries - 1:
+                    print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                    time.sleep(delay)
+                else:
+                    print(f"  [Secret] {name} 重试{retries}次仍失败: {e}")
     return os.environ.get(name, '')
 
 # ── 把你的 Token 填在这里（Kaggle Secrets 不稳定时的兜底）──
