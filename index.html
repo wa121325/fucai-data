@@ -2168,10 +2168,16 @@ function renderBacktest(bt){
   if(!bt||!bt.games||Object.keys(bt.games).length===0){
     el.innerHTML='<div class="status">暂无回测数据（首次运行时无上期预测可对比）</div>'; return;
   }
-  let html=`<div style="font-size:12px;color:#888;margin-bottom:10px;">回测日期：${bt.date||'未知'}</div>`;
+  let html=`<div style="font-size:12px;color:#888;margin-bottom:10px;">脚本运行时间：${bt.date||'未知'}</div>`;
   const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
   for(const [game,info] of Object.entries(bt.games)){
     html+=`<div class="pred-model-card"><div class="pred-model-title">${gNames[game]||game} 回测</div>`;
+    // 显式标出：这份被检验的推荐是什么时候生成的、实际对比的是哪一期开奖，
+    // 让预测和开奖的时间对应关系可以被肉眼核实，不再靠猜
+    html+=`<div style="font-size:11px;color:#888;margin-bottom:6px;padding:6px 8px;background:rgba(255,255,255,.05);border-radius:6px;">
+      📋 被检验的推荐生成于：<b style="color:#f1d688;">${info.prediction_generated_at||'未知'}</b><br>
+      🎯 实际对比的开奖期号：<b style="color:#f1d688;">${info.actual_qihao||'—'}</b>（${info.actual_date||'—'}）
+    </div>`;
     if(game==='3d'){
       html+=`<div>实际开奖：<b>${(info.actual||[]).join(' ')}</b></div>`;
       html+=`<div>完全命中：<span class="${info.hit_count>0?'bt-hit':'bt-miss'}">${info.hit_count||0}注</span>`;
