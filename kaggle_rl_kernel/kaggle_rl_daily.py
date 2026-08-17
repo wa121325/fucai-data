@@ -452,8 +452,8 @@ def extract_ml_prob_vec(ml_pred, game, verbose=True):
     vec = []
     models_data = ml_pred.get('models', {})
     # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
-    if game=='3d': tk=['bai','shi','ge','sum_grp','odd']; nc=[10,10,10,3,4]; offsets=[0,0,0,0,0]
-    elif game=='ssq': tk=['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']; nc=[16,7,3,3,3,3]; offsets=[1,0,0,0,0,0]
+    if game=='3d': tk=['sum_grp','odd','group_type','big','span_grp','road_dom','arith']; nc=[3,4,3,4,3,3,2]; offsets=[0,0,0,0,0,0,0]
+    elif game=='ssq': tk=['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']; nc=[7,3,3,3,3,7,6]; offsets=[0,0,0,0,0,0,0]
     else: tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']; nc=[3,4,3,3,5,3,3]; offsets=[0,0,0,0,0,0,0]
     found, missing = [], []
     for tkey,n,off in zip(tk,nc,offsets):
@@ -478,6 +478,28 @@ KL8_PAYOUT = {(1,1):2,(2,2):10,(3,3):30,(4,4):100,(4,3):3,(4,2):1,(5,5):200,(5,4
     (10,10):18000,(10,9):600,(10,8):30,(10,7):3,(10,6):1}
 TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
+
+def normalize_state_segments(*segments):
+    """
+    分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
+    问题根源：raw特征里像"号码总和均值"这类聚合量级在几百到近千，
+    而遗漏值(0-3)、ML概率(0-1)量级很小，如果整个向量共用一个全局最大值做归一化，
+    遗漏和ML概率信号会被压缩到接近0，模型实际上"看不到"这些真正能区分号码好坏的关键信息，
+    只能学到一些跟具体选哪个球无关的全局统计偏向，导致策略跟状态基本脱钩、
+    收敛到一个固定的、看似随意的偏好（这次表现为一直偏向大号）。
+    修复：每一段各自独立按自己的最大值缩放到[-1,1]附近，再拼接，
+    确保任何一段都不会因为量级差异淹没其它段的信号。
+    """
+    normed = []
+    for seg in segments:
+        seg = np.asarray(seg, dtype=np.float32)
+        if seg.size == 0:
+            normed.append(seg)
+            continue
+        m = np.abs(seg).max()
+        normed.append(seg / (m + 1e-8) if m > 0 else seg)
+    state = np.concatenate(normed).astype(np.float32)
+    return np.clip(state, -5, 5)
 
 # ══════════════════════════════════════════════════════
 #  集成环境
@@ -526,8 +548,7 @@ class IntegratedKL8Env(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
 
-        state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
-        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -595,8 +616,7 @@ class IntegratedSSQEnv(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
 
-        state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
-        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -673,8 +693,7 @@ class Integrated3DEnv(gym.Env):
         else:
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
-        state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
-        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -785,8 +804,7 @@ def run_kl8_daily(records, ml_pred):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
     start = max(SEQ_LEN+30, len(records)-30)
@@ -921,8 +939,7 @@ def run_ssq_daily(records, ml_pred):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
@@ -1030,8 +1047,7 @@ def run_3d_daily(records, ml_pred):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
-        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
+        return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     # 回测最近30期：统计位命中数分布 + 全中次数
     start=max(SEQ_LEN+5, len(records)-30); total=0
