@@ -1101,15 +1101,22 @@ def daily_backtest(history, prev_pred):
         recs=history.get(game,[])
         if not isinstance(recs,list) or not recs or game not in (prev_pred or {}): continue
         latest=recs[-1]; rec=prev_pred[game].get('recommendation',{})
+        # 显式记录：这份推荐是什么时候生成的、实际对比的是哪一期开奖
+        # （避免"回测日期"这种模糊标签让人无法验证预测和开奖到底对不对得上）
+        pred_generated_at = prev_pred[game].get('updated_at','未知')
+        actual_qihao = latest.get('qihao','—')
+        actual_date  = latest.get('date','—')
+        meta = {'prediction_generated_at':pred_generated_at,
+                'actual_qihao':actual_qihao,'actual_date':actual_date}
         if game=='3d':
             actual=latest.get('digits',[]); grps=rec.get('groups',[])
             hits=[g for g in grps if g==actual]
             part=[g for g in grps if sum(1 for i,v in enumerate(g) if i<len(actual) and v==actual[i])>=2]
-            report['games'][game]={'actual':actual,'hit_count':len(hits),'partial_count':len(part)}
+            report['games'][game]={**meta,'actual':actual,'hit_count':len(hits),'partial_count':len(part)}
         elif game=='ssq':
             ar=sorted(latest.get('red',[])); ab=latest.get('blue',0); grps=rec.get('groups',[])
             res=[{'red_hit':len(set(g.get('red',[]))&set(ar)),'blue_hit':int(g.get('blue')==ab)} for g in grps]
-            report['games'][game]={'actual_red':ar,'actual_blue':ab,'group_results':res,
+            report['games'][game]={**meta,'actual_red':ar,'actual_blue':ab,'group_results':res,
                                    'best_red_hit':max((x['red_hit'] for x in res),default=0)}
         elif game=='kl8':
             actual=set(latest.get('numbers',[])); plays=rec.get('plays',{})
@@ -1118,7 +1125,7 @@ def daily_backtest(history, prev_pred):
                 grps=pd.get('groups',[]); balls=pd.get('balls',0); name=pd.get('name',pk)
                 gr=[{'hit':len(actual&set(g if isinstance(g,list) else [])),'balls':balls,'won':len(actual&set(g if isinstance(g,list) else []))==balls} for g in grps]
                 play_results[pk]={'name':name,'balls':balls,'groups':gr,'any_won':any(x['won'] for x in gr),'best_hit':max((x['hit'] for x in gr),default=0)}
-            report['games'][game]={'actual':sorted(actual),'play_results':play_results,'best_hit':max((pr['best_hit'] for pr in play_results.values()),default=0)}
+            report['games'][game]={**meta,'actual':sorted(actual),'play_results':play_results,'best_hit':max((pr['best_hit'] for pr in play_results.values()),default=0)}
     return report
 
 def run_ml(history):
