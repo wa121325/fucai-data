@@ -799,22 +799,46 @@ def run_kl8_daily(records, ml_pred):
     # 今日推荐：用同一套打分对全部80个球排序，取不同TopN覆盖各玩法
     idx = len(records)-1
     state = build_state(idx)
-    ranked = []
+    # 随机采样3次，得到3份不同的排序结果（用于生成每个玩法下的多组推荐，避免每组都完全相同）
+    rankings = []
     if state is not None:
-        action,_ = model.predict(state, deterministic=True)
-        order = np.argsort(action)[::-1]   # 分数从高到低排序（全部80个球）
-        ranked = [i+1 for i in order]
+        random.seed(int(date.today().strftime('%Y%m%d')))
+        for _ in range(3):
+            action,_ = model.predict(state, deterministic=False)
+            order = np.argsort(action)[::-1]
+            rankings.append([i+1 for i in order])
+        # 保底：若采样失败导致列表为空，用一次确定性预测填充
+        if not rankings:
+            action,_ = model.predict(state, deterministic=True)
+            order = np.argsort(action)[::-1]
+            rankings = [[i+1 for i in order]] * 3
 
-    def top_n(n): return sorted(ranked[:n]) if ranked else []
+    def group(ranking_idx, n):
+        return sorted(rankings[ranking_idx][:n]) if rankings else []
 
-    picks_by_n = {n: top_n(n) for n in [4,5,6,9,10]}
+    # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
+    plays = {
+        'xuan4':    {'name':'选四','balls':4, 'tip':'PPO全量打分排序',
+                     'groups':[group(0,4), group(1,4), group(2,4)]},
+        'xuan5':    {'name':'选五','balls':5, 'tip':'PPO全量打分排序',
+                     'groups':[group(0,5), group(1,5), group(2,5)]},
+        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注',
+                     'groups':[group(0,8)]},
+        'xuan6':    {'name':'选六','balls':6, 'tip':'PPO全量打分排序（回测标准）',
+                     'groups':[group(0,6), group(1,6), group(2,6)]},
+        'xuan9':    {'name':'选九','balls':9, 'tip':'PPO全量打分排序',
+                     'groups':[group(0,9), group(1,9)]},
+        'xuan10':   {'name':'选十','balls':10,'tip':'PPO全量打分排序',
+                     'groups':[group(0,10)]},
+    }
+    picks_by_n = {4:group(0,4), 5:group(0,5), 6:group(0,6), 9:group(0,9), 10:group(0,10)}
 
     return {'avg_net_per_game':avg_net,'games_tested':games,
-            'ppo_selected':picks_by_n[6],   # 兼容旧字段，默认给选六结果
-            'ppo_ranked_pool':ranked,       # 完整80球排序结果，前端可自行截取TopN
-            'picks_by_n':picks_by_n,        # 各玩法直接可用的推荐
+            'ppo_selected':picks_by_n[6],   # 兼容旧字段
+            'picks_by_n':picks_by_n,        # 兼容旧字段
+            'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
             'is_first_train':is_new,
-            'note':f'PPO对全部80个球连续打分排序（非候选池预筛），回测净收益{avg_net}元/期（选六标准）'}
+            'note':f'PPO对全部80个球连续打分排序（随机采样生成多组），回测净收益{avg_net}元/期（选六标准）'}
 
 
 def run_ssq_daily(records, ml_pred):
@@ -895,22 +919,35 @@ def run_ssq_daily(records, ml_pred):
     avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
     print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
 
-    # 今日推荐
+    # 今日推荐：随机采样生成6注不同组合（红球6个+蓝球1个），而非固定输出1注
     idx = len(records)-1
     state = build_state(idx)
-    red_selected=[]; blue_pred=None
+    groups=[]
     if state is not None:
-        action,_ = model.predict(state, deterministic=True)
-        red_scores = action[:33]; blue_scores = action[33:]
-        top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-        red_selected = sorted([i+1 for i in top_idx])
-        blue_pred = int(np.argmax(blue_scores))+1
+        random.seed(int(date.today().strftime('%Y%m%d')))
+        seen=set(); attempts=0
+        while len(groups)<6 and attempts<30:
+            action,_ = model.predict(state, deterministic=False)
+            red_scores = action[:33]; blue_scores = action[33:]
+            top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
+            red_sel = tuple(sorted([i+1 for i in top_idx]))
+            blue_sel = int(np.argmax(blue_scores))+1
+            key=(red_sel, blue_sel)
+            if key not in seen:
+                seen.add(key)
+                groups.append({'red': list(red_sel), 'blue': blue_sel})
+            attempts+=1
+        while len(groups)<6:
+            groups.append(groups[-1] if groups else {'red':[],'blue':1})
+    # 兼容旧字段：主推荐仍取第一注
+    red_selected = groups[0]['red'] if groups else []
+    blue_pred = groups[0]['blue'] if groups else None
 
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
             'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
-            'is_first_train':is_new,
-            'note':f'PPO红球33全量打分排序（非候选池预筛）+蓝球联合优化，红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%'}
+            'ppo_groups':groups,'is_first_train':is_new,
+            'note':f'PPO红球33全量打分排序+蓝球联合优化（随机采样生成6注），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%'}
 
 
 def run_3d_daily(records, ml_pred):
@@ -983,15 +1020,29 @@ def run_3d_daily(records, ml_pred):
     exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
     avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
 
-    idx=len(records)-1; state=build_state(idx); pred=None
+    idx=len(records)-1; state=build_state(idx)
+    groups=[]
     if state is not None:
-        action,_ = model.predict(state, deterministic=True)
-        pred=[int(action[0]),int(action[1]),int(action[2])]
+        # 用随机采样（deterministic=False）生成6注不同组合，而非固定输出1注
+        # 采样自PPO学到的策略分布，不是瞎猜——每次采样都基于同一状态向量（含ML/DL/遗漏全部信息）
+        random.seed(int(date.today().strftime('%Y%m%d')))
+        seen=set(); attempts=0
+        while len(groups)<6 and attempts<30:
+            action,_ = model.predict(state, deterministic=False)
+            combo=[int(action[0]),int(action[1]),int(action[2])]
+            key=tuple(combo)
+            if key not in seen:
+                seen.add(key); groups.append(combo)
+            attempts+=1
+        # 若采样多次仍不足6注（策略过于集中），用最后一次结果补齐
+        while len(groups)<6:
+            groups.append(groups[-1] if groups else [0,0,0])
+    pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注
 
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
-            'ppo_pred':pred,'is_first_train':is_new,
-            'note':f'PPO直接预测百十个位组合，近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
+            'ppo_pred':pred,'ppo_groups':groups,'is_first_train':is_new,
+            'note':f'PPO直接预测百十个位组合（随机采样生成6注），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
