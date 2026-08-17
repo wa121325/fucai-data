@@ -2,10 +2,10 @@ name: 每日 PPO 强化学习微调
 
 on:
   workflow_run:
-    workflows: ["每日 LSTM+Transformer 训练（增量微调）"]   # 必须和 lstm_daily.yml 的 name 完全一致
+    workflows: ["触发 Kaggle 运行"]   # 必须和 crawl.yml 的 name 完全一致
     types: [completed]
   schedule:
-    - cron: '0 16 * * *'    # 兜底：万一上游没触发，0点左右强制兜底跑一次
+    - cron: '0 15 * * *'    # 兜底：万一上游没触发，23:00左右强制兜底跑一次
   workflow_dispatch:
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
         run: kaggle kernels push -p ./kaggle_rl_kernel/
       - name: 等待 Kaggle 初始化 Kernel
         run: sleep 90
-      - name: 等待完成（最多30分钟，增量微调很快）
+      - name: 等待完成（最多30分钟）
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
