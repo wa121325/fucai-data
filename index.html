@@ -1621,22 +1621,34 @@ function getMlContext(type){
         const md = rlGame.match_distribution||{};
         lines.push(`  奖励函数：按位命中数给分，三位全中（直选）额外奖励`);
         lines.push(`  回测（近${rlGame.games_tested??'—'}期）：平均命中${rlGame.avg_match_digits??'—'}位，全中率${rlGame.exact_hit_rate_pct??'—'}%`);
-        if(rlGame.ppo_pred) lines.push(`  PPO预测组合：${rlGame.ppo_pred.join('')}`);
+        if(rlGame.ppo_groups?.length) lines.push(`  PPO推荐（${rlGame.ppo_groups.length}注）：${rlGame.ppo_groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
+        else if(rlGame.ppo_pred) lines.push(`  PPO预测组合：${rlGame.ppo_pred.join('')}`);
       } else if(type==='kl8'){
-        lines.push(`  方法：候选池打分排序（非直接组合选择），奖励函数=快乐8真实赔率净收益`);
+        lines.push(`  方法：对全部80个球连续打分排序（非候选池预筛），奖励函数=快乐8真实赔率净收益`);
         lines.push(`  回测（近${rlGame.games_tested??'—'}期，选六标准）：平均净收益${rlGame.avg_net_per_game??'—'}元/期`);
-        const pbn = rlGame.picks_by_n;
-        if(pbn){
-          for(const n of [4,5,6,9,10]){
-            const nums = pbn[n]||pbn[String(n)];
-            if(nums?.length) lines.push(`  PPO选${['','','','','四','五','六','','','九','十'][n]}推荐：${nums.join(' ')}`);
+        if(rlGame.plays){
+          const playNames={xuan4:'选四',xuan5:'选五',xuan5_fu:'选五复式',xuan6:'选六',xuan9:'选九',xuan10:'选十'};
+          for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
+            const play = rlGame.plays[pk];
+            if(play?.groups?.length) lines.push(`  PPO${playNames[pk]}：${play.groups.map(g=>`[${g.join(' ')}]`).join(' ')}`);
+          }
+        } else {
+          const pbn = rlGame.picks_by_n;
+          if(pbn){
+            for(const n of [4,5,6,9,10]){
+              const nums = pbn[n]||pbn[String(n)];
+              if(nums?.length) lines.push(`  PPO选${['','','','','四','五','六','','','九','十'][n]}推荐：${nums.join(' ')}`);
+            }
           }
         }
       } else if(type==='ssq'){
-        lines.push(`  方法：红球候选池打分排序（Top6）+ 蓝球打分，联合优化，奖励按双色球真实奖级结构分级`);
+        lines.push(`  方法：红球33全量打分排序（Top6）+ 蓝球打分，联合优化，奖励按双色球真实奖级结构分级`);
         lines.push(`  回测（近${rlGame.games_tested??'—'}期）：红球平均命中${rlGame.avg_red_hit??'—'}个  蓝球准确率${rlGame.blue_acc_pct??'—'}%（随机基准6.25%）`);
-        if(rlGame.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${rlGame.ppo_red_selected.join(' ')}`);
-        if(rlGame.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${rlGame.ppo_blue_pred}`);
+        if(rlGame.ppo_groups?.length) lines.push(`  PPO推荐（${rlGame.ppo_groups.length}注）：${rlGame.ppo_groups.map((g,i)=>`第${i+1}注[${(g.red||[]).join(' ')}]+蓝${g.blue}`).join(' ')}`);
+        else {
+          if(rlGame.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${rlGame.ppo_red_selected.join(' ')}`);
+          if(rlGame.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${rlGame.ppo_blue_pred}`);
+        }
       }
       if(rlGame.note) lines.push(`  备注：${rlGame.note}`);
     }
@@ -2240,7 +2252,12 @@ function renderDLResult(dlResult){
       html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
         命中分布：0位${md[0]??0}期 1位${md[1]??0}期 2位${md[2]??0}期 3位${md[3]??0}期
       </div>`;
-      if(d3Rl.ppo_pred){
+      if(d3Rl.ppo_groups?.length){
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
+        d3Rl.ppo_groups.forEach((g,i)=>{
+          html += `<div class="rec-group">第${i+1}注：${g.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
+        });
+      } else if(d3Rl.ppo_pred){
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO预测组合：</span></div>`;
         html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
       }
@@ -2248,7 +2265,7 @@ function renderDLResult(dlResult){
       html += `</div>`;
     }
 
-    // 快乐8（候选池打分排序，支持所有玩法）
+    // 快乐8（全量打分排序，支持所有玩法，分组结构与传统ML一致）
     const kl8Rl = rl.results.kl8;
     if(kl8Rl){
       html += `<div style="margin-bottom:12px;">`;
@@ -2257,18 +2274,29 @@ function renderDLResult(dlResult){
         回测（近${kl8Rl.games_tested??'—'}期，选六标准）平均净收益：<b>${kl8Rl.avg_net_per_game??'—'}</b>元/期
         ${kl8Rl.is_first_train?'（首次训练）':'（增量微调）'}
       </div>`;
-      const picksByN = kl8Rl.picks_by_n;
-      if(picksByN){
+      if(kl8Rl.plays){
+        for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
+          const play = kl8Rl.plays[pk];
+          if(!play || !play.groups?.length) continue;
+          html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${play.name}（${play.tip||''}）：</span></div>`;
+          play.groups.forEach((g,i)=>{
+            const label = play.name.includes('复式') ? `复式${g.length}个球` : `第${i+1}注`;
+            html += `<div style="margin:2px 0;font-size:11px;color:#666;">${label}：`;
+            html += g.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+            html += `</div>`;
+          });
+        }
+      } else if(kl8Rl.picks_by_n){
+        // 兼容旧结构
         const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
         for(const n of [4,5,6,9,10]){
-          const nums = picksByN[n]||picksByN[String(n)];
+          const nums = kl8Rl.picks_by_n[n]||kl8Rl.picks_by_n[String(n)];
           if(!nums || !nums.length) continue;
           html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${playNames[n]}：</span>`;
           html += nums.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
           html += `</div>`;
         }
       } else if(kl8Rl.ppo_selected?.length){
-        // 兼容旧结构
         html += `<div class="rec-group" style="display:block;">${kl8Rl.ppo_selected.map(n=>`<span class="ball-r" style="background:#e87d00;">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
       }
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${kl8Rl.note||''}</div>`;
@@ -2290,7 +2318,15 @@ function renderDLResult(dlResult){
           红球命中分布：${[0,1,2,3,4,5,6].map(k=>`${k}个${rhd[k]??rhd[String(k)]??0}期`).join(' ')}
         </div>`;
       }
-      if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
+      if(ssqRl.ppo_groups?.length){
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${ssqRl.ppo_groups.length}注）：</span></div>`;
+        ssqRl.ppo_groups.forEach((g,i)=>{
+          html += `<div class="rec-group">第${i+1}注：`;
+          (g.red||[]).forEach(n=>{ html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`; });
+          if(g.blue!=null) html += `<span class="ball-b">${String(g.blue).padStart(2,'0')}</span>`;
+          html += `</div>`;
+        });
+      } else if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐整注：</span></div>`;
         html += `<div class="rec-group" style="display:block;">`;
         (ssqRl.ppo_red_selected||[]).forEach(n=>{
