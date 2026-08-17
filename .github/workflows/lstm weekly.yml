@@ -1,19 +1,13 @@
-name: 每日 LSTM+Transformer 训练（增量微调）
+name: 每周 LSTM+Transformer 训练
 
 on:
-  workflow_run:
-    workflows: ["触发 Kaggle 运行"]   # 必须和 crawl.yml 的 name 完全一致
-    types: [completed]
   schedule:
-    - cron: '0 15 * * *'    # 兜底：万一上游没触发（比如GitHub本身延迟太久），23:00左右强制兜底跑一次
+    - cron: '0 14 * * 0'    # 每周日 UTC 14:00 = 北京时间 22:00
   workflow_dispatch:
 
 jobs:
   trigger-lstm:
     runs-on: ubuntu-latest
-    # 只在 crawl.yml 真正成功完成后才继续（workflow_run触发时才有这个上下文，
-    # schedule/workflow_dispatch触发时 github.event.workflow_run 不存在，直接放行）
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - run: pip install kaggle
@@ -28,14 +22,14 @@ jobs:
         run: kaggle kernels push -p ./kaggle_lstm_kernel/
       - name: 等待 Kaggle 初始化 Kernel
         run: sleep 90
-      - name: 等待完成（最多40分钟，热启动微调后应该比全量训练快很多）
+      - name: 等待完成（最多60分钟）
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
           KERNEL="megskfdbbskeb/fucai-lstm-tfm"
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
-            echo "$(date +'%H:%M:%S') [$i/40] $STATUS"
+            echo "$(date +'%H:%M:%S') [$i/60] $STATUS"
             if echo "$STATUS" | grep -qi "complete"; then echo "✓完成"; exit 0; fi
             if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then echo "✗失败"; exit 1; fi
             if echo "$STATUS" | grep -qi "404\|not found"; then echo "  Kernel还在初始化中，继续等待…"; fi
