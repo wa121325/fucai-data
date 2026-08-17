@@ -635,27 +635,37 @@ def train_target(X, y, feat_names, last_X, tname):
         final = cached['models']
         acc   = cached.get('accuracy', {})
         fi    = cached.get('feature_importance', [])
-        # 只回测最新10期
-        bt_start = max(MIN, n-10)
+        # 回测起点必须是缓存模型训练截止点 cached_n，而不是简单的"最近10期"，
+        # 否则如果 new_data<10，回测窗口会往回覆盖到模型训练时就见过的数据，
+        # 又是拿训练集当考题、准确率虚高。只在模型真正没见过的新增数据上评估才有意义。
+        bt_start = max(MIN, cached_n)
     else:
-        # ── 全量训练（只训练一次！）──
+        # ── 全量训练：分两组模型 ──
+        # 1) 回测专用模型：只用 bt_start 之前的数据训练，在"没见过"的后续50期上真实评估
+        #    （修复：之前是用全部数据训练后再"回测"最近50期，等于拿训练集本身当考题，
+        #     准确率虚高到100%只是模型记住了训练数据，不代表任何真实预测能力）
+        # 2) 生产模型：用全部数据训练，专门用于预测真正的下一期（这个环节本来就该用全部数据，没问题）
         print(f"    [{tname}] 全量训练（{n}期）…")
+        bt_start = max(MIN, n-50)
+
+        bt_models={}
+        for mname,m in make_models().items():
+            try: m.fit(X[:bt_start], y_enc[:bt_start]); bt_models[mname]=m
+            except Exception as e: print(f"      {mname}(回测)失败:{e}")
+
         final={}
         for mname,m in make_models().items():
             try: m.fit(X,y_enc); final[mname]=m
-            except Exception as e: print(f"      {mname}失败:{e}")
+            except Exception as e: print(f"      {mname}(生产)失败:{e}")
         if not final: return None
-
-        # 回测：用已训练好的模型滚动预测（不重复fit！）
-        # 只看模型对最近50期的预测表现
-        bt_start = max(MIN, n-50)
         acc={}; fi=[]
 
-    # ── 回测（用已有 final 模型，不重新训练）──
-    all_true=[]; preds_by={k:[] for k in final}
+    # ── 回测（用 bt_models：只在训练时未见过的数据上评估，才是真实的样本外准确率）──
+    bt_eval_models = bt_models if (not has_cache or new_data >= RETRAIN_EVERY) else final
+    all_true=[]; preds_by={k:[] for k in bt_eval_models}
     for end in range(bt_start, n):
         Xte = X[end:end+1]; yte = y_enc[end:end+1]
-        for mname,m in final.items():
+        for mname,m in bt_eval_models.items():
             try: preds_by[mname].extend(m.predict(Xte).tolist())
             except: preds_by[mname].extend([int(y_enc[end-1])])
         all_true.extend(yte.tolist())
@@ -669,6 +679,16 @@ def train_target(X, y, feat_names, last_X, tname):
             vs=[preds_by[m][i] for m in preds_by if len(preds_by[m])>i]
             ens.append(Ctr(vs).most_common(1)[0][0] if vs else all_true[i])
         acc['ensemble']=round(accuracy_score(all_true,ens)*100,1)
+
+        # 基线准确率：永远预测"训练集里出现最多的那一类"能拿多少分。
+        # 如果模型准确率跟基线差不多甚至更低，说明模型没有学到真实规律，
+        # 只是分组本身不均衡导致"蒙对"的概率就很高（比如某一档占了70%的历史样本）。
+        train_boundary = bt_start if (not has_cache or new_data >= RETRAIN_EVERY) else cached_n
+        train_y = y_enc[:train_boundary]
+        if len(train_y) > 0:
+            majority = Ctr(train_y.tolist()).most_common(1)[0][0]
+            acc['baseline'] = round(accuracy_score(all_true, [majority]*len(all_true))*100, 1)
+            acc['lift_over_baseline'] = round(acc['ensemble'] - acc['baseline'], 1)
 
     if not has_cache or new_data >= RETRAIN_EVERY:
         if 'rf' in final and hasattr(final['rf'],'feature_importances_'):
