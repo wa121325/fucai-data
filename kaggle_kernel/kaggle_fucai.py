@@ -728,7 +728,23 @@ def train_target(X, y, feat_names, last_X, tname):
             'bt_detail':bt_detail}
 
 
-def tgt3d(r): b,s,g=r['digits']; sm=b+s+g; return {'bai':b,'shi':s,'ge':g,'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),'odd':sum(1 for x in [b,s,g] if x%2!=0)}
+def tgt3d(r):
+    b,s,g=r['digits']; sm=b+s+g
+    is_triplet = (b==s==g)
+    is_group3  = (b==s or s==g or b==g) and not is_triplet
+    group_type = 0 if is_triplet else (1 if is_group3 else 2)   # 0=豹子 1=组三 2=组六（真实分布：组六≈72% 组三≈27% 豹子≈1%）
+    span = max(b,s,g) - min(b,s,g)
+    road = [b%3, s%3, g%3]
+    road_dom = max(set(road), key=road.count)   # 三位数字里012路哪个占多数
+    sorted3 = sorted([b,s,g])
+    is_arith = int((sorted3[1]-sorted3[0])==(sorted3[2]-sorted3[1]) and sorted3[2]-sorted3[0]>0)
+    return {'sum_grp':0 if sm<=9 else(1 if sm<=17 else 2),
+            'odd':sum(1 for x in [b,s,g] if x%2!=0),
+            'group_type':group_type,
+            'big':sum(1 for x in [b,s,g] if x>=5),
+            'span_grp':0 if span<=3 else(1 if span<=6 else 2),
+            'road_dom':road_dom,
+            'arith':is_arith}
 def tgtssq(r):
     red = sorted(r['red'])
     sm = sum(red)
@@ -742,11 +758,15 @@ def tgtssq(r):
     zone_dom = int(np.argmax([z1,z2,z3]))
     # 最大间距区间
     max_gap = max(red[i+1]-red[i] for i in range(len(red)-1)) if len(red)>1 else 0
-    return {'blue':r['blue'],'odd':sum(1 for x in r['red'] if x%2!=0),
+    # 连号
+    consec = sum(1 for i in range(len(red)-1) if red[i+1]-red[i]==1)
+    return {'odd':sum(1 for x in r['red'] if x%2!=0),
             'sum_grp':0 if sm<70 else(1 if sm<100 else 2),
             'ac_grp':0 if ac<=2 else(1 if ac<=5 else 2),
             'red_zone_dom':zone_dom,
-            'gap_grp':0 if max_gap<=5 else(1 if max_gap<=10 else 2)}
+            'gap_grp':0 if max_gap<=5 else(1 if max_gap<=10 else 2),
+            'big':sum(1 for x in r['red'] if x>16),
+            'consec':consec}
 def tgtkl8(r):
     nums = sorted(r['numbers'])
     odd=sum(1 for x in r['numbers'] if x%2!=0)
@@ -1142,8 +1162,8 @@ def run_ml(history):
     bt=daily_backtest(history, prev_pred)
 
     cfg=[
-        ('3d',  f3d,   tgt3d,  ['bai','shi','ge','sum_grp','odd']),
-        ('ssq', fssq,  tgtssq, ['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']),
+        ('3d',  f3d,   tgt3d,  ['sum_grp','odd','group_type','big','span_grp','road_dom','arith']),
+        ('ssq', fssq,  tgtssq, ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']),
         ('kl8', fkl8,  tgtkl8, ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']),
     ]
     predictions={}
