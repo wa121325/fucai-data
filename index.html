@@ -2235,8 +2235,10 @@ function renderDLResult(dlResult){
       html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
       for(const [tname,tm] of Object.entries(gdata)){
         const la = tLabels[tname]||tname;
+        const lstmLift = tm.lstm_baseline!=null ? (tm.lstm_acc - tm.lstm_baseline) : null;
+        const baselineNote = lstmLift!=null ? `（基线${tm.lstm_baseline}%${lstmLift>0?' +'+lstmLift.toFixed(1)+'%':''}）` : '';
         html += `<span class="pred-acc-badge" style="background:#6b3a9b;font-size:11px;">
-          ${la} LSTM${tm.lstm_acc??'—'}% TFM${tm.tfm_acc??'—'}%
+          ${la} LSTM${tm.lstm_acc??'—'}% TFM${tm.tfm_acc??'—'}%${baselineNote}
           → <b>${tm.ensemble_pred??'—'}</b>(${tm.confidence??'—'}%)
         </span>`;
       }
@@ -2394,6 +2396,15 @@ function renderGamePredict(game, data){
     if(acc.lgb!==undefined) html+=`<span class="pred-acc-badge" style="background:#1a6b1a;">LightGBM ${acc.lgb}%</span>`;
     if(acc.ensemble!==undefined) html+=`<span class="pred-acc-badge" style="background:#6b3a9b;">集成 ${acc.ensemble}%</span>`;
     html+=`</div>`;
+    if(acc.baseline!==undefined){
+      const lift = acc.lift_over_baseline ?? (acc.ensemble - acc.baseline);
+      const liftColor = lift>5 ? '#1a7a4c' : (lift>0 ? '#e87d00' : '#c81e1e');
+      const liftText  = lift>5 ? '真实提升' : (lift>0 ? '提升有限' : '未超基线，无实际预测力');
+      html+=`<div style="font-size:11px;color:#888;margin-bottom:8px;">
+        基线准确率（永远猜多数类）：${acc.baseline}%　
+        <span style="color:${liftColor};font-weight:700;">提升 ${lift>0?'+':''}${lift}%（${liftText}）</span>
+      </div>`;
+    }
     if(pred.value!==undefined) html+=`<div style="font-size:12px;margin-bottom:6px;">预测值：<b style="color:#c81e1e;font-size:14px;">${pred.value}</b>（置信度 ${pred.confidence||'—'}%）</div>`;
     if(pred.probs){
       const topProbs=Object.entries(pred.probs).sort((a,b)=>b[1]-a[1]).slice(0,6);
