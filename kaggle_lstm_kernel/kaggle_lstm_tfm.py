@@ -351,27 +351,34 @@ class TransformerEncoder(nn.Module):
         logits = self.head(pooled)
         return (logits,pooled) if return_hidden else logits
 
-def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n=50):
+def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n=50,
+                   warm_start_path=None, warm_start_epochs=10, warm_start_lr=1e-4):
     """
     分两阶段训练，避免"用训练数据本身当回测题"造成虚假高准确率：
     （神经网络训练60轮后几乎能背下训练集，若直接拿训练集本身算准确率，
      报出99%+纯属正常的过拟合记忆现象，跟有没有学到真实规律毫无关系）
 
     1) 回测模型：只用 X[:-holdout_n] 训练，在模型真正没见过的 X[-holdout_n:] 上评估准确率
+       ⚠️ 这个模型必须从头训练，不能热启动——如果加载"用过全部历史数据（含当前holdout部分）
+       训练出的旧权重"去初始化，等于让回测模型提前偷看了它要被考的题目，回测准确率会失真。
     2) 生产模型：用全部数据训练，用于提取隐层状态（供RL使用）和预测下一期
+       这个可以安全地热启动微调——反正它本来就该用全部已知数据，不存在"偷看未来"的问题，
+       加载上周训练好的权重、用少量新增数据+低学习率继续训练，比每次随机初始化从头学快得多。
 
     model_ctor: 无参construct函数，每次调用返回一个全新的未训练模型实例
+    warm_start_path: 若提供且文件存在，生产模型会从这份权重继续训练（增量微调），
+                      而不是随机初始化全量训练；找不到时自动降级为全量训练。
     """
     n = len(X)
     holdout_n = min(holdout_n, max(5, n//5))   # 数据量小时按比例缩减holdout，避免训练集过小
     split = max(1, n - holdout_n)
 
-    def _train_one(m, Xtr, ytr, ep):
+    def _train_one(m, Xtr, ytr, ep, learning_rate=lr):
         m = m.to(DEVICE)
         Xt = torch.FloatTensor(Xtr).to(DEVICE); yt = torch.LongTensor(ytr).to(DEVICE)
         loader = DataLoader(TensorDataset(Xt,yt), batch_size, shuffle=True)
-        opt = optim.AdamW(m.parameters(), lr=lr, weight_decay=1e-4)
-        sch = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=ep)
+        opt = optim.AdamW(m.parameters(), lr=learning_rate, weight_decay=1e-4)
+        sch = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(ep,1))
         crit = nn.CrossEntropyLoss()
         m.train()
         for e in range(ep):
@@ -381,7 +388,7 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
             sch.step()
         return m
 
-    # ── 1) 回测模型：只用 split 之前的数据训练，在真正未见过的后续数据上评估 ──
+    # ── 1) 回测模型：必须从头训练，不能加载旧权重（避免评估时偷看未来数据）──
     bt_model = _train_one(model_ctor(), X[:split], y[:split], epochs)
     bt_model.eval()
     with torch.no_grad():
@@ -399,8 +406,20 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
     else:
         baseline_acc = 0.0
 
-    # ── 2) 生产模型：用全部数据训练，提取隐层状态（供RL）+ 预测下一期 ──
-    prod_model = _train_one(model_ctor(), X, y, epochs)
+    # ── 2) 生产模型：优先热启动微调，找不到旧权重才全量训练 ──
+    is_warm_start = False
+    prod_new = model_ctor()
+    if warm_start_path and os.path.exists(warm_start_path):
+        try:
+            prod_new.load_state_dict(torch.load(warm_start_path, map_location='cpu'))
+            is_warm_start = True
+            print(f"      ✓ 加载上次训练权重，热启动微调（{warm_start_epochs}轮，lr={warm_start_lr}）")
+        except Exception as e:
+            print(f"      ! 加载旧权重失败（{e}），改为全量训练")
+    if is_warm_start:
+        prod_model = _train_one(prod_new, X, y, warm_start_epochs, learning_rate=warm_start_lr)
+    else:
+        prod_model = _train_one(prod_new, X, y, epochs)
     prod_model.eval()
     hidden_states=[]
     with torch.no_grad():
@@ -413,7 +432,7 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
         logits,last_h=prod_model(Xt_full[-1:],return_hidden=True)
         probs=torch.softmax(logits,dim=1)[0].cpu().numpy()
 
-    return prod_model, hidden_states, last_h.cpu().numpy()[0], probs, acc, baseline_acc
+    return prod_model, hidden_states, last_h.cpu().numpy()[0], probs, acc, baseline_acc, is_warm_start
 
 # ══════════════════════════════════════════════════════
 #  主流程
@@ -496,17 +515,36 @@ for game, (feat_fn, targets) in configs.items():
         if X is None or len(X)<40: continue
         nc=len(set(y.tolist())); fd=X.shape[2]
 
-        lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline = train_encoder(
-            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=50)
-        print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）")
+        # 只有第一个目标（也是会被保存供RL使用的那份权重）需要检查热启动，
+        # 其余目标模型不做持久化，本来就每次训练一次，无需微调逻辑
+        is_primary_target = (lstm_hidden_all is None)
+        lstm_warm_path = tfm_warm_path = None
+        if is_primary_target:
+            prev_meta_path = f'{MOUNTED_DIR}/{game}_meta.json'
+            if os.path.exists(prev_meta_path):
+                try:
+                    with open(prev_meta_path) as f: prev_meta = json.load(f)
+                    if prev_meta.get('feat_dim') == fd and prev_meta.get('n_classes') == nc:
+                        lstm_warm_path = f'{MOUNTED_DIR}/{game}_lstm.pt'
+                        tfm_warm_path  = f'{MOUNTED_DIR}/{game}_tfm.pt'
+                    else:
+                        print(f"    ! 上次权重维度({prev_meta.get('feat_dim')},{prev_meta.get('n_classes')})与当前({fd},{nc})不一致，改为全量训练")
+                except Exception as e:
+                    print(f"    ! 读取上次meta失败({e})，改为全量训练")
 
-        tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline = train_encoder(
-            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=50)
-        print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）")
+        lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline, lstm_warm = train_encoder(
+            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=50,
+            warm_start_path=lstm_warm_path)
+        print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
+
+        tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
+            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=50,
+            warm_start_path=tfm_warm_path)
+        print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
 
         if lstm_hidden_all is None:
             lstm_hidden_all = lstm_h; tfm_hidden_all = tfm_h
-            # 保存权重（供每日RL加载，只存主目标模型即可）
+            # 保存权重（供每日RL加载，也供下次本脚本运行时热启动微调）
             torch.save(lstm_m.state_dict(), f'{LOCAL_DIR}/{game}_lstm.pt')
             torch.save(tfm_m.state_dict(),  f'{LOCAL_DIR}/{game}_tfm.pt')
             np.save(f'{LOCAL_DIR}/{game}_lstm_hidden.npy', lstm_h)
