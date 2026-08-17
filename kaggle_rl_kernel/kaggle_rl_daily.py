@@ -536,7 +536,7 @@ class IntegratedKL8Env(gym.Env):
     def step(self, action):
         # 对全部80个球的打分，取分数最高的 train_n 个作为本期选号
         top_idx = np.argsort(action)[-self.train_n:]
-        selected = sorted([i+1 for i in top_idx])
+        selected = sorted([int(i)+1 for i in top_idx])
 
         actual=set(self.records[self.idx]['numbers'])
         hit=len(actual&set(selected)); n_sel=len(selected)
@@ -613,7 +613,7 @@ class IntegratedSSQEnv(gym.Env):
         blue_scores = action[33:]
 
         top_idx = np.argsort(red_scores)[-self.red_pick_n:]
-        red_selected = sorted([i+1 for i in top_idx])
+        red_selected = sorted([int(i)+1 for i in top_idx])
         blue_pred = int(np.argmax(blue_scores)) + 1
 
         actual_red = set(self.records[self.idx]['red'])
@@ -789,7 +789,7 @@ def run_kl8_daily(records, ml_pred):
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
         top_idx = np.argsort(action)[-KL8_TRAIN_N:]
-        selected = sorted([i+1 for i in top_idx])
+        selected = sorted([int(i)+1 for i in top_idx])
         actual=set(records[idx]['numbers'])
         net = calc_payout(len(selected), len(actual&set(selected)))
         total_net+=net; games+=1
@@ -806,12 +806,12 @@ def run_kl8_daily(records, ml_pred):
         for _ in range(3):
             action,_ = model.predict(state, deterministic=False)
             order = np.argsort(action)[::-1]
-            rankings.append([i+1 for i in order])
+            rankings.append([int(i)+1 for i in order])
         # 保底：若采样失败导致列表为空，用一次确定性预测填充
         if not rankings:
             action,_ = model.predict(state, deterministic=True)
             order = np.argsort(action)[::-1]
-            rankings = [[i+1 for i in order]] * 3
+            rankings = [[int(i)+1 for i in order]] * 3
 
     def group(ranking_idx, n):
         return sorted(rankings[ranking_idx][:n]) if rankings else []
@@ -906,7 +906,7 @@ def run_ssq_daily(records, ml_pred):
         action,_ = model.predict(state, deterministic=True)
         red_scores = action[:33]; blue_scores = action[33:]
         top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-        red_selected = set(i+1 for i in top_idx)
+        red_selected = set(int(i)+1 for i in top_idx)
         blue_pred = int(np.argmax(blue_scores))+1
 
         actual_red = set(records[idx]['red']); actual_blue = records[idx]['blue']
@@ -930,7 +930,7 @@ def run_ssq_daily(records, ml_pred):
             action,_ = model.predict(state, deterministic=False)
             red_scores = action[:33]; blue_scores = action[33:]
             top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-            red_sel = tuple(sorted([i+1 for i in top_idx]))
+            red_sel = tuple(sorted([int(i)+1 for i in top_idx]))
             blue_sel = int(np.argmax(blue_scores))+1
             key=(red_sel, blue_sel)
             if key not in seen:
