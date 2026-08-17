@@ -1624,8 +1624,18 @@ function getMlContext(type){
         if(rlGame.ppo_groups?.length) lines.push(`  PPO推荐（${rlGame.ppo_groups.length}注）：${rlGame.ppo_groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
         else if(rlGame.ppo_pred) lines.push(`  PPO预测组合：${rlGame.ppo_pred.join('')}`);
       } else if(type==='kl8'){
-        lines.push(`  方法：对全部80个球连续打分排序（非候选池预筛），奖励函数=快乐8真实赔率净收益`);
-        lines.push(`  回测（近${rlGame.games_tested??'—'}期，选六标准）：平均净收益${rlGame.avg_net_per_game??'—'}元/期`);
+        lines.push(`  方法：对全部80个球连续打分排序（非候选池预筛），奖励函数=快乐8真实赔率净收益+连续塑形项`);
+        if(rlGame.backtest_by_play){
+          const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+          const btLines = [4,5,6,9,10].map(n=>{
+            const bt = rlGame.backtest_by_play[n]||rlGame.backtest_by_play[String(n)];
+            return bt ? `${playNames[n]}净${bt.avg_net_per_game}元/期均命中${bt.avg_hit}个` : '';
+          }).filter(Boolean).join('、');
+          lines.push(`  回测（近${rlGame.games_tested??'—'}期，全玩法对比）：${btLines}`);
+          if(rlGame.best_play_n!=null) lines.push(`  回测表现最好的玩法：${playNames[rlGame.best_play_n]}（历史回测仅供参考，不代表未来）`);
+        } else {
+          lines.push(`  回测（近${rlGame.games_tested??'—'}期，选六标准）：平均净收益${rlGame.avg_net_per_game??'—'}元/期`);
+        }
         if(rlGame.plays){
           const playNames={xuan4:'选四',xuan5:'选五',xuan5_fu:'选五复式',xuan6:'选六',xuan9:'选九',xuan10:'选十'};
           for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
@@ -2271,9 +2281,25 @@ function renderDLResult(dlResult){
       html += `<div style="margin-bottom:12px;">`;
       html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">快乐8</div>`;
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
-        回测（近${kl8Rl.games_tested??'—'}期，选六标准）平均净收益：<b>${kl8Rl.avg_net_per_game??'—'}</b>元/期
+        回测（近${kl8Rl.games_tested??'—'}期）
         ${kl8Rl.is_first_train?'（首次训练）':'（增量微调）'}
       </div>`;
+      if(kl8Rl.backtest_by_play){
+        const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+        const bestN = kl8Rl.best_play_n;
+        html += `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">`;
+        for(const n of [4,5,6,9,10]){
+          const bt = kl8Rl.backtest_by_play[n]||kl8Rl.backtest_by_play[String(n)];
+          if(!bt) continue;
+          const isBest = n===bestN;
+          html += `<span style="padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;
+            background:${isBest?'#1a7a4c':'#333'};color:#fff;">
+            ${playNames[n]}${isBest?'★':''} 净${bt.avg_net_per_game}元/期 均命中${bt.avg_hit}个
+          </span>`;
+        }
+        html += `</div>`;
+        html += `<div style="font-size:10px;color:#888;margin-bottom:8px;">★ 标记为近期回测表现最好的玩法（历史回测仅供参考，彩票开奖完全随机，不代表未来表现）</div>`;
+      }
       if(kl8Rl.plays){
         for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
           const play = kl8Rl.plays[pk];
