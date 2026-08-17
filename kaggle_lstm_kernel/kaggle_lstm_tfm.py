@@ -352,7 +352,8 @@ class TransformerEncoder(nn.Module):
         return (logits,pooled) if return_hidden else logits
 
 def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n=50,
-                   warm_start_path=None, warm_start_epochs=10, warm_start_lr=1e-4):
+                   warm_start_path=None, warm_start_epochs=10, warm_start_lr=1e-4,
+                   warm_start_window=250):
     """
     分两阶段训练，避免"用训练数据本身当回测题"造成虚假高准确率：
     （神经网络训练60轮后几乎能背下训练集，若直接拿训练集本身算准确率，
@@ -361,13 +362,16 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
     1) 回测模型：只用 X[:-holdout_n] 训练，在模型真正没见过的 X[-holdout_n:] 上评估准确率
        ⚠️ 这个模型必须从头训练，不能热启动——如果加载"用过全部历史数据（含当前holdout部分）
        训练出的旧权重"去初始化，等于让回测模型提前偷看了它要被考的题目，回测准确率会失真。
-    2) 生产模型：用全部数据训练，用于提取隐层状态（供RL使用）和预测下一期
-       这个可以安全地热启动微调——反正它本来就该用全部已知数据，不存在"偷看未来"的问题，
-       加载上周训练好的权重、用少量新增数据+低学习率继续训练，比每次随机初始化从头学快得多。
+    2) 生产模型：优先热启动微调，用于提取隐层状态（供RL使用）和预测下一期
+       热启动时只用最近 warm_start_window 期数据（滑动窗口增量），而非全部历史：
+       - 只用"今天新增的1条数据"微调 → 梯度被单个样本主导，会把历史学到的规律冲掉（灾难性遗忘）
+       - 每次都用全部几千期从头学 → 太慢，也没必要（上次的权重已经吸收了大部分历史信息）
+       - 折中：用最近一段窗口（有一定样本量支撑梯度方向，不会被单样本带偏，
+         同时训练量远小于全部历史，且天然更侧重近期统计规律）
+       没有旧权重可用时（首次运行/特征维度变了），才回退到全部历史数据训练。
 
     model_ctor: 无参construct函数，每次调用返回一个全新的未训练模型实例
-    warm_start_path: 若提供且文件存在，生产模型会从这份权重继续训练（增量微调），
-                      而不是随机初始化全量训练；找不到时自动降级为全量训练。
+    warm_start_path: 若提供且文件存在，生产模型会从这份权重继续训练（增量微调）
     """
     n = len(X)
     holdout_n = min(holdout_n, max(5, n//5))   # 数据量小时按比例缩减holdout，避免训练集过小
@@ -406,18 +410,20 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
     else:
         baseline_acc = 0.0
 
-    # ── 2) 生产模型：优先热启动微调，找不到旧权重才全量训练 ──
+    # ── 2) 生产模型：优先"滑动窗口热启动微调"，找不到旧权重才全量训练 ──
     is_warm_start = False
     prod_new = model_ctor()
     if warm_start_path and os.path.exists(warm_start_path):
         try:
             prod_new.load_state_dict(torch.load(warm_start_path, map_location='cpu'))
             is_warm_start = True
-            print(f"      ✓ 加载上次训练权重，热启动微调（{warm_start_epochs}轮，lr={warm_start_lr}）")
+            win = min(warm_start_window, n)
+            print(f"      ✓ 加载上次训练权重，滑动窗口热启动微调（近{win}期，{warm_start_epochs}轮，lr={warm_start_lr}）")
         except Exception as e:
             print(f"      ! 加载旧权重失败（{e}），改为全量训练")
     if is_warm_start:
-        prod_model = _train_one(prod_new, X, y, warm_start_epochs, learning_rate=warm_start_lr)
+        win = min(warm_start_window, n)
+        prod_model = _train_one(prod_new, X[-win:], y[-win:], warm_start_epochs, learning_rate=warm_start_lr)
     else:
         prod_model = _train_one(prod_new, X, y, epochs)
     prod_model.eval()
