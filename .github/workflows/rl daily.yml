@@ -1,13 +1,17 @@
 name: 每日 PPO 强化学习微调
 
 on:
+  workflow_run:
+    workflows: ["每日 LSTM+Transformer 训练（增量微调）"]   # 必须和 lstm_daily.yml 的 name 完全一致
+    types: [completed]
   schedule:
-    - cron: '0 14 * * *'    # UTC 14:00 = 北京22:00（比crawl.yml晚30分钟，确保数据已更新）
+    - cron: '0 16 * * *'    # 兜底：万一上游没触发，0点左右强制兜底跑一次
   workflow_dispatch:
 
 jobs:
   trigger-rl:
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - run: pip install kaggle
@@ -32,9 +36,7 @@ jobs:
             echo "$(date +'%H:%M:%S') [$i/30] $STATUS"
             if echo "$STATUS" | grep -qi "complete"; then echo "✓完成"; exit 0; fi
             if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then echo "✗失败"; exit 1; fi
-            if echo "$STATUS" | grep -qi "404\|not found"; then
-              echo "  Kernel还在初始化中，继续等待…"
-            fi
+            if echo "$STATUS" | grep -qi "404\|not found"; then echo "  Kernel还在初始化中，继续等待…"; fi
             sleep 60
           done
           echo "⚠️超时"; exit 0
