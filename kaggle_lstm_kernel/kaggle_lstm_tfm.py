@@ -351,31 +351,69 @@ class TransformerEncoder(nn.Module):
         logits = self.head(pooled)
         return (logits,pooled) if return_hidden else logits
 
-def train_encoder(model, X, y, epochs=60, lr=5e-4, batch_size=32):
-    model = model.to(DEVICE)
-    X_t = torch.FloatTensor(X).to(DEVICE); y_t = torch.LongTensor(y).to(DEVICE)
-    loader = DataLoader(TensorDataset(X_t,y_t), batch_size, shuffle=True)
-    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sch = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    crit = nn.CrossEntropyLoss()
-    model.train()
-    for ep in range(epochs):
-        for xb,yb in loader:
-            opt.zero_grad(); loss = crit(model(xb), yb); loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(),1.0); opt.step()
-        sch.step()
-        if (ep+1)%20==0: print(f"      ep{ep+1}/{epochs} loss={loss.item():.4f}")
-    model.eval()
+def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n=50):
+    """
+    分两阶段训练，避免"用训练数据本身当回测题"造成虚假高准确率：
+    （神经网络训练60轮后几乎能背下训练集，若直接拿训练集本身算准确率，
+     报出99%+纯属正常的过拟合记忆现象，跟有没有学到真实规律毫无关系）
+
+    1) 回测模型：只用 X[:-holdout_n] 训练，在模型真正没见过的 X[-holdout_n:] 上评估准确率
+    2) 生产模型：用全部数据训练，用于提取隐层状态（供RL使用）和预测下一期
+
+    model_ctor: 无参construct函数，每次调用返回一个全新的未训练模型实例
+    """
+    n = len(X)
+    holdout_n = min(holdout_n, max(5, n//5))   # 数据量小时按比例缩减holdout，避免训练集过小
+    split = max(1, n - holdout_n)
+
+    def _train_one(m, Xtr, ytr, ep):
+        m = m.to(DEVICE)
+        Xt = torch.FloatTensor(Xtr).to(DEVICE); yt = torch.LongTensor(ytr).to(DEVICE)
+        loader = DataLoader(TensorDataset(Xt,yt), batch_size, shuffle=True)
+        opt = optim.AdamW(m.parameters(), lr=lr, weight_decay=1e-4)
+        sch = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=ep)
+        crit = nn.CrossEntropyLoss()
+        m.train()
+        for e in range(ep):
+            for xb,yb in loader:
+                opt.zero_grad(); loss=crit(m(xb),yb); loss.backward()
+                nn.utils.clip_grad_norm_(m.parameters(),1.0); opt.step()
+            sch.step()
+        return m
+
+    # ── 1) 回测模型：只用 split 之前的数据训练，在真正未见过的后续数据上评估 ──
+    bt_model = _train_one(model_ctor(), X[:split], y[:split], epochs)
+    bt_model.eval()
+    with torch.no_grad():
+        Xte = torch.FloatTensor(X[split:]).to(DEVICE)
+        preds = bt_model(Xte).argmax(dim=1).cpu().numpy()
+    y_holdout = y[split:]
+    acc = round(float((preds==y_holdout).mean())*100,1) if len(y_holdout)>0 else 0.0
+
+    # 基线：训练集里出现最多的那一类，用来判断准确率是不是只是"蒙对"
+    from collections import Counter as Ctr
+    y_train = y[:split]
+    if len(y_train)>0 and len(y_holdout)>0:
+        majority = Ctr(y_train.tolist()).most_common(1)[0][0]
+        baseline_acc = round(float((y_holdout==majority).mean())*100,1)
+    else:
+        baseline_acc = 0.0
+
+    # ── 2) 生产模型：用全部数据训练，提取隐层状态（供RL）+ 预测下一期 ──
+    prod_model = _train_one(model_ctor(), X, y, epochs)
+    prod_model.eval()
     hidden_states=[]
     with torch.no_grad():
-        for i in range(0,len(X_t),batch_size):
-            xb=X_t[i:i+batch_size]; _,h=model(xb,return_hidden=True)
+        Xt_full = torch.FloatTensor(X).to(DEVICE)
+        for i in range(0,len(Xt_full),batch_size):
+            xb=Xt_full[i:i+batch_size]; _,h=prod_model(xb,return_hidden=True)
             hidden_states.append(h.cpu().numpy())
     hidden_states=np.vstack(hidden_states)
-    with torch.no_grad(): preds=model(X_t).argmax(dim=1).cpu().numpy()
-    acc=round(float((preds==y).mean())*100,1)
-    with torch.no_grad(): logits,last_h=model(X_t[-1:],return_hidden=True); probs=torch.softmax(logits,dim=1)[0].cpu().numpy()
-    return model, hidden_states, last_h.cpu().numpy()[0], probs, acc
+    with torch.no_grad():
+        logits,last_h=prod_model(Xt_full[-1:],return_hidden=True)
+        probs=torch.softmax(logits,dim=1)[0].cpu().numpy()
+
+    return prod_model, hidden_states, last_h.cpu().numpy()[0], probs, acc, baseline_acc
 
 # ══════════════════════════════════════════════════════
 #  主流程
@@ -458,13 +496,13 @@ for game, (feat_fn, targets) in configs.items():
         if X is None or len(X)<40: continue
         nc=len(set(y.tolist())); fd=X.shape[2]
 
-        lstm = LSTMEncoder(fd, hidden_dim=64, output_dim=nc)
-        lstm_m, lstm_h, _, lstm_p, lstm_acc = train_encoder(lstm, X, y, epochs=50)
-        print(f"    LSTM 准确率: {lstm_acc}%")
+        lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline = train_encoder(
+            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=50)
+        print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）")
 
-        tfm = TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc)
-        tfm_m, tfm_h, _, tfm_p, tfm_acc = train_encoder(tfm, X, y, epochs=50)
-        print(f"    TFM  准确率: {tfm_acc}%")
+        tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline = train_encoder(
+            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=50)
+        print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）")
 
         if lstm_hidden_all is None:
             lstm_hidden_all = lstm_h; tfm_hidden_all = tfm_h
@@ -484,6 +522,7 @@ for game, (feat_fn, targets) in configs.items():
         pred_class = classes[int(np.argmax(ens))]
         game_results[tname] = {
             'lstm_acc':lstm_acc, 'tfm_acc':tfm_acc,
+            'lstm_baseline':lstm_baseline, 'tfm_baseline':tfm_baseline,
             'ensemble_pred': int(pred_class) + offset,
             'confidence': round(float(max(ens))*100,1),
             'probs': {str(int(c)+offset):round(float(p)*100,1) for c,p in zip(classes,ens)},
