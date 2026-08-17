@@ -453,6 +453,28 @@ history = json.loads(raw)
 os.makedirs(LOCAL_DIR, exist_ok=True)
 dl_results = {}
 
+def _3d_group_type(digits):
+    b,s,g = digits
+    is_triplet = (b==s==g)
+    is_group3  = (b==s or s==g or b==g) and not is_triplet
+    return 0 if is_triplet else (1 if is_group3 else 2)   # 0=豹子 1=组三 2=组六
+
+def _3d_span_grp(digits):
+    span = max(digits) - min(digits)
+    return 0 if span<=3 else(1 if span<=6 else 2)
+
+def _3d_road_dom(digits):
+    road = [d%3 for d in digits]
+    return max(set(road), key=road.count)   # 三位数字里012路哪个占多数
+
+def _3d_arith(digits):
+    s3 = sorted(digits)
+    return int((s3[1]-s3[0])==(s3[2]-s3[1]) and s3[2]-s3[0]>0)
+
+def _ssq_consec(red):
+    sred = sorted(red)
+    return sum(1 for i in range(len(sred)-1) if sred[i+1]-sred[i]==1)
+
 def _ssq_ac_grp(red):
     sred=sorted(red); diffs=set()
     for i in range(len(sred)):
@@ -490,13 +512,20 @@ def _kl8_range_grp(nums):
     return 0 if rng<60 else(1 if rng<70 else 2)
 
 configs = {
-    '3d':  (f3d,  {'bai':lambda r:r['digits'][0],'shi':lambda r:r['digits'][1],'ge':lambda r:r['digits'][2],
-                    'sum_grp':lambda r:0 if sum(r['digits'])<=9 else(1 if sum(r['digits'])<=17 else 2)}),
-    'ssq': (fssq, {'blue':lambda r:r['blue']-1,'odd':lambda r:sum(1 for x in r['red'] if x%2!=0),
+    '3d':  (f3d,  {'sum_grp':lambda r:0 if sum(r['digits'])<=9 else(1 if sum(r['digits'])<=17 else 2),
+                    'group_type':lambda r:_3d_group_type(r['digits']),
+                    'odd':lambda r:sum(1 for x in r['digits'] if x%2!=0),
+                    'big':lambda r:sum(1 for x in r['digits'] if x>=5),
+                    'span_grp':lambda r:_3d_span_grp(r['digits']),
+                    'road_dom':lambda r:_3d_road_dom(r['digits']),
+                    'arith':lambda r:_3d_arith(r['digits'])}),
+    'ssq': (fssq, {'odd':lambda r:sum(1 for x in r['red'] if x%2!=0),
                     'sum_grp':lambda r:0 if sum(r['red'])<70 else(1 if sum(r['red'])<100 else 2),
                     'ac_grp':lambda r:_ssq_ac_grp(r['red']),
                     'red_zone_dom':lambda r:_ssq_zone_dom(r['red']),
-                    'gap_grp':lambda r:_ssq_gap_grp(r['red'])}),
+                    'gap_grp':lambda r:_ssq_gap_grp(r['red']),
+                    'big':lambda r:sum(1 for x in r['red'] if x>16),
+                    'consec':lambda r:_ssq_consec(r['red'])}),
     'kl8': (fkl8, {'odd_grp':lambda r:0 if sum(1 for x in r['numbers'] if x%2!=0)<9 else(1 if sum(1 for x in r['numbers'] if x%2!=0)<=11 else 2),
                     'zone_dom':lambda r:int(np.argmax([sum(1 for x in r['numbers'] if lo<=x<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]])),
                     'tot_grp':lambda r:0 if sum(r['numbers'])<640 else(1 if sum(r['numbers'])<820 else 2),
@@ -539,12 +568,12 @@ for game, (feat_fn, targets) in configs.items():
                     print(f"    ! 读取上次meta失败({e})，改为全量训练")
 
         lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline, lstm_warm = train_encoder(
-            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=50,
+            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20,
             warm_start_path=lstm_warm_path)
         print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
 
         tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
-            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=50,
+            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20,
             warm_start_path=tfm_warm_path)
         print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
 
