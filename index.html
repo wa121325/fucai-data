@@ -1565,7 +1565,7 @@ function getMlContext(type){
     if(!pred) return '';
     const lines = [];
 
-    const tLabels={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',
+    const tLabels={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',group_type:'组型',span_grp:'跨度区间',road_dom:'012路主力',arith:'斜连(等差)',big:'大数个数',consec:'连号数',
                    blue:'蓝球',red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
                    zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间',
                    big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
@@ -2225,7 +2225,7 @@ function renderDLResult(dlResult){
   meta.textContent = metaParts.join(' · ');
 
   const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
-  const tLabels={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球',
+  const tLabels={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球','group_type':'组型','span_grp':'跨度区间','road_dom':'012路主力','arith':'斜连(等差)','big':'大数个数','consec':'连号数',
                  'odd':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区',
                  'red_zone_dom':'红球主力区','ac_grp':'AC值区间','gap_grp':'最大间距区间',
                  'big_grp':'大数个数区','five_dom':'五行主力段','consec_grp':'连续号组区','range_grp':'极差区'};
@@ -2386,7 +2386,7 @@ function renderGamePredict(game, data){
   const contentEl=document.getElementById(contentIds[game]);
   if(!data||!data.models){panel.style.display='none';return;}
   panel.style.display='block';
-  const modelLabels={bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_grp:'和值区间',odd:'奇数个数',
+  const modelLabels={bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_grp:'和值区间',odd:'奇数个数',group_type:'组型',span_grp:'跨度区间',road_dom:'012路主力',arith:'斜连(等差)',big:'大数个数',consec:'连号数',
     blue:'蓝球号码',odd_grp:'奇数区间',zone_dom:'主落区',tot_grp:'总和区间',
     red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
     big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
