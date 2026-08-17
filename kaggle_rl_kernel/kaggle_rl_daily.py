@@ -445,50 +445,26 @@ def precompute_omission_3d(records):
                 last_seen[pos][records[idx]['digits'][pos]] = idx
     return omit_arr
 
-
-def build_kl8_candidate_pool(records, idx, pool_size=30):
-    """
-    构建快乐8候选号码池（用于PPO打分排序，而非直接在80个球里选组合）
-    池子 = 近30期热号 + 遗漏较久的号码，动态跟随当前idx
-    """
-    window = records[max(0,idx-30):idx]
-    freq = Counter(n for r in window for n in r['numbers'])
-    hot = [x[0] for x in freq.most_common(20)]
-    cold = [x[0] for x in freq.most_common()[-15:]] if freq else []
-    pool = list(dict.fromkeys(hot + cold))  # 去重保序
-    if len(pool) < pool_size:
-        remain = [n for n in range(1,81) if n not in pool]
-        pool += remain[:pool_size-len(pool)]
-    return sorted(pool[:pool_size])
-
-
-def build_ssq_red_pool(records, idx, pool_size=18):
-    """
-    构建双色球红球候选池（33个红球里选一批候选，PPO对候选池打分排序取Top6）
-    """
-    window = records[max(0,idx-30):idx]
-    freq = Counter(n for r in window for n in r['red'])
-    hot = [x[0] for x in freq.most_common(12)]
-    cold = [x[0] for x in freq.most_common()[-8:]] if freq else []
-    pool = list(dict.fromkeys(hot + cold))
-    if len(pool) < pool_size:
-        remain = [n for n in range(1,34) if n not in pool]
-        pool += remain[:pool_size-len(pool)]
-    return sorted(pool[:pool_size])
-
 # ══════════════════════════════════════════════════════
 #  ML概率向量 + 遗漏向量
 # ══════════════════════════════════════════════════════
-def extract_ml_prob_vec(ml_pred, game):
+def extract_ml_prob_vec(ml_pred, game, verbose=True):
     vec = []
     models_data = ml_pred.get('models', {})
     # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
     if game=='3d': tk=['bai','shi','ge','sum_grp','odd']; nc=[10,10,10,3,4]; offsets=[0,0,0,0,0]
     elif game=='ssq': tk=['blue','odd','sum_grp','ac_grp','red_zone_dom','gap_grp']; nc=[16,7,3,3,3,3]; offsets=[1,0,0,0,0,0]
     else: tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']; nc=[3,4,3,3,5,3,3]; offsets=[0,0,0,0,0,0,0]
+    found, missing = [], []
     for tkey,n,off in zip(tk,nc,offsets):
         m = models_data.get(tkey,{}); probs = m.get('prediction',{}).get('probs',{})
-        vec.extend([float(probs.get(str(i+off),0.0))/100.0 for i in range(n)])
+        seg = [float(probs.get(str(i+off),0.0))/100.0 for i in range(n)]
+        vec.extend(seg)
+        (found if any(v>0 for v in seg) else missing).append(tkey)
+    if verbose:
+        print(f"    [传统ML状态注入验证] {game}: 成功读到概率的目标={found}")
+        if missing:
+            print(f"    ⚠️ [传统ML状态注入验证] 以下目标概率全为0，未生效={missing}（请确认 kaggle_fucai.py 已用最新目标重新跑过）")
     return np.array(vec, dtype=np.float32)
 
 # （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
@@ -506,35 +482,35 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 # ══════════════════════════════════════════════════════
 #  集成环境
 # ══════════════════════════════════════════════════════
-KL8_POOL_SIZE = 30   # 候选池大小
-KL8_TRAIN_N   = 6    # 训练时用"选六"作为奖励标准，推荐时对同一个排序取不同TopN即可覆盖所有玩法
+KL8_TRAIN_N = 6    # 训练时用"选六"作为奖励标准，推荐时对同一个排序取不同TopN即可覆盖所有玩法
 
 class IntegratedKL8Env(gym.Env):
     """
-    快乐8环境 v2：候选池打分排序
-    动作空间从 MultiBinary(80)（2^80种组合，几乎学不出东西）
-    改成 Box(pool_size)（对候选池中每个号码打一个连续分数），
-    取分数最高的N个作为选号，这是标准的排序学习问题，PPO容易收敛。
+    快乐8环境 v3：全号码打分排序（而非候选池预筛）
+    动作空间设计对比：
+    - MultiBinary(80)：2^80种组合，训练几十万步也探索不到万分之一，学不出东西
+    - 候选池Box(30)：只对预筛的30个候选打分，覆盖面受限，真正该选的号码若不在候选池里则永远选不到
+    - 本版 Box(80)：对全部80个球直接打连续分数，取Top6，
+      既保留全覆盖（跟MultiBinary一样能选中任意号码），
+      又是标准的排序学习问题（跟候选池一样好训练，PPO能有效利用梯度）
     """
     metadata={'render_modes':[]}
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, pool_size=KL8_POOL_SIZE, train_n=KL8_TRAIN_N):
+                 tfm_hidden, tfm_idx2row, omit_arr, train_n=KL8_TRAIN_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr
-        self.pool_size=pool_size; self.train_n=train_n
-        self.start=SEQ_LEN+30; self.idx=self.start   # 需要更长历史构建候选池
+        self.train_n=train_n
+        self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
-        omit_dim = 80
-        # 状态里额外加入候选池号码的遗漏值，帮助Agent区分候选池内部差异
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+pool_size
+        omit_dim = 80   # 全部80个球的遗漏值，本身就自带"每个球的差异化信息"，不需要额外候选池子向量
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
-        self.action_space = spaces.Box(low=-1.,high=1.,shape=(pool_size,),dtype=np.float32)
-        self._pool = None
+        self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
 
     def _state(self):
         feat=self.feat_fn(self.records,self.idx)
@@ -550,11 +526,7 @@ class IntegratedKL8Env(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
 
-        self._pool = build_kl8_candidate_pool(self.records, self.idx, self.pool_size)
-        pool_omit = np.array([self.omit_arr[self.idx][n-1] for n in self._pool], dtype=np.float32) \
-                    if self.omit_arr is not None else np.zeros(self.pool_size,dtype=np.float32)
-
-        state = np.concatenate([raw,self.ml_vec,lh,th,om,pool_omit]).astype(np.float32)
+        state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
         return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
     def reset(self, seed=None, options=None):
@@ -562,10 +534,9 @@ class IntegratedKL8Env(gym.Env):
         return self._state(), {}
 
     def step(self, action):
-        pool = self._pool if self._pool is not None else build_kl8_candidate_pool(self.records, self.idx, self.pool_size)
-        # 取分数最高的 train_n 个作为本期选号
+        # 对全部80个球的打分，取分数最高的 train_n 个作为本期选号
         top_idx = np.argsort(action)[-self.train_n:]
-        selected = sorted([pool[i] for i in top_idx])
+        selected = sorted([i+1 for i in top_idx])
 
         actual=set(self.records[self.idx]['numbers'])
         hit=len(actual&set(selected)); n_sel=len(selected)
@@ -576,37 +547,34 @@ class IntegratedKL8Env(gym.Env):
         return obs, reward, terminated, False, {'hit':hit,'n_sel':n_sel,'net':net}
 
 
-SSQ_RED_POOL_SIZE = 18   # 红球候选池大小
-SSQ_RED_PICK_N    = 6    # 双色球固定选6个红球
+SSQ_RED_PICK_N = 6    # 双色球固定选6个红球
 
 class IntegratedSSQEnv(gym.Env):
     """
-    双色球环境 v2：红球候选池打分排序 + 蓝球打分，两者融合进同一个Box动作空间
-    动作向量 = [红球候选池18个分数, 蓝球16个分数]，共34维
-    - 红球：候选池中分数最高的6个作为选号
-    - 蓝球：16个分数里argmax作为选号
+    双色球环境 v3：红球全号码打分排序（33个全打分，不再预筛候选池）+ 蓝球打分
+    动作向量 = [33个红球分数, 16个蓝球分数]，共49维
+    - 红球：33个球全部打分，取Top6
+    - 蓝球：16个分数argmax
+    理由同快乐8：候选池预筛会限制覆盖面，全量打分既保留完整覆盖又保持可学习的连续参数化。
     奖励按双色球真实奖级结构分级，同时激励红球和蓝球命中。
     """
     metadata={'render_modes':[]}
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr,
-                 red_pool_size=SSQ_RED_POOL_SIZE, red_pick_n=SSQ_RED_PICK_N):
+                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr
-        self.red_pool_size=red_pool_size; self.red_pick_n=red_pick_n
+        self.red_pick_n=red_pick_n
         self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
-        omit_dim = 49
-        # 状态额外加入红球候选池各号码的遗漏值
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+red_pool_size
+        omit_dim = 49   # 33红球+16蓝球遗漏值，已含每个号码的差异化信息
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
-        self.action_space = spaces.Box(low=-1.,high=1.,shape=(red_pool_size+16,),dtype=np.float32)
-        self._red_pool = None
+        self.action_space = spaces.Box(low=-1.,high=1.,shape=(33+16,),dtype=np.float32)
 
     def _state(self):
         feat=self.feat_fn(self.records,self.idx)
@@ -622,11 +590,7 @@ class IntegratedSSQEnv(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
 
-        self._red_pool = build_ssq_red_pool(self.records, self.idx, self.red_pool_size)
-        pool_omit = np.array([self.omit_arr[self.idx][n-1] for n in self._red_pool], dtype=np.float32) \
-                    if self.omit_arr is not None else np.zeros(self.red_pool_size,dtype=np.float32)
-
-        state = np.concatenate([raw,self.ml_vec,lh,th,om,pool_omit]).astype(np.float32)
+        state = np.concatenate([raw,self.ml_vec,lh,th,om]).astype(np.float32)
         return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
     def reset(self, seed=None, options=None):
@@ -645,12 +609,11 @@ class IntegratedSSQEnv(gym.Env):
         return -1.0   # 未中奖（成本）
 
     def step(self, action):
-        red_pool = self._red_pool if self._red_pool is not None else build_ssq_red_pool(self.records, self.idx, self.red_pool_size)
-        red_scores  = action[:self.red_pool_size]
-        blue_scores = action[self.red_pool_size:]
+        red_scores  = action[:33]
+        blue_scores = action[33:]
 
         top_idx = np.argsort(red_scores)[-self.red_pick_n:]
-        red_selected = sorted([red_pool[i] for i in top_idx])
+        red_selected = sorted([i+1 for i in top_idx])
         blue_pred = int(np.argmax(blue_scores)) + 1
 
         actual_red = set(self.records[self.idx]['red'])
@@ -763,7 +726,7 @@ def push_rl_dataset():
 #  主流程：kl8 增量微调
 # ══════════════════════════════════════════════════════
 def run_kl8_daily(records, ml_pred):
-    print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（候选池打分排序，{len(records)}期）\n{'='*50}")
+    print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
     _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
@@ -772,12 +735,14 @@ def run_kl8_daily(records, ml_pred):
     t0 = time.time()
     lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
     tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
     t0 = time.time()
     omit_arr = precompute_omission_kl8(records)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（80维，覆盖全部号码）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维")
 
     def make_env():
         return IntegratedKL8Env(records, fkl8, ml_vec,
@@ -794,7 +759,7 @@ def run_kl8_daily(records, ml_pred):
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
     if is_new:
-        print("  首次训练（20万步，候选池打分排序问题，学习难度远低于原MultiBinary(80)方案）…")
+        print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                     n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
                     verbose=0, device='cpu')
@@ -806,42 +771,39 @@ def run_kl8_daily(records, ml_pred):
 
     save_ppo(model, 'kl8')
 
-    def build_state_and_pool(idx):
+    def build_state(idx):
         feat = fkl8(records, idx)
-        if feat is None: return None, None
+        if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        pool = build_kl8_candidate_pool(records, idx, KL8_POOL_SIZE)
-        pool_omit = np.array([omit_arr[idx][n-1] for n in pool], dtype=np.float32)
-        state = np.concatenate([raw,ml_vec,lh,th,om,pool_omit]).astype(np.float32)
-        state = np.clip(state/(np.abs(state).max()+1e-8),-5,5)
-        return state, pool
+        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
+        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
     # 回测：按训练时的N=6（选六）标准评估
     start = max(SEQ_LEN+30, len(records)-30)
     total_net=0; games=0
     for idx in range(start, len(records)-1):
-        state, pool = build_state_and_pool(idx)
+        state = build_state(idx)
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
         top_idx = np.argsort(action)[-KL8_TRAIN_N:]
-        selected = sorted([pool[i] for i in top_idx])
+        selected = sorted([i+1 for i in top_idx])
         actual=set(records[idx]['numbers'])
         net = calc_payout(len(selected), len(actual&set(selected)))
         total_net+=net; games+=1
     avg_net = round(total_net/games,2) if games else 0
     print(f"  回测（近{games}期，选六标准）平均净收益: {avg_net}元/期")
 
-    # 今日推荐：用同一套打分对候选池排序，取不同TopN覆盖各玩法
+    # 今日推荐：用同一套打分对全部80个球排序，取不同TopN覆盖各玩法
     idx = len(records)-1
-    state, pool = build_state_and_pool(idx)
+    state = build_state(idx)
     ranked = []
     if state is not None:
         action,_ = model.predict(state, deterministic=True)
-        order = np.argsort(action)[::-1]   # 分数从高到低排序
-        ranked = [pool[i] for i in order]
+        order = np.argsort(action)[::-1]   # 分数从高到低排序（全部80个球）
+        ranked = [i+1 for i in order]
 
     def top_n(n): return sorted(ranked[:n]) if ranked else []
 
@@ -849,27 +811,30 @@ def run_kl8_daily(records, ml_pred):
 
     return {'avg_net_per_game':avg_net,'games_tested':games,
             'ppo_selected':picks_by_n[6],   # 兼容旧字段，默认给选六结果
-            'ppo_ranked_pool':ranked,       # 完整排序结果，前端可自行截取TopN
+            'ppo_ranked_pool':ranked,       # 完整80球排序结果，前端可自行截取TopN
             'picks_by_n':picks_by_n,        # 各玩法直接可用的推荐
             'is_first_train':is_new,
-            'note':f'PPO候选池打分排序（池大小{KL8_POOL_SIZE}），回测净收益{avg_net}元/期（选六标准）'}
+            'note':f'PPO对全部80个球连续打分排序（非候选池预筛），回测净收益{avg_net}元/期（选六标准）'}
 
 
 def run_ssq_daily(records, ml_pred):
-    print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球候选池打分+蓝球，{len(records)}期）\n{'='*50}")
+    print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
-    lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=len(fssq(records, len(records)-1) or {}))
+    _cur_feat_dim = len(fssq(records, len(records)-1) or {})
+    lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
     lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
     tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
     t0 = time.time()
     omit_arr = precompute_omission_ssq(records)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
 
     def make_env():
         return IntegratedSSQEnv(records, fssq, ml_vec,
@@ -886,7 +851,7 @@ def run_ssq_daily(records, ml_pred):
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
     if is_new:
-        print("  首次训练（15万步，红球候选池排序+蓝球联合优化）…")
+        print("  首次训练（15万步，红球33全量打分+蓝球联合优化）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                     n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
                     verbose=0, device='cpu')
@@ -898,36 +863,32 @@ def run_ssq_daily(records, ml_pred):
 
     save_ppo(model, 'ssq')
 
-    def build_state_and_pool(idx):
+    def build_state(idx):
         feat = fssq(records, idx)
-        if feat is None: return None, None
+        if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        red_pool = build_ssq_red_pool(records, idx, SSQ_RED_POOL_SIZE)
-        pool_omit = np.array([omit_arr[idx][n-1] for n in red_pool], dtype=np.float32)
-        state = np.concatenate([raw,ml_vec,lh,th,om,pool_omit]).astype(np.float32)
-        state = np.clip(state/(np.abs(state).max()+1e-8),-5,5)
-        return state, red_pool
+        state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
+        return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
-    # 回测最近30期：红球命中数分布 + 蓝球命中率 + 综合中奖统计
+    # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
-    total=0; blue_correct=0; red_hit_dist={0:0,1:0,2:0,3:0,4:0,5:0,6:0}; any_prize=0
+    total=0; blue_correct=0; red_hit_dist={0:0,1:0,2:0,3:0,4:0,5:0,6:0}
     for idx in range(start, len(records)-1):
-        state, red_pool = build_state_and_pool(idx)
+        state = build_state(idx)
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
-        red_scores = action[:SSQ_RED_POOL_SIZE]; blue_scores = action[SSQ_RED_POOL_SIZE:]
+        red_scores = action[:33]; blue_scores = action[33:]
         top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-        red_selected = set(red_pool[i] for i in top_idx)
+        red_selected = set(i+1 for i in top_idx)
         blue_pred = int(np.argmax(blue_scores))+1
 
         actual_red = set(records[idx]['red']); actual_blue = records[idx]['blue']
         rh = len(actual_red & red_selected); bh = int(blue_pred==actual_blue)
         red_hit_dist[rh]+=1
         if bh: blue_correct+=1
-        if rh>=3 or (rh>=3 and bh) or bh: any_prize+=1  # 简化：≥3红或中蓝球算"有奖级"
         total+=1
 
     blue_acc = round(blue_correct/total*100,1) if total else 0
@@ -936,37 +897,40 @@ def run_ssq_daily(records, ml_pred):
 
     # 今日推荐
     idx = len(records)-1
-    state, red_pool = build_state_and_pool(idx)
+    state = build_state(idx)
     red_selected=[]; blue_pred=None
     if state is not None:
         action,_ = model.predict(state, deterministic=True)
-        red_scores = action[:SSQ_RED_POOL_SIZE]; blue_scores = action[SSQ_RED_POOL_SIZE:]
+        red_scores = action[:33]; blue_scores = action[33:]
         top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-        red_selected = sorted([red_pool[i] for i in top_idx])
+        red_selected = sorted([i+1 for i in top_idx])
         blue_pred = int(np.argmax(blue_scores))+1
 
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
             'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
             'is_first_train':is_new,
-            'note':f'PPO红球候选池打分排序(池{SSQ_RED_POOL_SIZE}个)+蓝球联合优化，红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%'}
+            'note':f'PPO红球33全量打分排序（非候选池预筛）+蓝球联合优化，红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%'}
 
 
 def run_3d_daily(records, ml_pred):
     print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
     ml_vec = extract_ml_prob_vec(ml_pred, '3d')
-    lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=len(f3d(records, len(records)-1) or {}))
+    _cur_feat_dim = len(f3d(records, len(records)-1) or {})
+    lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
     lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm)
     tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
     t0 = time.time()
     omit_arr = precompute_omission_3d(records)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
 
     def make_env():
         return Integrated3DEnv(records, f3d, ml_vec,
