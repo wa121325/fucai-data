@@ -540,7 +540,12 @@ class IntegratedKL8Env(gym.Env):
 
         actual=set(self.records[self.idx]['numbers'])
         hit=len(actual&set(selected)); n_sel=len(selected)
-        net=calc_payout(n_sel,hit); reward=net/(TICKET_PRICE*100)
+        net=calc_payout(n_sel,hit)
+        # 快乐8真实赔率表在命中0-2个球时统统赔0（选6时命中期望仅1.5个，绝大多数样本落在这个区间），
+        # 导致奖励大范围完全一样、没有梯度信号，PPO学不到跟状态相关的规律，只会随机收敛到某个固定偏向。
+        # 加一个连续塑形项：命中率越高奖励越好，覆盖赔率表的"平坦区"，让policy始终有梯度可学。
+        shaping = (hit / n_sel) * 0.3
+        reward = net/(TICKET_PRICE*100) + shaping
         self.idx+=1
         terminated=(self.idx>=len(self.records)-1)
         obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
@@ -621,6 +626,8 @@ class IntegratedSSQEnv(gym.Env):
         red_hit = len(actual_red & set(red_selected))
         blue_hit = int(blue_pred == actual_blue)
         reward = self._tier_reward(red_hit, blue_hit)
+        # 红球选6个从33个里选，命中期望约1.09个，0-2命中区间同样存在奖励梯度不足问题，加小塑形项
+        reward += (red_hit / 6.0) * 0.5
 
         self.idx+=1
         terminated=(self.idx>=len(self.records)-1)
@@ -781,20 +788,38 @@ def run_kl8_daily(records, ml_pred):
         state = np.concatenate([raw,ml_vec,lh,th,om]).astype(np.float32)
         return np.clip(state/(np.abs(state).max()+1e-8),-5,5)
 
-    # 回测：按训练时的N=6（选六）标准评估
+    # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
     start = max(SEQ_LEN+30, len(records)-30)
-    total_net=0; games=0
+    play_sizes = [4,5,6,9,10]
+    net_by_size = {n: 0.0 for n in play_sizes}
+    hit_by_size = {n: 0.0 for n in play_sizes}
+    games=0
     for idx in range(start, len(records)-1):
         state = build_state(idx)
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
-        top_idx = np.argsort(action)[-KL8_TRAIN_N:]
-        selected = sorted([int(i)+1 for i in top_idx])
+        order = np.argsort(action)[::-1]
+        ranked_all = [int(i)+1 for i in order]   # 一次打分，全部玩法复用同一个排序结果
         actual=set(records[idx]['numbers'])
-        net = calc_payout(len(selected), len(actual&set(selected)))
-        total_net+=net; games+=1
-    avg_net = round(total_net/games,2) if games else 0
-    print(f"  回测（近{games}期，选六标准）平均净收益: {avg_net}元/期")
+        for n in play_sizes:
+            sel = set(ranked_all[:n])
+            hit = len(actual & sel)
+            net_by_size[n] += calc_payout(n, hit)
+            hit_by_size[n] += hit
+        games+=1
+
+    backtest_by_play = {}
+    for n in play_sizes:
+        avg_net = round(net_by_size[n]/games,2) if games else 0
+        avg_hit = round(hit_by_size[n]/games,2) if games else 0
+        backtest_by_play[n] = {'avg_net_per_game':avg_net,'avg_hit':avg_hit}
+
+    # 找出净收益回测表现最好的玩法（仅供参考，彩票本质随机，历史回测不代表未来）
+    best_play_n = max(play_sizes, key=lambda n: backtest_by_play[n]['avg_net_per_game'])
+    avg_net = backtest_by_play[6]['avg_net_per_game']   # 兼容旧字段：保留选六作为默认展示值
+    print(f"  回测（近{games}期，全玩法对比）：" + "  ".join(
+        f"选{['','','','','四','五','六','','','九','十'][n]}净收益{backtest_by_play[n]['avg_net_per_game']}元/期" for n in play_sizes))
+    print(f"  回测表现最好的玩法：选{['','','','','四','五','六','','','九','十'][best_play_n]}")
 
     # 今日推荐：用同一套打分对全部80个球排序，取不同TopN覆盖各玩法
     idx = len(records)-1
@@ -837,8 +862,10 @@ def run_kl8_daily(records, ml_pred):
             'ppo_selected':picks_by_n[6],   # 兼容旧字段
             'picks_by_n':picks_by_n,        # 兼容旧字段
             'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
+            'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
+            'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
             'is_first_train':is_new,
-            'note':f'PPO对全部80个球连续打分排序（随机采样生成多组），回测净收益{avg_net}元/期（选六标准）'}
+            'note':f'PPO对全部80个球连续打分排序（随机采样生成多组），选六净收益{avg_net}元/期，全玩法回测对比见backtest_by_play'}
 
 
 def run_ssq_daily(records, ml_pred):
