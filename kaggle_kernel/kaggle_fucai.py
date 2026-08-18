@@ -909,12 +909,57 @@ def rec3d(records, ml, mk, om):
     sm_label = {0:'小(0-9)', 1:'中(10-17)', 2:'大(18-27)'}.get(sm_pred, '中(10-17)')
     mk_hint = [f"{'百十个'[it['pos']]}位→可能{'、'.join(str(v) for v,_ in it['top3'][:3])}" for it in (mk or [])]
 
+    # ── 衍生玩法推荐：组选3/6、和值大小、和值奇偶、跨度 ──
+    # 全部从已有的group_type/sum_grp/odd/span_grp预测推算，不需要额外训练目标
+    derived = {}
+
+    # 组选类型：直接用group_type预测
+    gt_m = ml.get('group_type', {})
+    if gt_m:
+        gt_pred = gt_m.get('prediction', {}).get('value', 2)
+        gt_conf = gt_m.get('prediction', {}).get('confidence', 0)
+        gt_label = {0:'豹子（三同号）', 1:'组三', 2:'组六'}.get(gt_pred, '组六')
+        bet_type = '直选' if gt_pred==0 else (f'组选3' if gt_pred==1 else '组选6')
+        derived['group_bet'] = {'name':'组选类型', 'pred':gt_label, 'confidence':gt_conf,
+                                 'suggest':f'建议投注：{bet_type}'}
+
+    # 和值大小：用sum_grp的概率分布估算P(大)，阈值≈13.5（sum>=14为大）
+    if sm_m:
+        sm_probs = sm_m.get('prediction', {}).get('probs', {})
+        p_low = float(sm_probs.get('0', 0))/100.0
+        p_mid = float(sm_probs.get('1', 0))/100.0
+        p_high = float(sm_probs.get('2', 0))/100.0
+        p_big = p_high + 0.5*p_mid   # 中档大约一半落在大、一半落在小
+        big_label = '大' if p_big >= 0.5 else '小'
+        derived['sum_big_small'] = {'name':'和值大小', 'pred':big_label,
+                                     'confidence':round(max(p_big,1-p_big)*100,1),
+                                     'suggest':f'建议投注：和值{big_label}（估计概率{round(max(p_big,1-p_big)*100,1)}%）'}
+
+    # 和值奇偶：数学恒等关系——奇数个数的奇偶性 = 和值的奇偶性（偶数不影响奇偶，每个奇数贡献1）
+    odd_m = ml.get('odd', {})
+    if odd_m:
+        odd_pred = odd_m.get('prediction', {}).get('value', 1)
+        odd_conf = odd_m.get('prediction', {}).get('confidence', 0)
+        sum_parity = '奇' if odd_pred % 2 == 1 else '偶'
+        derived['sum_odd_even'] = {'name':'和值奇偶', 'pred':sum_parity, 'confidence':odd_conf,
+                                    'suggest':f'建议投注：和值{sum_parity}（由奇数个数预测={odd_pred}推算，数学恒等关系，非独立预测）'}
+
+    # 跨度：直接用span_grp
+    span_m = ml.get('span_grp', {})
+    if span_m:
+        span_pred = span_m.get('prediction', {}).get('value', 1)
+        span_conf = span_m.get('prediction', {}).get('confidence', 0)
+        span_label = {0:'小跨度(0-3)', 1:'中跨度(4-6)', 2:'大跨度(7-9)'}.get(span_pred, '中跨度(4-6)')
+        derived['span_bet'] = {'name':'跨度', 'pred':span_label, 'confidence':span_conf,
+                                'suggest':f'建议投注：{span_label}'}
+
     return {
         'groups': groups[:6],
         'pos_candidates': candidates,
         'sum_pred': sm_label,
         'markov_hint': mk_hint,
         'overdue': [it.get('overdue', []) for it in (om or [])],
+        'derived_plays': derived,
         'note': '综合ML概率+马尔可夫转移+遗漏分析三路投票，预测下一期特征生成参考号码，仅供娱乐。'
     }
 
