@@ -4,9 +4,13 @@ on:
   workflow_run:
     workflows: ["触发 Kaggle 运行"]   # 必须和 crawl.yml 的 name 完全一致
     types: [completed]
-  schedule:
-    - cron: '0 15 * * *'    # 兜底：万一上游没触发，23:00左右强制兜底跑一次
   workflow_dispatch:
+  # 注意：不再设置 cron 兜底。
+  # 之前加的兜底 cron 是"无脑触发"，不会检查当天是否已经通过 workflow_run 跑过，
+  # 结果导致 RL 一天内被触发两次（workflow_run一次 + cron一次），
+  # 每次都在昨天权重基础上继续学2万步，等于当天学习量翻倍，即"过度学习"。
+  # 如果 workflow_run 因为某种极端情况没有触发，手动点 workflow_dispatch 补跑一次即可，
+  # 比放一个可能导致重复执行的定时兜底更可控。
 
 jobs:
   trigger-rl:
