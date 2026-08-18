@@ -888,6 +888,27 @@ def run_kl8_daily(records, ml_pred):
 
 def run_ssq_daily(records, ml_pred):
     print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
+
+    # ── 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新一期数据 ──
+    # 之前每天不管有没有新开奖都会强制训练15000步，等于在4/7的天数里
+    # 拿完全相同的历史数据反复做梯度更新，纯粹浪费算力还会助推过拟合。
+    # 用一个持久化计数文件记录"上次训练时的期数"，跟当前期数对比，没有新增就跳过。
+    ssq_count_path_local  = f'{RL_LOCAL_DIR}/ssq_last_trained_n.json'
+    ssq_count_path_mount  = f'{RL_MOUNTED}/ssq_last_trained_n.json'
+    last_trained_n = 0
+    if os.path.exists(ssq_count_path_mount):
+        try:
+            with open(ssq_count_path_mount) as f: last_trained_n = json.load(f).get('n', 0)
+        except Exception: pass
+
+    if len(records) <= last_trained_n:
+        print(f"  今日双色球无新开奖（当前{len(records)}期，上次训练时已是{last_trained_n}期，"
+              f"本期非开奖日：周二/四/日才开奖），跳过训练，直接沿用上次结果")
+        os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+        with open(ssq_count_path_local, 'w') as f: json.dump({'n': len(records)}, f)  # 仍需持久化，供Dataset同步
+        return {'skipped': True, 'games_tested': 0, 'reason': '非开奖日，无新数据',
+                'note': '双色球周二/四/日开奖，今日非开奖日，未产生新数据，跳过本次训练'}
+
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
@@ -986,6 +1007,10 @@ def run_ssq_daily(records, ml_pred):
     # 兼容旧字段：主推荐仍取第一注
     red_selected = groups[0]['red'] if groups else []
     blue_pred = groups[0]['blue'] if groups else None
+
+    # 记录本次训练时的期数，供下次运行判断是否有新开奖
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    with open(ssq_count_path_local, 'w') as f: json.dump({'n': len(records)}, f)
 
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
