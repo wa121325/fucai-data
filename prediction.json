@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-18 14:14",
+  "updated_at": "2026-08-18 23:38",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8728,
-      "updated_at": "2026-08-18 14:08",
+      "updated_at": "2026-08-18 23:31",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -908,6 +908,32 @@
             9
           ]
         ],
+        "derived_plays": {
+          "group_bet": {
+            "name": "组选类型",
+            "pred": "组六",
+            "confidence": 63.0,
+            "suggest": "建议投注：组选6"
+          },
+          "sum_big_small": {
+            "name": "和值大小",
+            "pred": "大",
+            "confidence": 54.9,
+            "suggest": "建议投注：和值大（估计概率54.9%）"
+          },
+          "sum_odd_even": {
+            "name": "和值奇偶",
+            "pred": "偶",
+            "confidence": 31.4,
+            "suggest": "建议投注：和值偶（由奇数个数预测=2推算，数学恒等关系，非独立预测）"
+          },
+          "span_bet": {
+            "name": "跨度",
+            "pred": "中跨度(4-6)",
+            "confidence": 43.0,
+            "suggest": "建议投注：中跨度(4-6)"
+          }
+        },
         "note": "综合ML概率+马尔可夫转移+遗漏分析三路投票，预测下一期特征生成参考号码，仅供娱乐。"
       },
       "ai_context": {
@@ -974,7 +1000,7 @@
     },
     "ssq": {
       "data_count": 3492,
-      "updated_at": "2026-08-18 14:10",
+      "updated_at": "2026-08-18 23:33",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -1917,7 +1943,7 @@
     },
     "kl8": {
       "data_count": 2041,
-      "updated_at": "2026-08-18 14:12",
+      "updated_at": "2026-08-18 23:36",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -2960,7 +2986,7 @@
     "date": "2026-08-18",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-08-17 23:09",
+        "prediction_generated_at": "2026-08-18 14:08",
         "actual_qihao": "2026220",
         "actual_date": "2026-08-18",
         "actual": [
@@ -2972,7 +2998,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-08-17 23:12",
+        "prediction_generated_at": "2026-08-18 14:10",
         "actual_qihao": "2026095",
         "actual_date": "2026-08-18",
         "actual_red": [
@@ -2986,15 +3012,15 @@
         "actual_blue": 16,
         "group_results": [
           {
+            "red_hit": 3,
+            "blue_hit": 0
+          },
+          {
             "red_hit": 1,
             "blue_hit": 0
           },
           {
-            "red_hit": 0,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 0,
+            "red_hit": 2,
             "blue_hit": 0
           },
           {
@@ -3010,10 +3036,10 @@
             "blue_hit": 0
           }
         ],
-        "best_red_hit": 2
+        "best_red_hit": 3
       },
       "kl8": {
-        "prediction_generated_at": "2026-08-17 23:15",
+        "prediction_generated_at": "2026-08-18 14:12",
         "actual_qihao": "2026220",
         "actual_date": "2026-08-18",
         "actual": [
@@ -3044,12 +3070,12 @@
             "balls": 4,
             "groups": [
               {
-                "hit": 0,
+                "hit": 1,
                 "balls": 4,
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 4,
                 "won": false
               },
@@ -3060,66 +3086,66 @@
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 1
           },
           "xuan5": {
             "name": "选五",
             "balls": 5,
             "groups": [
               {
+                "hit": 4,
+                "balls": 5,
+                "won": false
+              },
+              {
+                "hit": 3,
+                "balls": 5,
+                "won": false
+              },
+              {
                 "hit": 0,
-                "balls": 5,
-                "won": false
-              },
-              {
-                "hit": 1,
-                "balls": 5,
-                "won": false
-              },
-              {
-                "hit": 1,
                 "balls": 5,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 1
+            "best_hit": 4
           },
           "xuan5_fu": {
             "name": "选五复式",
             "balls": 5,
             "groups": [
               {
-                "hit": 1,
+                "hit": 4,
                 "balls": 5,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 1
+            "best_hit": 4
           },
           "xuan6": {
             "name": "选六",
             "balls": 6,
             "groups": [
               {
-                "hit": 1,
+                "hit": 4,
                 "balls": 6,
                 "won": false
               },
               {
-                "hit": 0,
+                "hit": 2,
                 "balls": 6,
                 "won": false
               },
               {
-                "hit": 0,
+                "hit": 2,
                 "balls": 6,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 1
+            "best_hit": 4
           },
           "xuan9": {
             "name": "选九",
@@ -3131,7 +3157,7 @@
                 "won": false
               },
               {
-                "hit": 1,
+                "hit": 2,
                 "balls": 9,
                 "won": false
               }
@@ -3144,16 +3170,16 @@
             "balls": 10,
             "groups": [
               {
-                "hit": 1,
+                "hit": 3,
                 "balls": 10,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 1
+            "best_hit": 3
           }
         },
-        "best_hit": 2
+        "best_hit": 4
       }
     }
   },
