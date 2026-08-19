@@ -877,29 +877,6 @@
 
   /* ═══════════════ 扫码存档 Tab ═══════════════ */
   .scanLayout{max-width:640px;margin:0 auto;}
-  .cameraStage{
-    position:relative;
-    width:100%;
-    aspect-ratio:3/4;
-    background:#1a1712;
-    border-radius:14px;
-    overflow:hidden;
-    border:1px solid var(--panel-border);
-    cursor:pointer;
-  }
-  .cameraStage video{
-    width:100%;height:100%;object-fit:cover;display:block;
-  }
-  .cameraStage.off video{display:none;}
-  .cameraStage.off{cursor:default;}
-  .cameraPlaceholder{
-    position:absolute;inset:0;
-    display:flex;flex-direction:column;align-items:center;justify-content:center;
-    gap:10px;color:#c9c2b4;font-size:13px;text-align:center;padding:24px;
-  }
-  .cameraPlaceholder .bigIcon{font-size:38px;opacity:.7;}
-  .cameraStage.off .cameraPlaceholder{display:flex;}
-  .cameraStage:not(.off) .cameraPlaceholder{display:none;}
   .scanModeRow{
     display:flex;gap:6px;margin-bottom:10px;
   }
@@ -911,60 +888,6 @@
   }
   .scanModePill:hover{border-color:#c7c0b0;}
   .scanModePill.active{background:var(--ink);color:#fff;border-color:var(--ink);}
-  .scanGuide{
-    position:absolute;
-    left:8%; right:8%; bottom:14%;
-    height:15%;
-    border:2px solid #f1d688;
-    border-radius:8px;
-    box-shadow:0 0 0 999px rgba(0,0,0,.42);
-    pointer-events:none;
-    transition:all .2s ease;
-  }
-  /* 名称/金额模式：取景框挪到画面中上部，票面标题/价格通常在这一带 */
-  .scanGuide.modeCenter{
-    left:14%; right:14%; bottom:auto; top:24%;
-    height:20%;
-  }
-  .scanGuide::before{
-    content:'对准编号区域';
-    position:absolute;
-    top:-26px;left:50%;transform:translateX(-50%);
-    font-size:12px;color:#f1d688;white-space:nowrap;
-    font-weight:600;letter-spacing:.02em;
-  }
-  .scanGuide.modeName::before{ content:'对准票名区域'; }
-  .scanGuide.modeAmount::before{ content:'对准面值区域'; }
-  /* 实时清晰度反馈：暗红=模糊(需调整距离)，黄=检测中，绿=可以拍了 */
-  .scanGuide.sharpBlur{ border-color:#c0392b; box-shadow:0 0 0 999px rgba(0,0,0,.42), 0 0 14px rgba(192,57,43,.7); }
-  .scanGuide.sharpBlur::after{
-    content:'画面模糊，请调整距离';
-    position:absolute; bottom:-24px; left:50%; transform:translateX(-50%);
-    font-size:11px; color:#e97a6e; white-space:nowrap; font-weight:600;
-  }
-  .scanGuide.sharpOk{ border-color:#27ae60; box-shadow:0 0 0 999px rgba(0,0,0,.42), 0 0 14px rgba(39,174,96,.8); }
-  .scanGuide.sharpOk::after{
-    content:'✓ 清晰，可以拍照';
-    position:absolute; bottom:-24px; left:50%; transform:translateX(-50%);
-    font-size:11px; color:#6fcf97; white-space:nowrap; font-weight:600;
-  }
-  .scanControls{
-    display:flex;gap:8px;margin-top:12px;
-  }
-  .scanControls .btn{flex:1;}
-  .scanResultBox{
-    margin-top:14px;padding:14px;
-    background:#faf9f6;border:1px solid var(--panel-border);border-radius:12px;
-  }
-  .scanResultBox label{
-    display:block;font-size:12px;color:var(--muted);margin-bottom:6px;
-  }
-  .scanResultBox input{
-    width:100%;padding:10px 12px;border:1px solid var(--panel-border);
-    border-radius:8px;font-size:15px;font-family:"Rajdhani",monospace;
-    letter-spacing:.04em;font-weight:700;color:var(--ink);
-  }
-  .scanResultActions{display:flex;gap:8px;margin-top:10px;}
   .scanCropPreview{
     margin-top:10px;padding:10px;
     background:#1a1712;border-radius:10px;text-align:center;
@@ -976,17 +899,9 @@
   .scanCropPreview .cropHint{
     font-size:11px;color:#c9c2b4;margin-top:6px;
   }
-  .scanZoomRow{
-    display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--muted);
-  }
-  .scanZoomRow input[type=range]{flex:1;}
-  .scanDivider{
-    display:flex;align-items:center;gap:10px;margin:18px 0;color:var(--muted);font-size:12px;
-  }
-  .scanDivider::before,.scanDivider::after{content:'';flex:1;height:1px;background:var(--panel-border);}
   .nativeCamBtn{
     width:100%;padding:12px;border-radius:10px;
-    background:#1a6b1a;color:#fff;border:none;font-size:14px;font-weight:700;
+    background:var(--accent);color:#fff;border:none;font-size:14px;font-weight:700;
     cursor:pointer;
   }
   .nativeCamHint{font-size:11px;color:var(--muted);margin-top:6px;text-align:center;}
@@ -1005,7 +920,6 @@
   }
   .cropActions{display:flex;gap:8px;margin-top:10px;}
   .cropActions .btn{flex:1;}
-  .scanResultActions .btn{flex:1;}
   .scanFieldsForm{margin-top:14px;}
   .scanFieldRow{
     display:flex;gap:8px;margin-bottom:10px;align-items:flex-end;
@@ -1320,7 +1234,7 @@
 
     <!-- 扫码存档Tab内容 -->
     <div id="tabScan" class="tabContent">
-      <p class="appSub">名称/金额/编号支持摄像头拍照识别，中奖金额刮开后手动填写。四项凑齐后加入清单，记录同步保存到 GitHub 仓库，也可一键导出Excel。</p>
+      <p class="appSub">名称/金额/编号支持拍照自动识别，中奖金额刮开后手动填写。四项凑齐后加入清单，记录同步保存到 GitHub 仓库，也可一键导出Excel。</p>
 
       <div class="scanLayout">
         <div class="panel">
@@ -1338,41 +1252,17 @@
         </div>
 
         <div class="panel">
-          <h2>摄像头取景</h2>
+          <h2>拍照识别</h2>
           <div class="scanModeRow">
             <div class="scanModePill" data-mode="name">① 拍票名</div>
             <div class="scanModePill" data-mode="amount">② 拍面值</div>
             <div class="scanModePill active" data-mode="code">③ 拍编号</div>
           </div>
-          <div class="cameraStage off" id="cameraStage">
-            <video id="scanVideo" autoplay playsinline muted></video>
-            <div class="scanGuide modeCode" id="scanGuide"></div>
-            <div class="cameraPlaceholder">
-              <div class="bigIcon">📷</div>
-              <div>选择上方拍摄内容，点击「开启摄像头」后对准取景框<br><span style="font-size:11px;opacity:.7;">画面模糊时可点击画面尝试对焦</span></div>
-            </div>
-          </div>
-          <canvas id="scanCanvas" style="display:none;"></canvas>
 
-          <div class="scanControls">
-            <button class="btn secondary" id="scanCameraToggleBtn">开启摄像头</button>
-            <button class="btn" id="scanCaptureBtn" disabled>拍照识别</button>
-          </div>
-          <div class="scanZoomRow" id="scanZoomRow" style="display:none;">
-            <span>🔍变焦</span>
-            <input type="range" id="scanZoomSlider" min="1" max="1" step="0.1" value="1">
-            <span id="scanZoomVal">1.0×</span>
-          </div>
-          <div class="status" id="scanCameraStatus"></div>
-          <div class="scanCropPreview" id="scanCropPreview" style="display:none;">
-            <img id="scanCropImg" alt="拍摄区域预览">
-            <div class="cropHint">↑ 实际送去识别的裁剪区域（放大显示），若模糊请重新对焦/靠近或用变焦滑块后重拍</div>
-          </div>
-
-          <div class="scanDivider">实时取景模糊解决不了？试试下面这个</div>
           <input type="file" accept="image/*" capture="environment" id="nativeCamInput" style="display:none;">
-          <button class="nativeCamBtn" id="nativeCamBtn">📷 用系统相机拍整张照片（对焦更可靠）</button>
-          <div class="nativeCamHint">调起手机自带相机App拍照，能用到手机真正的自动对焦和微距能力，拍完后框选需要的区域再识别</div>
+          <button class="nativeCamBtn" id="nativeCamBtn">📷 拍照（自动识别当前选中的内容）</button>
+          <div class="nativeCamHint">调起手机自带相机拍照，拍完自动尝试识别；识别不准时可在下方手动框选重试</div>
+          <div class="status" id="scanCameraStatus"></div>
 
           <div class="cropStage" id="cropStage">
             <img id="cropSourceImg" alt="拍摄的照片">
@@ -1384,6 +1274,10 @@
             <button class="btn" id="cropConfirmBtn">✓ 识别框选区域</button>
             <button class="btn ghost" id="cropCancelBtn">取消</button>
           </div>
+          <div class="scanCropPreview" id="scanCropPreview" style="display:none;">
+            <img id="scanCropImg" alt="识别区域预览">
+            <div class="cropHint" id="scanCropHintText">↑ 实际用于识别的区域</div>
+          </div>
 
           <div class="scanFieldsForm">
             <div class="scanFieldRow">
@@ -1391,21 +1285,21 @@
                 <label>① 票名</label>
                 <input type="text" id="fieldName" placeholder="例如：心想事成">
               </div>
-              <button class="miniCamBtn" data-mode="name">📷拍</button>
+              <button class="miniCamBtn" data-mode="name">重新框选</button>
             </div>
             <div class="scanFieldRow">
               <div class="field">
                 <label>② 面值（票面价格）</label>
                 <input type="text" id="fieldAmount" placeholder="例如：10元">
               </div>
-              <button class="miniCamBtn" data-mode="amount">📷拍</button>
+              <button class="miniCamBtn" data-mode="amount">重新框选</button>
             </div>
             <div class="scanFieldRow">
               <div class="field">
                 <label>③ 编号</label>
                 <input type="text" id="fieldCode" placeholder="例如：J0790-26147-0040880-135-3">
               </div>
-              <button class="miniCamBtn" data-mode="code">📷拍</button>
+              <button class="miniCamBtn" data-mode="code">重新框选</button>
             </div>
             <div class="scanFieldRow">
               <div class="field">
@@ -2453,8 +2347,6 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
     const stage=document.getElementById('stage');
     const trendWrap=document.getElementById('trendWrap');
     const credit=document.getElementById('previewCredit');
-    // 离开扫码页签时释放摄像头，避免占用/耗电
-    if(which!=='scan' && typeof stopScanCamera==='function') stopScanCamera();
 
     if(which==='trend'){
       stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
@@ -3898,17 +3790,19 @@ document.getElementById('chatClearBtn').addEventListener('click', ()=>{
 loadChatHistory();
 renderChatMessages();
 
+
 /* ═══════════════════════════════════════════════════
-   扫码存档：摄像头取景 + OCR识别（票名/面值/编号三项） + 手动填中奖金额
-   + 清单管理（存GitHub） + Excel导出
+   扫码存档：拍照（系统相机）+ 自动OCR整图+正则提取（票名/面值/编号）
+   + 手动填中奖金额 + 清单管理（存GitHub） + Excel导出
 ═══════════════════════════════════════════════════ */
 const SCAN_CACHE_KEY  = 'fucaiScanRecordsCache';   // 离线兜底缓存，GitHub才是数据的真正来源
 const SCAN_FILE_PATH  = 'scan_records.json';
-let scanStream = null;
 let scanWorker = null;      // Tesseract worker，首次拍照时才初始化，避免一进页面就加载OCR模型
 let scanWorkerLoading = null;
 let scanRecords = [];       // 当前内存里的记录列表（页面打开时从GitHub拉取）
 let scanCaptureMode = 'code';   // 当前拍摄目标：name / amount / code
+let lastCapturedDataUrl = null; // 最近一次拍的照片，供"重新框选"复用，不用每次都重新调起相机
+let cropImgNaturalW = 0, cropImgNaturalH = 0;
 
 function getScanConfig(){
   return {
@@ -3924,7 +3818,7 @@ async function ghScanFetch(){
   try{
     const url = `https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`;
     const resp = await fetch(url);
-    if(resp.status === 404) return { list: [], ok: true };  // 文件还不存在，视为空列表
+    if(resp.status === 404) return { list: [], ok: true };
     if(!resp.ok) return { list: [], ok: false, reason: `HTTP ${resp.status}` };
     const list = await resp.json();
     return { list: Array.isArray(list) ? list : [], ok: true };
@@ -3980,7 +3874,7 @@ async function ghScanPush(list){
   }
 }
 
-/* ── 本地兜底缓存（GitHub不可用/未配置时使用，避免拍了照片却什么都存不下）── */
+/* ── 本地兜底缓存 ── */
 function loadLocalCache(){
   try{
     const raw = localStorage.getItem(SCAN_CACHE_KEY);
@@ -3991,7 +3885,6 @@ function saveLocalCache(list){
   try{ localStorage.setItem(SCAN_CACHE_KEY, JSON.stringify(list)); } catch(e){}
 }
 
-/* ── 同步：把内存里的最新列表推送到GitHub，成功后更新本地缓存作为镜像 ── */
 async function syncScanToGithub(){
   const syncEl = document.getElementById('scanSyncStatus');
   const { repo, token } = getScanConfig();
@@ -4004,7 +3897,7 @@ async function syncScanToGithub(){
   syncEl.className = 'status'; syncEl.textContent = '正在同步到GitHub…';
   const result = await ghScanPush(scanRecords);
   if(result.ok){
-    saveLocalCache(scanRecords);   // 同步成功后镜像一份到本地，供离线时兜底展示
+    saveLocalCache(scanRecords);
     syncEl.className = 'status ok';
     syncEl.textContent = `✓ 已同步到 GitHub（${repo}/${SCAN_FILE_PATH}）`;
     return true;
@@ -4016,7 +3909,6 @@ async function syncScanToGithub(){
   }
 }
 
-/* ── 从GitHub加载最新记录（进入页签/刷新按钮触发）── */
 async function loadScanFromGithub(){
   const syncEl = document.getElementById('scanSyncStatus');
   const { repo } = getScanConfig();
@@ -4042,7 +3934,6 @@ async function loadScanFromGithub(){
   renderScanTable();
 }
 
-/* ── 表格渲染（兼容旧数据：早期版本只有code+time两个字段，缺失的字段显示为空）── */
 function renderScanTable(){
   const body = document.getElementById('scanTableBody');
   const badge = document.getElementById('scanCountBadge');
@@ -4072,7 +3963,7 @@ function renderScanTable(){
   });
 }
 
-// escapeHtml 复用文件前面已定义的同名函数（逻辑完全一致，见约1639行）
+// escapeHtml 复用文件前面已定义的同名函数（逻辑完全一致）
 
 async function addScanRecord(rec){
   const now = new Date();
@@ -4109,11 +4000,26 @@ document.getElementById('scanSaveConfigBtn').addEventListener('click', ()=>{
 
 document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFromGithub);
 
-/* ── 拍摄模式切换：票名/面值/编号 三选一，决定取景框位置+OCR规则+目标字段 ── */
+/* ── 拍摄模式：票名/面值/编号 三选一，决定OCR白名单+自动提取用的正则规则 ── */
 const SCAN_MODE_CONFIG = {
-  name:   { guideClass:'modeCenter modeName',  fieldId:'fieldName',   whitelist:null, lang:'chi_sim+eng' },
-  amount: { guideClass:'modeCenter modeAmount',fieldId:'fieldAmount', whitelist:'0123456789.元角¥￥YUAN', lang:'chi_sim+eng' },
-  code:   { guideClass:'modeCode',             fieldId:'fieldCode',   whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-', lang:'eng' },
+  name:   { fieldId:'fieldName',   whitelist:null, autoExtract:null },
+  amount: { fieldId:'fieldAmount', whitelist:'0123456789.元角¥￥YUAN',
+            autoExtract:(text)=>{
+              const m = text.match(/(\d+(\.\d+)?)\s*[元角¥￥]/);
+              return m ? m[0].replace(/\s+/g,'') : '';
+            } },
+  code:   { fieldId:'fieldCode',   whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            autoExtract:(text)=>{
+              const cleaned = text.toUpperCase().replace(/[^A-Z0-9\-\s]/g, ' ');
+              // 优先找"字母开头+多段数字用短横线分隔"的严格格式（如 J0790-26147-0040880-135-3），
+              // 条码被误识别出的乱码通常凑不出这种规整的分段结构，天然会被过滤掉
+              const strict = cleaned.match(/[A-Z]\d{3,6}(-\d{2,8}){3,5}/g);
+              if(strict && strict.length) return strict.sort((a,b)=>b.length-a.length)[0];
+              // 退而求其次：找一段"字母数字+至少2个短横线分隔"的较长片段
+              const loose = cleaned.match(/[A-Z0-9]{2,}(-[A-Z0-9]{2,}){2,6}/g);
+              if(loose && loose.length) return loose.sort((a,b)=>b.length-a.length)[0];
+              return '';
+            } },
 };
 
 function setScanMode(mode){
@@ -4121,232 +4027,16 @@ function setScanMode(mode){
   document.querySelectorAll('.scanModePill').forEach(p=>{
     p.classList.toggle('active', p.dataset.mode === mode);
   });
-  document.querySelectorAll('.miniCamBtn').forEach(b=>{
-    b.classList.toggle('active', b.dataset.mode === mode);
-  });
-  const guide = document.getElementById('scanGuide');
-  guide.className = 'scanGuide ' + SCAN_MODE_CONFIG[mode].guideClass;
 }
 document.querySelectorAll('.scanModePill').forEach(pill=>{
   pill.addEventListener('click', ()=> setScanMode(pill.dataset.mode));
 });
-document.querySelectorAll('.miniCamBtn').forEach(btn=>{
-  btn.addEventListener('click', ()=>{
-    setScanMode(btn.dataset.mode);
-    // 若摄像头还没开，顺手帮忙开启，减少操作步骤
-    if(!scanStream) startScanCamera();
-  });
-});
 
-/* ── 摄像头控制 ── */
-/* ── 实时清晰度检测 ──
-   原理：取景框区域的画面每隔约400ms采样一次，缩小到小尺寸计算灰度梯度方差
-   （拉普拉斯方差的简化近似——图像越清晰，边缘处像素灰度跳变越剧烈，方差越大；
-   越模糊，边缘越平滑，方差越小）。据此判断当前距离/对焦状态是否适合拍照，
-   实时把取景框染成暗红(模糊)或绿色(清晰)，用户不用拍了才知道结果。 */
-let sharpnessTimer = null;
-
-function computeSharpness(canvas){
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const w = canvas.width, h = canvas.height;
-  const { data } = ctx.getImageData(0, 0, w, h);
-  // 先转灰度，缩小计算量
-  const gray = new Float32Array(w*h);
-  for(let i=0;i<w*h;i++){
-    const o = i*4;
-    gray[i] = 0.299*data[o] + 0.587*data[o+1] + 0.114*data[o+2];
-  }
-  // 简化拉普拉斯：水平+垂直二阶差分的方差
-  let sum=0, sumSq=0, n=0;
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const i = y*w+x;
-      const lap = gray[i-1] + gray[i+1] + gray[i-w] + gray[i+w] - 4*gray[i];
-      sum += lap; sumSq += lap*lap; n++;
-    }
-  }
-  if(n===0) return 0;
-  const mean = sum/n;
-  return sumSq/n - mean*mean;   // 方差，数值越大越清晰
-}
-
-function startSharpnessMonitor(){
-  stopSharpnessMonitor();
-  const video = document.getElementById('scanVideo');
-  const guide = document.getElementById('scanGuide');
-  const sampleCanvas = document.createElement('canvas');
-  const SHARPNESS_THRESHOLD = 25;   // 经验阈值，方差高于此值视为"足够清晰可拍"
-
-  sharpnessTimer = setInterval(()=>{
-    if(!video.videoWidth || !scanStream) return;
-    try{
-      const vw = video.videoWidth, vh = video.videoHeight;
-      let gx, gy, gw, gh;
-      if(scanCaptureMode === 'code'){
-        gx = Math.round(vw * 0.08); gw = Math.round(vw * 0.84);
-        gh = Math.round(vh * 0.15); gy = Math.round(vh * (1 - 0.14) - gh);
-      } else {
-        gx = Math.round(vw * 0.14); gw = Math.round(vw * 0.72);
-        gh = Math.round(vh * 0.20); gy = Math.round(vh * 0.24);
-      }
-      // 缩小采样尺寸，避免每400ms算一次大图拖慢页面
-      const sw = 160, sh = Math.max(1, Math.round(sw * gh / gw));
-      sampleCanvas.width = sw; sampleCanvas.height = sh;
-      sampleCanvas.getContext('2d').drawImage(video, gx, gy, gw, gh, 0, 0, sw, sh);
-      const score = computeSharpness(sampleCanvas);
-
-      guide.classList.remove('sharpBlur','sharpOk');
-      guide.classList.add(score >= SHARPNESS_THRESHOLD ? 'sharpOk' : 'sharpBlur');
-    } catch(e){ /* 采样失败不影响主流程，静默跳过本次 */ }
-  }, 400);
-}
-
-function stopSharpnessMonitor(){
-  if(sharpnessTimer){ clearInterval(sharpnessTimer); sharpnessTimer = null; }
-  const guide = document.getElementById('scanGuide');
-  if(guide) guide.classList.remove('sharpBlur','sharpOk');
-}
-
-async function startScanCamera(){
-  const statusEl = document.getElementById('scanCameraStatus');
-  const stage = document.getElementById('cameraStage');
-  const video = document.getElementById('scanVideo');
-  const toggleBtn = document.getElementById('scanCameraToggleBtn');
-  const captureBtn = document.getElementById('scanCaptureBtn');
-  try{
-    statusEl.className = 'status'; statusEl.textContent = '正在请求摄像头权限…';
-    scanStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: 1920, min: 1280 },
-        height: { ideal: 1920, min: 1280 }
-      },
-      audio: false
-    });
-    video.srcObject = scanStream;
-    stage.classList.remove('off');
-    toggleBtn.textContent = '关闭摄像头';
-    captureBtn.disabled = false;
-
-    // 尝试开启持续自动对焦（focusMode是非标准扩展，仅部分安卓Chrome支持，iOS Safari完全不支持此API，
-    // 属于浏览器平台本身的限制，不是所有设备都能通过网页程序控制对焦）
-    let focusSupported = false;
-    try{
-      const track = scanStream.getVideoTracks()[0];
-      if(track && typeof track.getCapabilities === 'function'){
-        const caps = track.getCapabilities();
-        if(caps.focusMode && caps.focusMode.includes('continuous')){
-          await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-          focusSupported = true;
-        }
-      }
-    } catch(e){ /* 静默失败，不影响主流程，走下面的点按对焦兜底 */ }
-
-    // 检测数码变焦能力（zoom同样是非标准扩展）。
-    // ⚠️重要：数码变焦只是把已拍到的像素放大显示，不会让画面变清晰，
-    // 如果画面本身没对上焦，变焦只会让模糊更明显——所以这里默认收起，
-    // 只在用户主动展开时才用，避免误导（之前的版本容易让人误以为"变焦=拉近对焦"）。
-    try{
-      const track = scanStream.getVideoTracks()[0];
-      const caps = track.getCapabilities ? track.getCapabilities() : {};
-      const zoomRow = document.getElementById('scanZoomRow');
-      const zoomSlider = document.getElementById('scanZoomSlider');
-      if(caps.zoom && caps.zoom.max > caps.zoom.min){
-        zoomSlider.min = caps.zoom.min;
-        zoomSlider.max = caps.zoom.max;
-        zoomSlider.step = caps.zoom.step || 0.1;
-        zoomSlider.value = caps.zoom.min;   // 默认回到不放大的状态，避免残留上次的放大倍数误导
-        document.getElementById('scanZoomVal').textContent = parseFloat(zoomSlider.value).toFixed(1) + '×';
-        zoomRow.style.display = 'flex';
-      } else {
-        zoomRow.style.display = 'none';
-      }
-    } catch(e){}
-
-    // 尝试直接设置对焦距离到近距离（focusDistance比focusMode更直接——
-    // 不是"开个自动对焦模式祈祷它工作"，而是直接告诉摄像头"往近处对焦"，
-    // 部分安卓设备支持，取capabilities里允许的最小值(通常代表最近对焦距离)
-    try{
-      const track = scanStream.getVideoTracks()[0];
-      const caps = track.getCapabilities ? track.getCapabilities() : {};
-      if(caps.focusDistance && typeof caps.focusDistance.min === 'number'){
-        await track.applyConstraints({ advanced: [{ focusMode:'manual', focusDistance: caps.focusDistance.min }] });
-      }
-    } catch(e){ /* 不支持则静默忽略，不影响主流程 */ }
-
-    startSharpnessMonitor();
-
-    statusEl.className = 'status ok';
-    statusEl.textContent = focusSupported
-      ? '✓ 已开启（自动对焦已启用），将对应内容对准取景框后点击「拍照识别」'
-      : '✓ 已开启，若画面模糊可点击取景框区域尝试对焦，或前后移动手机调整焦距，再点击「拍照识别」';
-  } catch(e){
-    statusEl.className = 'status err';
-    if(e.name === 'NotAllowedError'){
-      statusEl.textContent = '⚠️ 未授权摄像头权限，请在浏览器设置中允许访问摄像头，或使用下方手动填写。';
-    } else if(e.name === 'NotFoundError'){
-      statusEl.textContent = '⚠️ 未检测到摄像头设备，可使用下方手动填写。';
-    } else {
-      statusEl.textContent = '⚠️ 摄像头启动失败：' + e.message + '，可使用下方手动填写。';
-    }
-  }
-}
-
-// 点击取景画面尝试手动对焦（pointsOfInterest同样是非标准扩展，仅部分安卓Chrome支持；
-// 不支持的设备点击不会报错，只是没有实际效果，属于渐进增强）
-document.getElementById('cameraStage').addEventListener('click', async (e)=>{
-  if(!scanStream) return;
-  try{
-    const track = scanStream.getVideoTracks()[0];
-    if(!track || typeof track.getCapabilities !== 'function') return;
-    const caps = track.getCapabilities();
-    if(!caps.focusMode || !caps.focusMode.includes('single-shot')) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-    const advanced = [{ focusMode: 'single-shot' }];
-    if(caps.pointsOfInterest) advanced.push({ pointsOfInterest: [{ x, y }] });
-    await track.applyConstraints({ advanced });
-    const statusEl = document.getElementById('scanCameraStatus');
-    statusEl.className = 'status ok'; statusEl.textContent = '✓ 已尝试对焦到点击位置';
-  } catch(e){ /* 不支持则静默忽略 */ }
-});
-
-// 变焦滑块拖动
-document.getElementById('scanZoomSlider').addEventListener('input', async (e)=>{
-  const val = parseFloat(e.target.value);
-  document.getElementById('scanZoomVal').textContent = val.toFixed(1) + '×';
-  if(!scanStream) return;
-  try{
-    const track = scanStream.getVideoTracks()[0];
-    await track.applyConstraints({ advanced: [{ zoom: val }] });
-  } catch(e){ /* 设备不支持变焦写入则静默忽略 */ }
-});
-function stopScanCamera(){
-  stopSharpnessMonitor();
-  if(scanStream){
-    scanStream.getTracks().forEach(t=>t.stop());
-    scanStream = null;
-  }
-  const stage = document.getElementById('cameraStage');
-  const toggleBtn = document.getElementById('scanCameraToggleBtn');
-  const captureBtn = document.getElementById('scanCaptureBtn');
-  if(stage) stage.classList.add('off');
-  if(toggleBtn) toggleBtn.textContent = '开启摄像头';
-  if(captureBtn) captureBtn.disabled = true;
-}
-
-document.getElementById('scanCameraToggleBtn').addEventListener('click', ()=>{
-  if(scanStream){ stopScanCamera(); }
-  else{ startScanCamera(); }
-});
-
-/* ── OCR Worker：中英文合并加载一次即可，票名用中文包，面值/编号用限定字符集提升准确率 ── */
+/* ── OCR Worker：中英文合并加载一次即可 ── */
 async function ensureScanWorker(){
   if(scanWorker) return scanWorker;
   if(scanWorkerLoading) return scanWorkerLoading;
   scanWorkerLoading = (async ()=>{
-    // 中文识别包体积较大，首次加载会慢一些，之后复用同一个worker不用重复下载
     const worker = await Tesseract.createWorker(['chi_sim','eng']);
     scanWorker = worker;
     return worker;
@@ -4354,152 +4044,7 @@ async function ensureScanWorker(){
   return scanWorkerLoading;
 }
 
-document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
-  const video = document.getElementById('scanVideo');
-  const canvas = document.getElementById('scanCanvas');
-  const captureBtn = document.getElementById('scanCaptureBtn');
-  const statusEl = document.getElementById('scanCameraStatus');
-  const cropPreview = document.getElementById('scanCropPreview');
-  const cropImg = document.getElementById('scanCropImg');
-  const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
-
-  if(!video.videoWidth){
-    statusEl.className = 'status err'; statusEl.textContent = '摄像头画面尚未就绪，请稍候再试。';
-    return;
-  }
-
-  captureBtn.disabled = true;
-
-  const guideEl = document.getElementById('scanGuide');
-  const wasBlurWarned = guideEl.classList.contains('sharpBlur');
-
-  try{
-    // 根据当前拍摄模式，取对应取景框在画面中的比例位置（需与CSS里.scanGuide各变体一致）
-    const vw = video.videoWidth, vh = video.videoHeight;
-    let gx, gy, gw, gh;
-    if(scanCaptureMode === 'code'){
-      gx = Math.round(vw * 0.08); gw = Math.round(vw * 0.84);
-      gh = Math.round(vh * 0.15); gy = Math.round(vh * (1 - 0.14) - gh);
-    } else {
-      gx = Math.round(vw * 0.14); gw = Math.round(vw * 0.72);
-      gh = Math.round(vh * 0.20); gy = Math.round(vh * 0.24);
-    }
-
-    // 先按原始像素裁剪出取景框区域，再统一放大到固定高度（不低于200px），
-    // 避免因取景框本身占屏比例小、摄像头分辨率一般时，裁出来的图像素密度不够，
-    // OCR和肉眼都看不清——这一步跟"有没有对上焦"是两回事，必须分开解决。
-    const rawCanvas = document.createElement('canvas');
-    rawCanvas.width = gw; rawCanvas.height = gh;
-    rawCanvas.getContext('2d').drawImage(video, gx, gy, gw, gh, 0, 0, gw, gh);
-
-    const upscale = Math.max(1, 240 / gh);   // 保证裁剪结果高度至少放大到约240px
-    canvas.width = Math.round(gw * upscale);
-    canvas.height = Math.round(gh * upscale);
-    const ctx = canvas.getContext('2d');
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(rawCanvas, 0, 0, canvas.width, canvas.height);
-
-    // 立刻展示裁剪+放大后的预览图，不等OCR结果——让用户能第一时间亲眼判断清不清楚，
-    // 清楚就等结果，模糊就可以直接重拍，不用干等一次注定失败的OCR
-    cropImg.src = canvas.toDataURL('image/png');
-    cropPreview.style.display = 'block';
-
-    statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
-    const worker = await ensureScanWorker();
-    statusEl.textContent = '识别中…';
-    // 每次识别前按当前模式设置字符白名单（编号/面值限定字符集提升准确率，票名不限制）
-    await worker.setParameters({ tessedit_char_whitelist: cfg.whitelist || '' });
-    const { data: { text } } = await worker.recognize(canvas);
-
-    let cleaned = (text || '').trim();
-    if(scanCaptureMode === 'code'){
-      cleaned = cleaned.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
-    } else if(scanCaptureMode === 'amount'){
-      cleaned = cleaned.replace(/\s+/g, '');
-    } else {
-      cleaned = cleaned.replace(/\s+/g, '');
-    }
-
-    const targetInput = document.getElementById(cfg.fieldId);
-    targetInput.value = cleaned;
-    statusEl.className = cleaned ? 'status ok' : 'status err';
-    const blurNote = wasBlurWarned ? '（⚠️拍照时取景框显示为模糊状态，建议核对结果或重拍）' : '';
-    statusEl.textContent = cleaned
-      ? `✓ 识别完成，已填入下方对应字段，请核对是否正确（上方预览图可帮助判断是否需要重拍）${blurNote}`
-      : `⚠️ 未识别到有效内容——请看上方预览图：若模糊说明需要调整距离后重拍（不建议用数码变焦，帮不了对焦）；若清晰但仍未识别，可直接手动填写${blurNote}`;
-  } catch(e){
-    statusEl.className = 'status err';
-    statusEl.textContent = '识别出错：' + e.message;
-  } finally{
-    captureBtn.disabled = false;
-  }
-});
-
-/* ── 加入清单：汇总四个字段 ── */
-document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
-  const formStatus = document.getElementById('scanFormStatus');
-  const nameVal = document.getElementById('fieldName').value.trim();
-  const amountVal = document.getElementById('fieldAmount').value.trim();
-  const codeVal = document.getElementById('fieldCode').value.trim();
-  const prizeVal = document.getElementById('fieldPrize').value.trim();
-
-  if(!nameVal && !amountVal && !codeVal && !prizeVal){
-    formStatus.className = 'status err'; formStatus.textContent = '四项均为空，无法加入清单，请至少填写编号等关键信息。';
-    return;
-  }
-
-  await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
-
-  document.getElementById('fieldName').value = '';
-  document.getElementById('fieldAmount').value = '';
-  document.getElementById('fieldCode').value = '';
-  document.getElementById('fieldPrize').value = '';
-  formStatus.className = 'status ok';
-  formStatus.textContent = '✓ 已加入清单';
-});
-
-/* ── 清空全部 ── */
-document.getElementById('scanClearAllBtn').addEventListener('click', async ()=>{
-  if(scanRecords.length === 0) return;
-  if(confirm(`确定要清空全部 ${scanRecords.length} 条记录吗？此操作不可撤销，且会同步删除GitHub上的记录。`)){
-    scanRecords = [];
-    renderScanTable();
-    await syncScanToGithub();
-    const listStatus = document.getElementById('scanListStatus');
-    listStatus.className = 'status ok'; listStatus.textContent = '已清空全部记录。';
-  }
-});
-
-/* ── 导出Excel ── */
-document.getElementById('scanExportBtn').addEventListener('click', ()=>{
-  const listStatus = document.getElementById('scanListStatus');
-  if(scanRecords.length === 0){
-    listStatus.className = 'status err'; listStatus.textContent = '暂无记录可导出。';
-    return;
-  }
-  const rows = scanRecords.map((item, i) => ({
-    '序号': i+1, '票名': item.name||'', '面值': item.amount||'',
-    '编号': item.code||'', '中奖金额': item.prize||'', '记录时间': item.time||''
-  }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [{wch:6},{wch:16},{wch:10},{wch:28},{wch:10},{wch:14}];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '扫码记录');
-  const today = new Date();
-  const fname = `扫码存档_${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}.xlsx`;
-  XLSX.writeFile(wb, fname);
-  listStatus.className = 'status ok';
-  listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}`;
-});
-
-/* ── 系统相机拍照 + 手动框选裁剪 ──
-   getUserMedia实时视频流受浏览器沙盒限制，很多手机真正的自动对焦/微距切换
-   走这条路调不到。改用 <input type=file capture> 直接调起手机原生相机App，
-   拍照这个动作完全交给手机自己的相机处理，能用上真正的自动对焦能力。
-   代价是不再有实时取景框，改成"拍一整张照片→手动框选区域→识别"。 */
-let cropImgNaturalW = 0, cropImgNaturalH = 0;
-
+/* ── 拍照（调起系统相机）── */
 document.getElementById('nativeCamBtn').addEventListener('click', ()=>{
   document.getElementById('nativeCamInput').click();
 });
@@ -4510,24 +4055,113 @@ document.getElementById('nativeCamInput').addEventListener('change', (e)=>{
   const reader = new FileReader();
   reader.onload = (ev)=>{
     const img = document.getElementById('cropSourceImg');
-    img.onload = ()=>{
-      cropImgNaturalW = img.naturalWidth;
-      cropImgNaturalH = img.naturalHeight;
-      // 默认框选位置按当前拍摄模式给个合理初始值（编号在下部，票名/面值在中上部）
-      const box = document.getElementById('cropBox');
-      if(scanCaptureMode === 'code'){
-        box.style.left='8%'; box.style.top='70%'; box.style.width='84%'; box.style.height='15%';
-      } else {
-        box.style.left='14%'; box.style.top='30%'; box.style.width='72%'; box.style.height='20%';
-      }
-      document.getElementById('cropStage').style.display = 'block';
-      document.getElementById('cropActions').style.display = 'flex';
-      document.getElementById('cropStage').scrollIntoView({behavior:'smooth', block:'center'});
-    };
+    img.onload = ()=> onPhotoLoaded(img);
     img.src = ev.target.result;
   };
   reader.readAsDataURL(file);
   e.target.value = '';   // 清空，允许重复选择同一张图片触发change
+});
+
+/* 不同拍摄模式对应的默认框选区域（票名/面值通常在票面中上部，编号通常在底部） */
+function getDefaultCropRegion(mode){
+  return mode === 'code'
+    ? { left:0.08, top:0.62, width:0.84, height:0.14 }
+    : { left:0.12, top:0.22, width:0.76, height:0.18 };
+}
+
+function cropToCanvas(img, region, naturalW, naturalH, targetMaxDim){
+  const sx = Math.round(region.left * naturalW);
+  const sy = Math.round(region.top * naturalH);
+  const sw = Math.round(region.width * naturalW);
+  const sh = Math.round(region.height * naturalH);
+  const scale = Math.min(1, targetMaxDim / Math.max(sw, sh));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sw * scale));
+  c.height = Math.max(1, Math.round(sh * scale));
+  c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  return c;
+}
+
+/* 拍完照片后：
+   ① 先按模式裁到一个合理默认区域去识别（范围小、干扰少，速度快、准确率通常最高）
+   ② 失败则退而求其次，识别整张照片（万一实际构图跟默认假设的区域对不上）
+   ③ 两次都失败，或票名模式（自由文本没有固定格式可正则提取），才进入手动框选 */
+async function onPhotoLoaded(img){
+  cropImgNaturalW = img.naturalWidth;
+  cropImgNaturalH = img.naturalHeight;
+  lastCapturedDataUrl = img.src;
+
+  const statusEl = document.getElementById('scanCameraStatus');
+  const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
+
+  // 票名是自由文本，没有固定格式可供正则提取，直接进入框选环节
+  if(!cfg.autoExtract){
+    statusEl.className = 'status'; statusEl.textContent = '票名无法自动识别格式，请框选票名所在区域';
+    showCropTool();
+    return;
+  }
+
+  statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
+  try{
+    const worker = await ensureScanWorker();
+
+    // ① 先试默认区域（范围小，PSM用单行模式，干扰少准确率高）
+    statusEl.textContent = '正在识别默认区域…';
+    const region = getDefaultCropRegion(scanCaptureMode);
+    const regionCanvas = cropToCanvas(img, region, cropImgNaturalW, cropImgNaturalH, 900);
+    await worker.setParameters({ tessedit_char_whitelist:'', tessedit_pageseg_mode:'7' });
+    const r1 = await worker.recognize(regionCanvas);
+    let extracted = cfg.autoExtract(r1.data.text || '');
+
+    // ② 默认区域没识别出来，退而求其次识别整张照片（稀疏文本模式，范围大但更全面）
+    if(!extracted){
+      statusEl.textContent = '默认区域未识别到，尝试整张照片…';
+      const scale = Math.min(1, 1600 / Math.max(cropImgNaturalW, cropImgNaturalH));
+      const fullCanvas = document.createElement('canvas');
+      fullCanvas.width = Math.round(cropImgNaturalW * scale);
+      fullCanvas.height = Math.round(cropImgNaturalH * scale);
+      fullCanvas.getContext('2d').drawImage(img, 0, 0, fullCanvas.width, fullCanvas.height);
+      await worker.setParameters({ tessedit_char_whitelist:'', tessedit_pageseg_mode:'11' });
+      const r2 = await worker.recognize(fullCanvas);
+      extracted = cfg.autoExtract(r2.data.text || '');
+    }
+
+    if(extracted){
+      document.getElementById(cfg.fieldId).value = extracted;
+      statusEl.className = 'status ok';
+      statusEl.textContent = `✓ 自动识别成功：${extracted}（如有误，可点字段旁「拍」按钮重新框选修正）`;
+    } else {
+      statusEl.className = 'status err';
+      statusEl.textContent = '⚠️ 未能自动识别出有效内容，请手动框选目标区域';
+      showCropTool();
+    }
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '自动识别出错：' + e.message + '，请手动框选';
+    showCropTool();
+  }
+}
+
+function showCropTool(){
+  const box = document.getElementById('cropBox');
+  const region = getDefaultCropRegion(scanCaptureMode);
+  box.style.left = (region.left*100)+'%'; box.style.top = (region.top*100)+'%';
+  box.style.width = (region.width*100)+'%'; box.style.height = (region.height*100)+'%';
+  document.getElementById('cropStage').style.display = 'block';
+  document.getElementById('cropActions').style.display = 'flex';
+  document.getElementById('cropStage').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+/* "重新框选"按钮：复用最近一次拍的照片，不用重新调起相机 */
+document.querySelectorAll('.miniCamBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    setScanMode(btn.dataset.mode);
+    if(lastCapturedDataUrl){
+      showCropTool();
+    } else {
+      document.getElementById('nativeCamInput').click();
+    }
+  });
 });
 
 /* 框选交互：拖动整个框移动位置，拖动右下角圆点调整大小 */
@@ -4548,7 +4182,6 @@ document.getElementById('nativeCamInput').addEventListener('change', (e)=>{
       top: parseFloat(box.style.top)/100*rect.height,
       width: parseFloat(box.style.width)/100*rect.width,
       height: parseFloat(box.style.height)/100*rect.height,
-      rectW: rect.width, rectH: rect.height
     };
   }
   function onDown(e, m){
@@ -4608,8 +4241,6 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
   statusEl.className = 'status'; statusEl.textContent = '正在识别框选区域…';
 
   try{
-    // 框选比例(相对显示尺寸) → 换算成原图实际像素坐标裁剪
-    const rect = stage.getBoundingClientRect();
     const bx = parseFloat(box.style.left)/100;
     const by = parseFloat(box.style.top)/100;
     const bw = parseFloat(box.style.width)/100;
@@ -4621,7 +4252,7 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
     const sh = Math.round(bh * cropImgNaturalH);
 
     const sourceImg = document.getElementById('cropSourceImg');
-    const canvas = document.getElementById('scanCanvas');
+    const canvas = document.createElement('canvas');
     const upscale = Math.max(1, 240 / sh);
     canvas.width = Math.round(sw * upscale);
     canvas.height = Math.round(sh * upscale);
@@ -4633,7 +4264,10 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
     cropPreview.style.display = 'block';
 
     const worker = await ensureScanWorker();
-    await worker.setParameters({ tessedit_char_whitelist: cfg.whitelist || '' });
+    await worker.setParameters({
+      tessedit_char_whitelist: cfg.whitelist || '',
+      tessedit_pageseg_mode: '7',   // PSM 7=单行文字模式，专门针对精确框选出来的一行文字，排除条码等图形干扰
+    });
     const { data: { text } } = await worker.recognize(canvas);
 
     let cleaned = (text || '').trim();
@@ -4657,6 +4291,63 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
   } finally{
     confirmBtn.disabled = false;
   }
+});
+
+/* ── 加入清单 ── */
+document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
+  const formStatus = document.getElementById('scanFormStatus');
+  const nameVal = document.getElementById('fieldName').value.trim();
+  const amountVal = document.getElementById('fieldAmount').value.trim();
+  const codeVal = document.getElementById('fieldCode').value.trim();
+  const prizeVal = document.getElementById('fieldPrize').value.trim();
+
+  if(!nameVal && !amountVal && !codeVal && !prizeVal){
+    formStatus.className = 'status err'; formStatus.textContent = '四项均为空，无法加入清单，请至少填写编号等关键信息。';
+    return;
+  }
+
+  await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
+
+  document.getElementById('fieldName').value = '';
+  document.getElementById('fieldAmount').value = '';
+  document.getElementById('fieldCode').value = '';
+  document.getElementById('fieldPrize').value = '';
+  formStatus.className = 'status ok';
+  formStatus.textContent = '✓ 已加入清单';
+});
+
+/* ── 清空全部 ── */
+document.getElementById('scanClearAllBtn').addEventListener('click', async ()=>{
+  if(scanRecords.length === 0) return;
+  if(confirm(`确定要清空全部 ${scanRecords.length} 条记录吗？此操作不可撤销，且会同步删除GitHub上的记录。`)){
+    scanRecords = [];
+    renderScanTable();
+    await syncScanToGithub();
+    const listStatus = document.getElementById('scanListStatus');
+    listStatus.className = 'status ok'; listStatus.textContent = '已清空全部记录。';
+  }
+});
+
+/* ── 导出Excel ── */
+document.getElementById('scanExportBtn').addEventListener('click', ()=>{
+  const listStatus = document.getElementById('scanListStatus');
+  if(scanRecords.length === 0){
+    listStatus.className = 'status err'; listStatus.textContent = '暂无记录可导出。';
+    return;
+  }
+  const rows = scanRecords.map((item, i) => ({
+    '序号': i+1, '票名': item.name||'', '面值': item.amount||'',
+    '编号': item.code||'', '中奖金额': item.prize||'', '记录时间': item.time||''
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [{wch:6},{wch:16},{wch:10},{wch:28},{wch:10},{wch:14}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '扫码记录');
+  const today = new Date();
+  const fname = `扫码存档_${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  listStatus.className = 'status ok';
+  listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}`;
 });
 
 // 初次加载：先用本地缓存快速显示，再尝试从GitHub拉取最新版本
