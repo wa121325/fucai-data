@@ -787,7 +787,7 @@ def run_kl8_daily(records, ml_pred):
     if is_new:
         print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
                     verbose=0, device='cpu')
         model.learn(total_timesteps=200000, progress_bar=False)
     else:
@@ -846,8 +846,10 @@ def run_kl8_daily(records, ml_pred):
     rankings = []
     if state is not None:
         random.seed(int(date.today().strftime('%Y%m%d')))
+        first_action = None
         for _ in range(3):
             action,_ = model.predict(state, deterministic=False)
+            if first_action is None: first_action = action
             order = np.argsort(action)[::-1]
             rankings.append([int(i)+1 for i in order])
         # 保底：若采样失败导致列表为空，用一次确定性预测填充
@@ -855,6 +857,19 @@ def run_kl8_daily(records, ml_pred):
             action,_ = model.predict(state, deterministic=True)
             order = np.argsort(action)[::-1]
             rankings = [[int(i)+1 for i in order]] * 3
+            first_action = action
+
+        # ── 诊断：检验打分是否跟球号系统性绑定（即"是否还存在偏向大号/小号"的机制性bug）──
+        if first_action is not None:
+            ball_idx = np.arange(1, 81)
+            corr = float(np.corrcoef(ball_idx, first_action)[0, 1])
+            print(f"  [诊断] 打分与球号(1-80)的相关系数: {corr:.3f}")
+            if abs(corr) > 0.3:
+                direction = '偏向大号' if corr > 0 else '偏向小号'
+                print(f"  ⚠️ [诊断警告] 相关系数绝对值>0.3，打分很可能仍跟球号序号系统性绑定（{direction}），"
+                      f"不是真正基于状态（ML概率/遗漏/隐层）在选号，可能存在归一化之外的其它偏向来源，需要人工复查")
+            else:
+                print(f"  ✓ [诊断通过] 打分与球号无明显系统性相关，说明是基于状态内容而非序号在打分")
 
     def group(ranking_idx, n):
         return sorted(rankings[ranking_idx][:n]) if rankings else []
