@@ -952,6 +952,21 @@
     letter-spacing:.04em;font-weight:700;color:var(--ink);
   }
   .scanResultActions{display:flex;gap:8px;margin-top:10px;}
+  .scanCropPreview{
+    margin-top:10px;padding:10px;
+    background:#1a1712;border-radius:10px;text-align:center;
+  }
+  .scanCropPreview img{
+    max-width:100%;border-radius:6px;
+    image-rendering:pixelated;   /* 放大展示时保留原始像素细节，方便肉眼判断清晰度 */
+  }
+  .scanCropPreview .cropHint{
+    font-size:11px;color:#c9c2b4;margin-top:6px;
+  }
+  .scanZoomRow{
+    display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--muted);
+  }
+  .scanZoomRow input[type=range]{flex:1;}
   .scanResultActions .btn{flex:1;}
   .scanFieldsForm{margin-top:14px;}
   .scanFieldRow{
@@ -1305,7 +1320,16 @@
             <button class="btn secondary" id="scanCameraToggleBtn">开启摄像头</button>
             <button class="btn" id="scanCaptureBtn" disabled>拍照识别</button>
           </div>
+          <div class="scanZoomRow" id="scanZoomRow" style="display:none;">
+            <span>🔍变焦</span>
+            <input type="range" id="scanZoomSlider" min="1" max="1" step="0.1" value="1">
+            <span id="scanZoomVal">1.0×</span>
+          </div>
           <div class="status" id="scanCameraStatus"></div>
+          <div class="scanCropPreview" id="scanCropPreview" style="display:none;">
+            <img id="scanCropImg" alt="拍摄区域预览">
+            <div class="cropHint">↑ 实际送去识别的裁剪区域（放大显示），若模糊请重新对焦/靠近或用变焦滑块后重拍</div>
+          </div>
 
           <div class="scanFieldsForm">
             <div class="scanFieldRow">
@@ -4070,7 +4094,11 @@ async function startScanCamera(){
   try{
     statusEl.className = 'status'; statusEl.textContent = '正在请求摄像头权限…';
     scanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 1280 } },
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920, min: 1280 },
+        height: { ideal: 1920, min: 1280 }
+      },
       audio: false
     });
     video.srcObject = scanStream;
@@ -4091,6 +4119,24 @@ async function startScanCamera(){
         }
       }
     } catch(e){ /* 静默失败，不影响主流程，走下面的点按对焦兜底 */ }
+
+    // 检测数码变焦能力（zoom同样是非标准扩展），支持的话显示变焦滑块，
+    // 让用户不用把手机怼得太近（太近容易超出摄像头最近对焦距离导致对不上焦）
+    try{
+      const track = scanStream.getVideoTracks()[0];
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      const zoomRow = document.getElementById('scanZoomRow');
+      const zoomSlider = document.getElementById('scanZoomSlider');
+      if(caps.zoom && caps.zoom.max > caps.zoom.min){
+        zoomSlider.min = caps.zoom.min;
+        zoomSlider.max = caps.zoom.max;
+        zoomSlider.step = caps.zoom.step || 0.1;
+        zoomSlider.value = caps.zoom.min;
+        zoomRow.style.display = 'flex';
+      } else {
+        zoomRow.style.display = 'none';
+      }
+    } catch(e){}
 
     statusEl.className = 'status ok';
     statusEl.textContent = focusSupported
@@ -4127,6 +4173,17 @@ document.getElementById('cameraStage').addEventListener('click', async (e)=>{
     statusEl.className = 'status ok'; statusEl.textContent = '✓ 已尝试对焦到点击位置';
   } catch(e){ /* 不支持则静默忽略 */ }
 });
+
+// 变焦滑块拖动
+document.getElementById('scanZoomSlider').addEventListener('input', async (e)=>{
+  const val = parseFloat(e.target.value);
+  document.getElementById('scanZoomVal').textContent = val.toFixed(1) + '×';
+  if(!scanStream) return;
+  try{
+    const track = scanStream.getVideoTracks()[0];
+    await track.applyConstraints({ advanced: [{ zoom: val }] });
+  } catch(e){ /* 设备不支持变焦写入则静默忽略 */ }
+});
 function stopScanCamera(){
   if(scanStream){
     scanStream.getTracks().forEach(t=>t.stop());
@@ -4161,9 +4218,10 @@ async function ensureScanWorker(){
 document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
   const video = document.getElementById('scanVideo');
   const canvas = document.getElementById('scanCanvas');
-  const guide = document.getElementById('scanGuide');
   const captureBtn = document.getElementById('scanCaptureBtn');
   const statusEl = document.getElementById('scanCameraStatus');
+  const cropPreview = document.getElementById('scanCropPreview');
+  const cropImg = document.getElementById('scanCropImg');
   const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
 
   if(!video.videoWidth){
@@ -4172,7 +4230,6 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
   }
 
   captureBtn.disabled = true;
-  statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
 
   try{
     // 根据当前拍摄模式，取对应取景框在画面中的比例位置（需与CSS里.scanGuide各变体一致）
@@ -4186,10 +4243,27 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
       gh = Math.round(vh * 0.20); gy = Math.round(vh * 0.24);
     }
 
-    canvas.width = gw; canvas.height = gh;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, gx, gy, gw, gh, 0, 0, gw, gh);
+    // 先按原始像素裁剪出取景框区域，再统一放大到固定高度（不低于200px），
+    // 避免因取景框本身占屏比例小、摄像头分辨率一般时，裁出来的图像素密度不够，
+    // OCR和肉眼都看不清——这一步跟"有没有对上焦"是两回事，必须分开解决。
+    const rawCanvas = document.createElement('canvas');
+    rawCanvas.width = gw; rawCanvas.height = gh;
+    rawCanvas.getContext('2d').drawImage(video, gx, gy, gw, gh, 0, 0, gw, gh);
 
+    const upscale = Math.max(1, 240 / gh);   // 保证裁剪结果高度至少放大到约240px
+    canvas.width = Math.round(gw * upscale);
+    canvas.height = Math.round(gh * upscale);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(rawCanvas, 0, 0, canvas.width, canvas.height);
+
+    // 立刻展示裁剪+放大后的预览图，不等OCR结果——让用户能第一时间亲眼判断清不清楚，
+    // 清楚就等结果，模糊就可以直接重拍，不用干等一次注定失败的OCR
+    cropImg.src = canvas.toDataURL('image/png');
+    cropPreview.style.display = 'block';
+
+    statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
     const worker = await ensureScanWorker();
     statusEl.textContent = '识别中…';
     // 每次识别前按当前模式设置字符白名单（编号/面值限定字符集提升准确率，票名不限制）
@@ -4209,8 +4283,8 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
     targetInput.value = cleaned;
     statusEl.className = cleaned ? 'status ok' : 'status err';
     statusEl.textContent = cleaned
-      ? '✓ 识别完成，已填入下方对应字段，请核对是否正确'
-      : '⚠️ 未识别到有效内容，请调整角度/光线后重拍，或直接在下方手动填写';
+      ? '✓ 识别完成，已填入下方对应字段，请核对是否正确（上方预览图可帮助判断是否需要重拍）'
+      : '⚠️ 未识别到有效内容——请看上方预览图：若模糊说明需要对焦/调整距离/用变焦后重拍；若清晰但仍未识别，可直接手动填写';
   } catch(e){
     statusEl.className = 'status err';
     statusEl.textContent = '识别出错：' + e.message;
