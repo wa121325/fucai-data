@@ -1913,12 +1913,21 @@ function getMlContext(type){
           }
         }
       } else if(type==='ssq'){
+        let ssqRlCtx = rlGame;
+        const ctxHasFullData = rlGame.ppo_groups?.length || rlGame.ppo_red_selected?.length;
+        if(!ctxHasFullData && rlGame.skipped){
+          try{
+            const cached = localStorage.getItem('fucaiSsqRlFullCache');
+            if(cached) ssqRlCtx = { ...JSON.parse(cached), skipped: true };
+          } catch(e){}
+        }
+        if(ssqRlCtx.skipped) lines.push(`  ⏸️ 今日非开奖日，未重新训练，以下为${ssqRlCtx!==rlGame?'本机缓存的':''}上次训练结果`);
         lines.push(`  方法：红球33全量打分排序（Top6）+ 蓝球打分，联合优化，奖励按双色球真实奖级结构分级`);
-        lines.push(`  回测（近${rlGame.games_tested??'—'}期）：红球平均命中${rlGame.avg_red_hit??'—'}个  蓝球准确率${rlGame.blue_acc_pct??'—'}%（随机基准6.25%）`);
-        if(rlGame.ppo_groups?.length) lines.push(`  PPO推荐（${rlGame.ppo_groups.length}注）：${rlGame.ppo_groups.map((g,i)=>`第${i+1}注[${(g.red||[]).join(' ')}]+蓝${g.blue}`).join(' ')}`);
+        lines.push(`  回测（近${ssqRlCtx.games_tested??'—'}期）：红球平均命中${ssqRlCtx.avg_red_hit??'—'}个  蓝球准确率${ssqRlCtx.blue_acc_pct??'—'}%（随机基准6.25%）`);
+        if(ssqRlCtx.ppo_groups?.length) lines.push(`  PPO推荐（${ssqRlCtx.ppo_groups.length}注）：${ssqRlCtx.ppo_groups.map((g,i)=>`第${i+1}注[${(g.red||[]).join(' ')}]+蓝${g.blue}`).join(' ')}`);
         else {
-          if(rlGame.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${rlGame.ppo_red_selected.join(' ')}`);
-          if(rlGame.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${rlGame.ppo_blue_pred}`);
+          if(ssqRlCtx.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${ssqRlCtx.ppo_red_selected.join(' ')}`);
+          if(ssqRlCtx.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${ssqRlCtx.ppo_blue_pred}`);
         }
       }
       if(rlGame.note) lines.push(`  备注：${rlGame.note}`);
@@ -2620,10 +2629,34 @@ function renderDLResult(dlResult){
     }
 
     // 双色球
-    const ssqRl = rl.results.ssq;
+    // 双色球非开奖日会跳过训练，dl_rl.json里ssq那部分只剩skipped/games_tested/reason/note等
+    // 寥寥几个字段，缺推荐号码/参考信息这些渲染必需的内容。不改Python脚本，改成纯前端兜底：
+    // 用localStorage缓存"上一次拿到完整数据时的ssq结果"，跳过导致数据不全时自动用缓存顶上。
+    const SSQ_RL_CACHE_KEY = 'fucaiSsqRlFullCache';
+    let ssqRl = rl.results.ssq;
+    const ssqHasFullData = ssqRl && (ssqRl.ppo_groups?.length || ssqRl.ppo_red_selected?.length);
+    let ssqUsedCache = false;
+    if(ssqHasFullData){
+      try{ localStorage.setItem(SSQ_RL_CACHE_KEY, JSON.stringify(ssqRl)); } catch(e){}
+    } else if(ssqRl && ssqRl.skipped){
+      try{
+        const cached = localStorage.getItem(SSQ_RL_CACHE_KEY);
+        if(cached){
+          const cachedObj = JSON.parse(cached);
+          ssqRl = { ...cachedObj, skipped: true,
+                    note: (cachedObj.note||'') + '（今日为非开奖日，双色球周二/四/日开奖，以下为本机缓存的上次完整结果，未重新训练）' };
+          ssqUsedCache = true;
+        }
+      } catch(e){}
+    }
     if(ssqRl){
       html += `<div style="margin-bottom:12px;">`;
       html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">双色球</div>`;
+      if(ssqRl.skipped){
+        html += `<div style="font-size:11.5px;color:#8a6d1a;background:rgba(241,196,15,.12);border-left:3px solid #f1c40f;border-radius:6px;padding:6px 10px;margin-bottom:8px;">
+          ⏸️ 今日为非开奖日（双色球周二/四/日开奖），未重新训练${ssqUsedCache ? '，以下为本机缓存的上次完整结果' : '（暂无缓存可用，本机首次打开或已清除缓存）'}
+        </div>`;
+      }
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
         回测（近${ssqRl.games_tested??'—'}期）：红球平均命中<b>${ssqRl.avg_red_hit??'—'}</b>个　蓝球准确率<b>${ssqRl.blue_acc_pct??'—'}%</b>（随机基准6.25%）
         ${ssqRl.is_first_train?'（首次训练）':'（增量微调）'}
@@ -4010,15 +4043,48 @@ const SCAN_MODE_CONFIG = {
             } },
   code:   { fieldId:'fieldCode',   whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
             autoExtract:(text)=>{
-              const cleaned = text.toUpperCase().replace(/[^A-Z0-9\-\s]/g, ' ');
-              // 优先找"字母开头+多段数字用短横线分隔"的严格格式（如 J0790-26147-0040880-135-3），
-              // 条码被误识别出的乱码通常凑不出这种规整的分段结构，天然会被过滤掉
-              const strict = cleaned.match(/[A-Z]\d{3,6}(-\d{2,8}){3,5}/g);
-              if(strict && strict.length) return strict.sort((a,b)=>b.length-a.length)[0];
-              // 退而求其次：找一段"字母数字+至少2个短横线分隔"的较长片段
-              const loose = cleaned.match(/[A-Z0-9]{2,}(-[A-Z0-9]{2,}){2,6}/g);
-              if(loose && loose.length) return loose.sort((a,b)=>b.length-a.length)[0];
-              return '';
+              // 条码竖线常被识别成 | / \ I l 等字符，先统一清成空格，避免干扰分段判断
+              let cleaned = text.toUpperCase()
+                .replace(/[|\/\\]/g, ' ')
+                .replace(/[^A-Z0-9\-\s]/g, ' ')
+                .replace(/[ \t]+/g, ' ');
+
+              const candidates = [];
+
+              // ① 标准格式：字母+数字 起头，后面3-5段用短横线分隔（如 J0792-26139-0176133-100-2）
+              //    注意结尾不能再跟数字/横线，否则贪婪匹配会把最后一段吃掉
+              const strict = cleaned.match(/[A-Z]\d{3,6}(?:-\d{1,8}){3,5}(?![\d-])/g);
+              if(strict) candidates.push(...strict);
+
+              // ② 宽松：任意字母数字段，用短横线分隔≥3段（容忍某些段被识别成字母）
+              const loose = cleaned.match(/[A-Z0-9]{2,}(?:-[A-Z0-9]{1,8}){3,5}(?![\w-])/g);
+              if(loose) candidates.push(...loose);
+
+              // ③ 更宽松：只要有2段以上短横线分隔就算候选
+              const loose2 = cleaned.match(/[A-Z0-9]{2,}(?:-[A-Z0-9]{1,8}){2,}/g);
+              if(loose2) candidates.push(...loose2);
+
+              // ④ 短横线整体没识别出来的情况：找"字母开头+一长串数字和空格"，
+              //    按刮刮乐编号常见分段(5-5-7-3-1)尝试重建，总长度对得上才采用
+              const noDash = cleaned.match(/[A-Z]\d[\d\s]{12,30}\d/g);
+              if(noDash){
+                noDash.forEach(seg=>{
+                  const digits = seg.replace(/\s/g,'');
+                  const letter = digits[0];
+                  const nums = digits.slice(1);
+                  if(nums.length >= 18 && nums.length <= 22){
+                    candidates.push(`${letter}${nums.slice(0,4)}-${nums.slice(4,9)}-${nums.slice(9,16)}-${nums.slice(16,19)}-${nums.slice(19)}`);
+                  }
+                });
+              }
+
+              if(!candidates.length) return '';
+              // 优先选最长的候选（信息量最完整），长度相同时优先选带字母开头的标准格式
+              candidates.sort((a,b)=>{
+                if(b.length !== a.length) return b.length - a.length;
+                return (/^[A-Z]/.test(b)?1:0) - (/^[A-Z]/.test(a)?1:0);
+              });
+              return candidates[0];
             } },
 };
 
@@ -4086,6 +4152,40 @@ function cropToCanvas(img, region, naturalW, naturalH, targetMaxDim){
    ① 先按模式裁到一个合理默认区域去识别（范围小、干扰少，速度快、准确率通常最高）
    ② 失败则退而求其次，识别整张照片（万一实际构图跟默认假设的区域对不上）
    ③ 两次都失败，或票名模式（自由文本没有固定格式可正则提取），才进入手动框选 */
+/* 图像预处理：转灰度+提高对比度+二值化，让点阵印刷的小字边缘更锐利，
+   同时把条码那种大片黑色区域压成纯黑，减少它被当成文字的机会 */
+function enhanceForOcr(srcCanvas){
+  const c = document.createElement('canvas');
+  c.width = srcCanvas.width; c.height = srcCanvas.height;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(srcCanvas, 0, 0);
+  const imgData = ctx.getImageData(0, 0, c.width, c.height);
+  const d = imgData.data;
+  // 先算平均灰度作为自适应阈值基准
+  let sum = 0;
+  for(let i=0;i<d.length;i+=4){ sum += 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]; }
+  const mean = sum / (d.length/4);
+  const thr = mean * 0.85;   // 略低于均值，保留细笔画
+  for(let i=0;i<d.length;i+=4){
+    const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    const v = g < thr ? 0 : 255;
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return c;
+}
+
+async function tryRecognize(worker, canvas, psm, whitelist, autoExtract){
+  try{
+    await worker.setParameters({
+      tessedit_char_whitelist: whitelist || '',
+      tessedit_pageseg_mode: psm,
+    });
+    const { data:{ text } } = await worker.recognize(canvas);
+    return autoExtract(text || '');
+  } catch(e){ return ''; }
+}
+
 async function onPhotoLoaded(img){
   cropImgNaturalW = img.naturalWidth;
   cropImgNaturalH = img.naturalHeight;
@@ -4104,32 +4204,55 @@ async function onPhotoLoaded(img){
   statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
   try{
     const worker = await ensureScanWorker();
+    const results = [];
 
-    // ① 先试默认区域（范围小，PSM用单行模式，干扰少准确率高）
-    statusEl.textContent = '正在识别默认区域…';
-    const region = getDefaultCropRegion(scanCaptureMode);
-    const regionCanvas = cropToCanvas(img, region, cropImgNaturalW, cropImgNaturalH, 900);
-    await worker.setParameters({ tessedit_char_whitelist:'', tessedit_pageseg_mode:'7' });
-    const r1 = await worker.recognize(regionCanvas);
-    let extracted = cfg.autoExtract(r1.data.text || '');
+    // 多个候选区域：默认区域猜不准时，多试几个不同高度的横条，
+    // 覆盖"编号在票面偏上/居中/偏下"等不同构图情况
+    const regions = scanCaptureMode === 'code'
+      ? [ {left:0.05,top:0.60,width:0.90,height:0.18},
+          {left:0.05,top:0.70,width:0.90,height:0.18},
+          {left:0.05,top:0.50,width:0.90,height:0.20},
+          {left:0.02,top:0.40,width:0.96,height:0.45} ]
+      : [ {left:0.10,top:0.20,width:0.80,height:0.20},
+          {left:0.10,top:0.10,width:0.80,height:0.25},
+          {left:0.05,top:0.05,width:0.90,height:0.40} ];
 
-    // ② 默认区域没识别出来，退而求其次识别整张照片（稀疏文本模式，范围大但更全面）
-    if(!extracted){
-      statusEl.textContent = '默认区域未识别到，尝试整张照片…';
-      const scale = Math.min(1, 1600 / Math.max(cropImgNaturalW, cropImgNaturalH));
+    for(let i=0;i<regions.length && !results.length;i++){
+      statusEl.textContent = `正在识别（策略 ${i+1}/${regions.length}）…`;
+      const base = cropToCanvas(img, regions[i], cropImgNaturalW, cropImgNaturalH, 1200);
+      // 每个区域先用原图试单行模式，不行再用增强图，再不行换稀疏文本模式
+      const attempts = [
+        [base, '7'], [enhanceForOcr(base), '7'],
+        [base, '6'], [enhanceForOcr(base), '11'],
+      ];
+      for(const [cv, psm] of attempts){
+        const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
+        if(got){ results.push(got); break; }
+      }
+    }
+
+    // 所有区域都没结果，最后整图兜底试一次
+    if(!results.length){
+      statusEl.textContent = '正在识别整张照片（最后尝试）…';
+      const scale = Math.min(1, 1800 / Math.max(cropImgNaturalW, cropImgNaturalH));
       const fullCanvas = document.createElement('canvas');
       fullCanvas.width = Math.round(cropImgNaturalW * scale);
       fullCanvas.height = Math.round(cropImgNaturalH * scale);
       fullCanvas.getContext('2d').drawImage(img, 0, 0, fullCanvas.width, fullCanvas.height);
-      await worker.setParameters({ tessedit_char_whitelist:'', tessedit_pageseg_mode:'11' });
-      const r2 = await worker.recognize(fullCanvas);
-      extracted = cfg.autoExtract(r2.data.text || '');
+      for(const [cv, psm] of [[fullCanvas,'11'], [enhanceForOcr(fullCanvas),'11'], [fullCanvas,'6']]){
+        const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
+        if(got){ results.push(got); break; }
+      }
     }
+
+    const extracted = results.length
+      ? results.sort((a,b)=>b.length-a.length)[0]   // 多个结果时取最完整的那个
+      : '';
 
     if(extracted){
       document.getElementById(cfg.fieldId).value = extracted;
       statusEl.className = 'status ok';
-      statusEl.textContent = `✓ 自动识别成功：${extracted}（如有误，可点字段旁「拍」按钮重新框选修正）`;
+      statusEl.textContent = `✓ 自动识别成功：${extracted}（如有误，可点字段旁「重新框选」手动修正）`;
     } else {
       statusEl.className = 'status err';
       statusEl.textContent = '⚠️ 未能自动识别出有效内容，请手动框选目标区域';
@@ -4264,17 +4387,27 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
     cropPreview.style.display = 'block';
 
     const worker = await ensureScanWorker();
-    await worker.setParameters({
-      tessedit_char_whitelist: cfg.whitelist || '',
-      tessedit_pageseg_mode: '7',   // PSM 7=单行文字模式，专门针对精确框选出来的一行文字，排除条码等图形干扰
-    });
-    const { data: { text } } = await worker.recognize(canvas);
-
-    let cleaned = (text || '').trim();
-    if(scanCaptureMode === 'code'){
-      cleaned = cleaned.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
-    } else {
-      cleaned = cleaned.replace(/\s+/g, '');
+    // 多策略尝试：原图/对比度增强图 × 单行/块状模式，任一策略提取成功就采用
+    let cleaned = '';
+    if(cfg.autoExtract){
+      for(const [cv, psm] of [[canvas,'7'], [enhanceForOcr(canvas),'7'], [canvas,'6'], [enhanceForOcr(canvas),'11']]){
+        const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
+        if(got){ cleaned = got; break; }
+      }
+    }
+    // 正则提取不到（或票名这种无固定格式的），退回用原始识别文本做基础清洗
+    if(!cleaned){
+      await worker.setParameters({
+        tessedit_char_whitelist: cfg.whitelist || '',
+        tessedit_pageseg_mode: '7',
+      });
+      const { data: { text } } = await worker.recognize(canvas);
+      cleaned = (text || '').trim();
+      if(scanCaptureMode === 'code'){
+        cleaned = cleaned.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+      } else {
+        cleaned = cleaned.replace(/\s+/g, '');
+      }
     }
 
     document.getElementById(cfg.fieldId).value = cleaned;
