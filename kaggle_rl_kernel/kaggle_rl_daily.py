@@ -912,13 +912,51 @@ def run_kl8_daily(records, ml_pred):
         if first_action is not None:
             ball_idx = np.arange(1, 81)
             corr = float(np.corrcoef(ball_idx, first_action)[0, 1])
-            print(f"  [诊断] 打分与球号(1-80)的相关系数: {corr:.3f}")
+            print(f"  [诊断1] 打分与球号(1-80)的相关系数: {corr:.3f}")
             if abs(corr) > 0.3:
                 direction = '偏向大号' if corr > 0 else '偏向小号'
-                print(f"  ⚠️ [诊断警告] 相关系数绝对值>0.3，打分很可能仍跟球号序号系统性绑定（{direction}），"
-                      f"不是真正基于状态（ML概率/遗漏/隐层）在选号，可能存在归一化之外的其它偏向来源，需要人工复查")
+                print(f"  ⚠️ [诊断1警告] 相关系数绝对值>0.3，打分很可能仍跟球号序号系统性绑定（{direction}）")
             else:
-                print(f"  ✓ [诊断通过] 打分与球号无明显系统性相关，说明是基于状态内容而非序号在打分")
+                print(f"  ✓ [诊断1通过] 打分与球号无明显系统性相关")
+
+        # ── 诊断2（关键）：对比多个不同历史时间点的推荐结果 ──
+        # 如果模型是真的在响应"当天的遗漏/频率数据"，那么不同历史时期（遗漏/频率状况完全不同）
+        # 推荐出的号码应该有明显差异；如果好几个完全不同时期都推荐出几乎相同的号码，
+        # 就直接证明模型压根没在看状态，是训练过程中学出的固定偏见（而不是反映真实遗漏数据）。
+        if games >= 4:
+            test_points = sorted(set([
+                max(SEQ_LEN+30, len(records)-200),
+                max(SEQ_LEN+30, len(records)-100),
+                max(SEQ_LEN+30, len(records)-50),
+                len(records)-1,
+            ]))
+            snapshot_top6 = {}
+            for tp in test_points:
+                st = build_state(tp)
+                if st is None: continue
+                act,_ = model.predict(st, deterministic=True)
+                top6 = set(int(i)+1 for i in np.argsort(act)[-6:])
+                snapshot_top6[tp] = top6
+            print(f"  [诊断2] 不同历史时期(共{len(snapshot_top6)}个采样点)的Top6推荐对比：")
+            for tp, top6 in snapshot_top6.items():
+                print(f"    第{tp}期状态 → 推荐{sorted(top6)}")
+            if len(snapshot_top6) >= 2:
+                all_sets = list(snapshot_top6.values())
+                pairwise_overlaps = []
+                for i in range(len(all_sets)):
+                    for j in range(i+1, len(all_sets)):
+                        pairwise_overlaps.append(len(all_sets[i] & all_sets[j]))
+                avg_overlap = sum(pairwise_overlaps)/len(pairwise_overlaps)
+                print(f"  [诊断2] 不同时期推荐结果平均重合数: {avg_overlap:.1f}/6")
+                if avg_overlap >= 4:
+                    print(f"  ⚠️⚠️ [诊断2严重警告] 完全不同历史时期的状态推荐出几乎相同的号码(重合≥4/6)，"
+                          f"证明模型没有在响应状态变化，是训练中学出的固定偏见，不是反映真实遗漏/频率数据！"
+                          f"需要重新审视训练本身（比如降低学习率、加大熵系数、或减少训练步数避免过早收敛）")
+                elif avg_overlap <= 1:
+                    print(f"  ✓ [诊断2通过] 不同时期推荐差异明显，模型确实在响应状态变化，"
+                          f"当前偏向大号很可能真实反映了最新一期的遗漏/频率数据，不是训练bug")
+                else:
+                    print(f"  ⚠️ [诊断2中性] 重合度中等，无法完全确定，建议结合诊断1一起判断")
 
     def group(ranking_idx, n):
         return sorted(rankings[ranking_idx][:n]) if rankings else []
