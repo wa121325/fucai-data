@@ -966,26 +966,29 @@ def run_kl8_daily(records, ml_pred):
                 else:
                     print(f"  ⚠️ [诊断2中性] 重合度中等")
 
-    def group(n, window_offset=0):
-        # 同一份RL排序做滑动窗口切分：主组用[0:n]，第2/3组依次错开1位取[1:n+1]/[2:n+2]，
-        # 全部来自RL自己的排序，不引入外部信号重新计算
+    def group(n, tier=0):
+        # 不重叠区段切分：第1组用排名第1~n名(第一梯队/RL最看好)，
+        # 第2组用排名第(n+1)~2n名(第二梯队/次优选项)，第3组用第(2n+1)~3n名(第三梯队)。
+        # 之前用滑动窗口(错开1位)会导致相邻组之间(n-1)/n的球完全重复，不是真正的次优组合；
+        # 现在每个梯队都是排序里完全不同的一批球，真正体现"RL认为的次优选项是什么"。
         if not rl_order: return []
-        return sorted(rl_order[window_offset:window_offset+n])
+        start = tier * n
+        return sorted(rl_order[start:start+n])
 
     # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
-    # 全部组别都直接来自RL自己的排序（滑动窗口切分），不掺入外部权重公式
+    # 每组是RL排序里完全不同的梯队，代表"最优/次优/第三优"三档真实不同的组合
     plays = {
-        'xuan4':    {'name':'选四','balls':4, 'tip':'RL主排序滑动窗口取3组',
+        'xuan4':    {'name':'选四','balls':4, 'tip':'第1注最优梯队/第2注次优梯队/第3注第三梯队',
                      'groups':[group(4,0), group(4,1), group(4,2)]},
-        'xuan5':    {'name':'选五','balls':5, 'tip':'RL主排序滑动窗口取3组',
+        'xuan5':    {'name':'选五','balls':5, 'tip':'第1注最优梯队/第2注次优梯队/第3注第三梯队',
                      'groups':[group(5,0), group(5,1), group(5,2)]},
-        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注（RL主排序前8）',
+        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注（RL最优梯队前8）',
                      'groups':[group(8,0)]},
-        'xuan6':    {'name':'选六','balls':6, 'tip':'RL主排序滑动窗口取3组（回测标准）',
+        'xuan6':    {'name':'选六','balls':6, 'tip':'第1注最优梯队/第2注次优梯队/第3注第三梯队（回测标准）',
                      'groups':[group(6,0), group(6,1), group(6,2)]},
-        'xuan9':    {'name':'选九','balls':9, 'tip':'RL主排序滑动窗口取2组',
+        'xuan9':    {'name':'选九','balls':9, 'tip':'第1注最优梯队/第2注次优梯队',
                      'groups':[group(9,0), group(9,1)]},
-        'xuan10':   {'name':'选十','balls':10,'tip':'RL主排序前10',
+        'xuan10':   {'name':'选十','balls':10,'tip':'RL最优梯队前10',
                      'groups':[group(10,0)]},
     }
     picks_by_n = {4:group(4,0), 5:group(5,0), 6:group(6,0), 9:group(9,0), 10:group(10,0)}
@@ -1107,15 +1110,23 @@ def run_ssq_daily(records, ml_pred):
     if state is not None:
         base_action,_ = model.predict(state, deterministic=True)
         red_scores = base_action[:33]; blue_scores = base_action[33:]
-        blue_sel = int(np.argmax(blue_scores))+1   # 蓝球用RL确定性预测
+
+        # 蓝球排序：不再只取argmax(唯一最优解)，而是拿到RL对全部16个蓝球的完整打分排序，
+        # 让不同注轮流用排名靠前的几个候选蓝球，把模型对次优选项的判断也利用起来，
+        # 而不是把"分数第二、第三高"的蓝球完全浪费掉、6注全部锁死在同一个号码上。
+        blue_order = [int(i)+1 for i in np.argsort(blue_scores)[::-1]]
 
         rl_red_order = [int(i)+1 for i in np.argsort(red_scores)[::-1]]
 
-        # 6注 = 同一份RL红球排序做滑动窗口切分，全部由RL自己的判断主导
-        for offset in range(6):
-            red_sel = sorted(rl_red_order[offset:offset+6])
-            if len(red_sel) == 6:
-                groups.append({'red': red_sel, 'blue': blue_sel})
+        # 红球：不重叠区段切分，3个梯队各6个球（第1梯队排名1-6/第2梯队7-12/第3梯队13-18），
+        # 之前用滑动窗口每次只挪1位，相邻注5/6红球重复，不是真正的次优组合。
+        # 现在3个红球梯队 × 2个蓝球候选 = 6注，两个维度都是RL排序里真正不同的选项。
+        red_tiers = [sorted(rl_red_order[t*6:(t+1)*6]) for t in range(3)]
+        for red_sel in red_tiers:
+            for b in blue_order[:2]:
+                if len(red_sel) == 6:
+                    groups.append({'red': red_sel, 'blue': b})
+        blue_sel = blue_order[0]   # 供下方ref_info/兼容字段使用，主推荐仍是排名第一的蓝球
 
         # 参考信息：遗漏值+ML主力区预测，仅用于展示说明，不参与排序计算
         om_now = omit_arr[idx] if omit_arr is not None else np.zeros(49)
@@ -1128,7 +1139,7 @@ def run_ssq_daily(records, ml_pred):
             'avg_omission_top6': avg_omission,
             'ml_zone_pred': zone_names[zone_pred] if zone_pred is not None and 0<=zone_pred<3 else None,
         }
-        print(f"  [主推荐] RL红球排序Top6: {sorted(top6_red)}  蓝球: {blue_sel}")
+        print(f"  [主推荐] RL红球排序Top6: {sorted(top6_red)}  蓝球Top3候选: {blue_order[:3]}（6注轮流分配）")
         print(f"  [参考信息] 该注平均遗漏{avg_omission}期；ML预测红球主力区={ref_info['ml_zone_pred']}")
 
     # 兼容旧字段：主推荐仍取第一注
@@ -1218,26 +1229,46 @@ def run_3d_daily(records, ml_pred):
     idx=len(records)-1; state=build_state(idx)
     groups=[]
     if state is not None:
-        # 用随机采样（deterministic=False）生成6注不同组合，而非固定输出1注
-        # 采样自PPO学到的策略分布，不是瞎猜——每次采样都基于同一状态向量（含ML/DL/遗漏全部信息）
-        random.seed(int(date.today().strftime('%Y%m%d')))
-        seen=set(); attempts=0
-        while len(groups)<6 and attempts<30:
-            action,_ = model.predict(state, deterministic=False)
-            combo=[int(action[0]),int(action[1]),int(action[2])]
-            key=tuple(combo)
-            if key not in seen:
-                seen.add(key); groups.append(combo)
-            attempts+=1
-        # 若采样多次仍不足6注（策略过于集中），用最后一次结果补齐
+        # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
+        # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
+        try:
+            obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs_tensor)
+            # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
+            pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
+
+            # 每位取概率最高的前2个候选数字，组合出最多2×2×2=8种候选，按联合概率(三位概率相乘)排序取前6
+            candidates = []
+            for b in np.argsort(pos_probs[0])[::-1][:2]:
+                for s in np.argsort(pos_probs[1])[::-1][:2]:
+                    for g in np.argsort(pos_probs[2])[::-1][:2]:
+                        joint_prob = pos_probs[0][b] * pos_probs[1][s] * pos_probs[2][g]
+                        candidates.append(([int(b),int(s),int(g)], joint_prob))
+            candidates.sort(key=lambda x: -x[1])
+            groups = [c[0] for c in candidates[:6]]
+            print(f"  [主推荐] 百位Top2概率: {sorted(pos_probs[0])[-2:][::-1].round(3).tolist()}  "
+                  f"十位Top2: {sorted(pos_probs[1])[-2:][::-1].round(3).tolist()}  "
+                  f"个位Top2: {sorted(pos_probs[2])[-2:][::-1].round(3).tolist()}")
+            print(f"  [次优组合] 按联合概率排序生成{len(groups)}组: {groups}")
+        except Exception as e:
+            print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
+            action,_ = model.predict(state, deterministic=True)
+            groups = [[int(action[0]),int(action[1]),int(action[2])]]
+
+        # 不足6注时（比如候选池不够8种或提取失败），用确定性预测补齐
         while len(groups)<6:
-            groups.append(groups[-1] if groups else [0,0,0])
-    pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注
+            if not groups:
+                action,_ = model.predict(state, deterministic=True)
+                groups.append([int(action[0]),int(action[1]),int(action[2])])
+            else:
+                groups.append(groups[-1])
+    pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注（联合概率最高的组合）
 
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'ppo_pred':pred,'ppo_groups':groups,'is_first_train':is_new,
-            'note':f'PPO直接预测百十个位组合（随机采样生成6注），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
+            'note':f'PPO按百十个位各自概率分布排序，联合概率从高到低生成6注（而非随机采样），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
