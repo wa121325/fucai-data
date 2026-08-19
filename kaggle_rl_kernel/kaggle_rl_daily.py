@@ -404,6 +404,32 @@ def precompute_omission_kl8(records):
     return omit_arr
 
 
+def precompute_freq_kl8(records, window=30):
+    """
+    批量一次性计算快乐8所有期数的"近N期逐球出现频率"（80维，每个球一个独立数值）
+    这是遗漏向量之外，第二个真正能逐球区分号码的信号。
+    ── 为什么需要这个 ──
+    快乐8 PPO 需要给80个球各自打分，但状态向量里绝大部分内容
+    （走势聚合特征、ML分组概率、LSTM/TFM隐层）对80个球来说都是完全相同的共享信息，
+    根本不携带"这是哪个球"的区分度。之前只有遗漏值这一个80维信号能区分个体球，
+    信号太单薄，导致网络最后一层的输出权重很容易在训练中自己走出一个
+    跟真实状态无关、只是训练过程偶然形成的固定偏好（表现为持续偏向某个号码区间）。
+    加入"近期出现频率"作为第二个逐球信号，让网络有更充分的依据去真正学习"选哪个球"，
+    而不是在信息不足的情况下被迫依赖训练过程中的随机偏置。
+    """
+    N = len(records)
+    freq_arr = np.zeros((N+1, 80), dtype=np.float32)
+    from collections import deque
+    recent = deque(maxlen=window)
+    for idx in range(N+1):
+        cnt = Counter(n for r in recent for n in r['numbers'])
+        for n in range(1, 81):
+            freq_arr[idx, n-1] = cnt.get(n, 0)
+        if idx < N:
+            recent.append(records[idx])
+    return freq_arr
+
+
 def precompute_omission_ssq(records):
     """双色球：33红球+16蓝球=49维遗漏向量，批量预计算"""
     N = len(records)
@@ -508,29 +534,38 @@ KL8_TRAIN_N = 6    # 训练时用"选六"作为奖励标准，推荐时对同一
 
 class IntegratedKL8Env(gym.Env):
     """
-    快乐8环境 v3：全号码打分排序（而非候选池预筛）
+    快乐8环境 v4：全号码打分排序 + 双重逐球差异化信号（遗漏+近期频率）
     动作空间设计对比：
     - MultiBinary(80)：2^80种组合，训练几十万步也探索不到万分之一，学不出东西
     - 候选池Box(30)：只对预筛的30个候选打分，覆盖面受限，真正该选的号码若不在候选池里则永远选不到
     - 本版 Box(80)：对全部80个球直接打连续分数，取Top6，
       既保留全覆盖（跟MultiBinary一样能选中任意号码），
       又是标准的排序学习问题（跟候选池一样好训练，PPO能有效利用梯度）
+
+    ⚠️ 关键修复：网络要输出80个球各自的分数，但状态向量里绝大部分内容
+    （走势聚合特征/ML分组概率/LSTM/TFM隐层）对80个球来说完全相同，不携带"选哪个球"的区分度，
+    之前只有遗漏值这一个80维信号能区分个体球，信号太单薄，网络最后一层容易在训练中
+    自己走出一个跟真实状态无关的固定偏好（表现为持续偏向某个号码区间）。
+    这版加入"近期出现频率"作为第二个逐球信号，并对这两个逐球信号整体加权(×2)，
+    确保网络有足够强的信号去真正学习"选哪个球"，而不是被迫依赖训练偶然性。
     """
     metadata={'render_modes':[]}
+    PERBALL_WEIGHT = 2.0   # 逐球信号（遗漏+频率）额外加权，突出其重要性
+
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, train_n=KL8_TRAIN_N):
+                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr
+        self.omit_arr=omit_arr; self.freq_arr=freq_arr
         self.train_n=train_n
         self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
-        omit_dim = 80   # 全部80个球的遗漏值，本身就自带"每个球的差异化信息"，不需要额外候选池子向量
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
+        omit_dim = 80; freq_dim = 80
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
 
@@ -547,8 +582,13 @@ class IntegratedKL8Env(gym.Env):
         else:
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
+        fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(80,dtype=np.float32)
 
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
+        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr)
+        # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
+        state = state.copy()
+        state[-160:] *= self.PERBALL_WEIGHT
+        return np.clip(state, -5, 5)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -768,11 +808,16 @@ def run_kl8_daily(records, ml_pred):
     omit_arr = precompute_omission_kl8(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（80维，覆盖全部号码）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维")
+    print("  批量预计算近30期频率向量…")
+    t0 = time.time()
+    freq_arr = precompute_freq_kl8(records, window=30)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [频率向量] ✓已加载（80维，第二个逐球差异化信号）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
 
     def make_env():
         return IntegratedKL8Env(records, fkl8, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('kl8')
@@ -804,7 +849,11 @@ def run_kl8_daily(records, ml_pred):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
+        fr = freq_arr[idx]
+        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr)
+        state = state.copy()
+        state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
+        return np.clip(state, -5, 5)
 
     # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
     start = max(SEQ_LEN+30, len(records)-30)
