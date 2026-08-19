@@ -1247,9 +1247,9 @@ def run_3d_daily(records, ml_pred):
                         candidates.append(([int(b),int(s),int(g)], joint_prob))
             candidates.sort(key=lambda x: -x[1])
             groups = [c[0] for c in candidates[:6]]
-            print(f"  [主推荐] 百位Top2概率: {sorted(pos_probs[0])[-2:][::-1].round(3).tolist()}  "
-                  f"十位Top2: {sorted(pos_probs[1])[-2:][::-1].round(3).tolist()}  "
-                  f"个位Top2: {sorted(pos_probs[2])[-2:][::-1].round(3).tolist()}")
+            print(f"  [主推荐] 百位Top2概率: {np.sort(pos_probs[0])[-2:][::-1].round(3).tolist()}  "
+                  f"十位Top2: {np.sort(pos_probs[1])[-2:][::-1].round(3).tolist()}  "
+                  f"个位Top2: {np.sort(pos_probs[2])[-2:][::-1].round(3).tolist()}")
             print(f"  [次优组合] 按联合概率排序生成{len(groups)}组: {groups}")
         except Exception as e:
             print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
