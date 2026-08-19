@@ -2362,6 +2362,13 @@ function renderDLResult(dlResult){
         回测（近${kl8Rl.games_tested??'—'}期）
         ${kl8Rl.is_first_train?'（首次训练）':'（增量微调）'}
       </div>`;
+      if(kl8Rl.ref_info){
+        const ri = kl8Rl.ref_info;
+        html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:6px 10px;margin-bottom:8px;">
+          📎 参考信息（不参与RL决策，仅帮助理解）：主推荐平均遗漏${ri.avg_omission_top6??'—'}期，平均近期频率${ri.avg_freq_top6??'—'}次；
+          ML预测主力区间=${ri.ml_zone_pred||'—'}，主力五行段=${ri.ml_five_pred||'—'}
+        </div>`;
+      }
       if(kl8Rl.backtest_by_play){
         const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
         const bestN = kl8Rl.best_play_n;
@@ -2420,6 +2427,12 @@ function renderDLResult(dlResult){
       if(rhd){
         html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
           红球命中分布：${[0,1,2,3,4,5,6].map(k=>`${k}个${rhd[k]??rhd[String(k)]??0}期`).join(' ')}
+        </div>`;
+      }
+      if(ssqRl.ref_info){
+        const ri = ssqRl.ref_info;
+        html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:6px 10px;margin-bottom:8px;">
+          📎 参考信息（不参与RL决策，仅帮助理解）：主推荐平均遗漏${ri.avg_omission_top6??'—'}期；ML预测红球主力区=${ri.ml_zone_pred||'—'}
         </div>`;
       }
       if(ssqRl.ppo_groups?.length){
