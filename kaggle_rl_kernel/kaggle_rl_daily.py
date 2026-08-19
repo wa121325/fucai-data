@@ -1004,7 +1004,7 @@ def run_kl8_daily(records, ml_pred):
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'}
 
 
-def run_ssq_daily(records, ml_pred):
+def run_ssq_daily(records, ml_pred, prev_result=None):
     print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
 
     # ── 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新一期数据 ──
@@ -1024,8 +1024,16 @@ def run_ssq_daily(records, ml_pred):
               f"本期非开奖日：周二/四/日才开奖），跳过训练，直接沿用上次结果")
         os.makedirs(RL_LOCAL_DIR, exist_ok=True)
         with open(ssq_count_path_local, 'w') as f: json.dump({'n': len(records)}, f)  # 仍需持久化，供Dataset同步
+        if prev_result:
+            # 复制上次完整结果，字段结构原样保留（HTML那边渲染逻辑完全不用改），
+            # 只是叠加一下"本期是沿用"的标记和备注，方便区分
+            carried = dict(prev_result)
+            carried['skipped'] = True
+            carried['carried_over'] = True
+            carried['note'] = (carried.get('note','') or '') + '（今日非开奖日，以上为上次开奖日的结果，未重新训练）'
+            return carried
         return {'skipped': True, 'games_tested': 0, 'reason': '非开奖日，无新数据',
-                'note': '双色球周二/四/日开奖，今日非开奖日，未产生新数据，跳过本次训练'}
+                'note': '双色球周二/四/日开奖，今日非开奖日，未产生新数据，且未找到上次训练结果可沿用（可能是首次运行）'}
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
@@ -1286,6 +1294,14 @@ if raw_ml:
     try: ml_preds = json.loads(raw_ml).get('predictions', {})
     except Exception: pass
 
+# 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
+# （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
+raw_prev_rl = gh_raw('dl_rl.json')
+prev_rl_results = {}
+if raw_prev_rl:
+    try: prev_rl_results = json.loads(raw_prev_rl).get('results', {})
+    except Exception: pass
+
 os.makedirs(RL_LOCAL_DIR, exist_ok=True)
 rl_results = {}
 
@@ -1295,7 +1311,10 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
         print(f"\n{game}: 数据不足，跳过"); continue
     ml_pred = ml_preds.get(game, {})
     try:
-        rl_results[game] = run_fn(records, ml_pred)
+        if game == 'ssq':
+            rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get('ssq'))
+        else:
+            rl_results[game] = run_fn(records, ml_pred)
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"{game} 失败: {e}")
