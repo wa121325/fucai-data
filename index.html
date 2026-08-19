@@ -980,6 +980,31 @@
     display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:var(--muted);
   }
   .scanZoomRow input[type=range]{flex:1;}
+  .scanDivider{
+    display:flex;align-items:center;gap:10px;margin:18px 0;color:var(--muted);font-size:12px;
+  }
+  .scanDivider::before,.scanDivider::after{content:'';flex:1;height:1px;background:var(--panel-border);}
+  .nativeCamBtn{
+    width:100%;padding:12px;border-radius:10px;
+    background:#1a6b1a;color:#fff;border:none;font-size:14px;font-weight:700;
+    cursor:pointer;
+  }
+  .nativeCamHint{font-size:11px;color:var(--muted);margin-top:6px;text-align:center;}
+  .cropStage{
+    position:relative;margin-top:12px;border-radius:12px;overflow:hidden;
+    background:#1a1712;touch-action:none;display:none;
+  }
+  .cropStage img{width:100%;display:block;user-select:none;-webkit-user-drag:none;}
+  .cropBox{
+    position:absolute;border:2px solid #f1d688;background:rgba(241,214,136,.12);
+    box-shadow:0 0 0 999px rgba(0,0,0,.45);
+  }
+  .cropBox .cropHandle{
+    position:absolute;width:22px;height:22px;background:#f1d688;border-radius:50%;
+    right:-11px;bottom:-11px;touch-action:none;
+  }
+  .cropActions{display:flex;gap:8px;margin-top:10px;}
+  .cropActions .btn{flex:1;}
   .scanResultActions .btn{flex:1;}
   .scanFieldsForm{margin-top:14px;}
   .scanFieldRow{
@@ -1342,6 +1367,22 @@
           <div class="scanCropPreview" id="scanCropPreview" style="display:none;">
             <img id="scanCropImg" alt="拍摄区域预览">
             <div class="cropHint">↑ 实际送去识别的裁剪区域（放大显示），若模糊请重新对焦/靠近或用变焦滑块后重拍</div>
+          </div>
+
+          <div class="scanDivider">实时取景模糊解决不了？试试下面这个</div>
+          <input type="file" accept="image/*" capture="environment" id="nativeCamInput" style="display:none;">
+          <button class="nativeCamBtn" id="nativeCamBtn">📷 用系统相机拍整张照片（对焦更可靠）</button>
+          <div class="nativeCamHint">调起手机自带相机App拍照，能用到手机真正的自动对焦和微距能力，拍完后框选需要的区域再识别</div>
+
+          <div class="cropStage" id="cropStage">
+            <img id="cropSourceImg" alt="拍摄的照片">
+            <div class="cropBox" id="cropBox" style="left:10%;top:40%;width:80%;height:15%;">
+              <div class="cropHandle" id="cropHandle"></div>
+            </div>
+          </div>
+          <div class="cropActions" id="cropActions" style="display:none;">
+            <button class="btn" id="cropConfirmBtn">✓ 识别框选区域</button>
+            <button class="btn ghost" id="cropCancelBtn">取消</button>
           </div>
 
           <div class="scanFieldsForm">
@@ -4450,6 +4491,172 @@ document.getElementById('scanExportBtn').addEventListener('click', ()=>{
   XLSX.writeFile(wb, fname);
   listStatus.className = 'status ok';
   listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}`;
+});
+
+/* ── 系统相机拍照 + 手动框选裁剪 ──
+   getUserMedia实时视频流受浏览器沙盒限制，很多手机真正的自动对焦/微距切换
+   走这条路调不到。改用 <input type=file capture> 直接调起手机原生相机App，
+   拍照这个动作完全交给手机自己的相机处理，能用上真正的自动对焦能力。
+   代价是不再有实时取景框，改成"拍一整张照片→手动框选区域→识别"。 */
+let cropImgNaturalW = 0, cropImgNaturalH = 0;
+
+document.getElementById('nativeCamBtn').addEventListener('click', ()=>{
+  document.getElementById('nativeCamInput').click();
+});
+
+document.getElementById('nativeCamInput').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev)=>{
+    const img = document.getElementById('cropSourceImg');
+    img.onload = ()=>{
+      cropImgNaturalW = img.naturalWidth;
+      cropImgNaturalH = img.naturalHeight;
+      // 默认框选位置按当前拍摄模式给个合理初始值（编号在下部，票名/面值在中上部）
+      const box = document.getElementById('cropBox');
+      if(scanCaptureMode === 'code'){
+        box.style.left='8%'; box.style.top='70%'; box.style.width='84%'; box.style.height='15%';
+      } else {
+        box.style.left='14%'; box.style.top='30%'; box.style.width='72%'; box.style.height='20%';
+      }
+      document.getElementById('cropStage').style.display = 'block';
+      document.getElementById('cropActions').style.display = 'flex';
+      document.getElementById('cropStage').scrollIntoView({behavior:'smooth', block:'center'});
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';   // 清空，允许重复选择同一张图片触发change
+});
+
+/* 框选交互：拖动整个框移动位置，拖动右下角圆点调整大小 */
+(function initCropDrag(){
+  const stage = document.getElementById('cropStage');
+  const box = document.getElementById('cropBox');
+  const handle = document.getElementById('cropHandle');
+  let mode = null, startX=0, startY=0, startBox={};
+
+  function getPos(e){
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+  }
+  function boxPx(){
+    const rect = stage.getBoundingClientRect();
+    return {
+      left: parseFloat(box.style.left)/100*rect.width,
+      top: parseFloat(box.style.top)/100*rect.height,
+      width: parseFloat(box.style.width)/100*rect.width,
+      height: parseFloat(box.style.height)/100*rect.height,
+      rectW: rect.width, rectH: rect.height
+    };
+  }
+  function onDown(e, m){
+    mode = m;
+    const p = getPos(e);
+    startX = p.x; startY = p.y;
+    startBox = boxPx();
+    e.stopPropagation(); e.preventDefault();
+  }
+  function onMove(e){
+    if(!mode) return;
+    const p = getPos(e);
+    const dx = p.x - startX, dy = p.y - startY;
+    const rect = stage.getBoundingClientRect();
+    if(mode === 'move'){
+      let nl = startBox.left + dx, nt = startBox.top + dy;
+      nl = Math.max(0, Math.min(nl, rect.width - startBox.width));
+      nt = Math.max(0, Math.min(nt, rect.height - startBox.height));
+      box.style.left = (nl/rect.width*100) + '%';
+      box.style.top = (nt/rect.height*100) + '%';
+    } else if(mode === 'resize'){
+      let nw = Math.max(30, startBox.width + dx), nh = Math.max(20, startBox.height + dy);
+      nw = Math.min(nw, rect.width - startBox.left);
+      nh = Math.min(nh, rect.height - startBox.top);
+      box.style.width = (nw/rect.width*100) + '%';
+      box.style.height = (nh/rect.height*100) + '%';
+    }
+    e.preventDefault();
+  }
+  function onUp(){ mode = null; }
+
+  box.addEventListener('mousedown', e=> onDown(e,'move'));
+  box.addEventListener('touchstart', e=> onDown(e,'move'), {passive:false});
+  handle.addEventListener('mousedown', e=> onDown(e,'resize'));
+  handle.addEventListener('touchstart', e=> onDown(e,'resize'), {passive:false});
+  window.addEventListener('mousemove', onMove, {passive:false});
+  window.addEventListener('touchmove', onMove, {passive:false});
+  window.addEventListener('mouseup', onUp);
+  window.addEventListener('touchend', onUp);
+})();
+
+document.getElementById('cropCancelBtn').addEventListener('click', ()=>{
+  document.getElementById('cropStage').style.display = 'none';
+  document.getElementById('cropActions').style.display = 'none';
+});
+
+document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
+  const stage = document.getElementById('cropStage');
+  const box = document.getElementById('cropBox');
+  const statusEl = document.getElementById('scanCameraStatus');
+  const cropPreview = document.getElementById('scanCropPreview');
+  const cropImg = document.getElementById('scanCropImg');
+  const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
+  const confirmBtn = document.getElementById('cropConfirmBtn');
+
+  confirmBtn.disabled = true;
+  statusEl.className = 'status'; statusEl.textContent = '正在识别框选区域…';
+
+  try{
+    // 框选比例(相对显示尺寸) → 换算成原图实际像素坐标裁剪
+    const rect = stage.getBoundingClientRect();
+    const bx = parseFloat(box.style.left)/100;
+    const by = parseFloat(box.style.top)/100;
+    const bw = parseFloat(box.style.width)/100;
+    const bh = parseFloat(box.style.height)/100;
+
+    const sx = Math.round(bx * cropImgNaturalW);
+    const sy = Math.round(by * cropImgNaturalH);
+    const sw = Math.round(bw * cropImgNaturalW);
+    const sh = Math.round(bh * cropImgNaturalH);
+
+    const sourceImg = document.getElementById('cropSourceImg');
+    const canvas = document.getElementById('scanCanvas');
+    const upscale = Math.max(1, 240 / sh);
+    canvas.width = Math.round(sw * upscale);
+    canvas.height = Math.round(sh * upscale);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+    cropImg.src = canvas.toDataURL('image/png');
+    cropPreview.style.display = 'block';
+
+    const worker = await ensureScanWorker();
+    await worker.setParameters({ tessedit_char_whitelist: cfg.whitelist || '' });
+    const { data: { text } } = await worker.recognize(canvas);
+
+    let cleaned = (text || '').trim();
+    if(scanCaptureMode === 'code'){
+      cleaned = cleaned.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+    } else {
+      cleaned = cleaned.replace(/\s+/g, '');
+    }
+
+    document.getElementById(cfg.fieldId).value = cleaned;
+    statusEl.className = cleaned ? 'status ok' : 'status err';
+    statusEl.textContent = cleaned
+      ? '✓ 识别完成，已填入下方对应字段，请核对是否正确'
+      : '⚠️ 未识别到有效内容，可调整框选范围重试，或直接手动填写';
+
+    stage.style.display = 'none';
+    document.getElementById('cropActions').style.display = 'none';
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '识别出错：' + e.message;
+  } finally{
+    confirmBtn.disabled = false;
+  }
 });
 
 // 初次加载：先用本地缓存快速显示，再尝试从GitHub拉取最新版本
