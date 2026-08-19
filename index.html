@@ -885,11 +885,13 @@
     border-radius:14px;
     overflow:hidden;
     border:1px solid var(--panel-border);
+    cursor:pointer;
   }
   .cameraStage video{
     width:100%;height:100%;object-fit:cover;display:block;
   }
   .cameraStage.off video{display:none;}
+  .cameraStage.off{cursor:default;}
   .cameraPlaceholder{
     position:absolute;inset:0;
     display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -1294,7 +1296,7 @@
             <div class="scanGuide modeCode" id="scanGuide"></div>
             <div class="cameraPlaceholder">
               <div class="bigIcon">📷</div>
-              <div>选择上方拍摄内容，点击「开启摄像头」后对准取景框</div>
+              <div>选择上方拍摄内容，点击「开启摄像头」后对准取景框<br><span style="font-size:11px;opacity:.7;">画面模糊时可点击画面尝试对焦</span></div>
             </div>
           </div>
           <canvas id="scanCanvas" style="display:none;"></canvas>
@@ -4075,8 +4077,25 @@ async function startScanCamera(){
     stage.classList.remove('off');
     toggleBtn.textContent = '关闭摄像头';
     captureBtn.disabled = false;
+
+    // 尝试开启持续自动对焦（focusMode是非标准扩展，仅部分安卓Chrome支持，iOS Safari完全不支持此API，
+    // 属于浏览器平台本身的限制，不是所有设备都能通过网页程序控制对焦）
+    let focusSupported = false;
+    try{
+      const track = scanStream.getVideoTracks()[0];
+      if(track && typeof track.getCapabilities === 'function'){
+        const caps = track.getCapabilities();
+        if(caps.focusMode && caps.focusMode.includes('continuous')){
+          await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+          focusSupported = true;
+        }
+      }
+    } catch(e){ /* 静默失败，不影响主流程，走下面的点按对焦兜底 */ }
+
     statusEl.className = 'status ok';
-    statusEl.textContent = '✓ 已开启，将对应内容对准取景框后点击「拍照识别」';
+    statusEl.textContent = focusSupported
+      ? '✓ 已开启（自动对焦已启用），将对应内容对准取景框后点击「拍照识别」'
+      : '✓ 已开启，若画面模糊可点击取景框区域尝试对焦，或前后移动手机调整焦距，再点击「拍照识别」';
   } catch(e){
     statusEl.className = 'status err';
     if(e.name === 'NotAllowedError'){
@@ -4088,6 +4107,26 @@ async function startScanCamera(){
     }
   }
 }
+
+// 点击取景画面尝试手动对焦（pointsOfInterest同样是非标准扩展，仅部分安卓Chrome支持；
+// 不支持的设备点击不会报错，只是没有实际效果，属于渐进增强）
+document.getElementById('cameraStage').addEventListener('click', async (e)=>{
+  if(!scanStream) return;
+  try{
+    const track = scanStream.getVideoTracks()[0];
+    if(!track || typeof track.getCapabilities !== 'function') return;
+    const caps = track.getCapabilities();
+    if(!caps.focusMode || !caps.focusMode.includes('single-shot')) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    const advanced = [{ focusMode: 'single-shot' }];
+    if(caps.pointsOfInterest) advanced.push({ pointsOfInterest: [{ x, y }] });
+    await track.applyConstraints({ advanced });
+    const statusEl = document.getElementById('scanCameraStatus');
+    statusEl.className = 'status ok'; statusEl.textContent = '✓ 已尝试对焦到点击位置';
+  } catch(e){ /* 不支持则静默忽略 */ }
+});
 function stopScanCamera(){
   if(scanStream){
     scanStream.getTracks().forEach(t=>t.stop());
