@@ -517,7 +517,7 @@
   /* ── AI文案助手 ── */
   .card{background:#faf9f6;border:1px solid #e3e0d8;border-radius:12px;padding:14px;margin-bottom:14px;}
   .cardTitle{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:10px;}
-  .chatQuickBtn{font-size:12px;padding:8px 14px;}
+  .chatQuickBtn{width:auto;font-size:12px;padding:8px 14px;}
   #chatInput{background:#fff;border:1px solid #d8d3c5;color:var(--ink);}
   #chatInput:focus{outline:none;border-color:#a89a6f;}
   .chatBubble{max-width:85%;padding:10px 14px;border-radius:14px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
@@ -1126,14 +1126,12 @@
           <div class="status" id="chatEmptyHint">还没有对话，说说你的需求吧，比如："帮我写一条发朋友圈的文案，周末去爬山拍的照片，想要轻松一点的风格"</div>
         </div>
 
-        <div style="display:flex;gap:8px;align-items:flex-end;">
-          <textarea id="chatInput" rows="3" placeholder="输入你的需求…比如：帮我写一句适合发朋友圈的加班文案，带点自嘲幽默"
-            style="flex:1;padding:10px 12px;border-radius:10px;font-size:14px;resize:vertical;"></textarea>
-          <button class="btn" id="chatSendBtn" style="white-space:nowrap;">发送</button>
-        </div>
+        <textarea id="chatInput" rows="3" placeholder="输入你的需求…比如：帮我写一句适合发朋友圈的加班文案，带点自嘲幽默"
+          style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;font-size:14px;resize:vertical;margin-bottom:8px;"></textarea>
+        <button class="btn" id="chatSendBtn">发送</button>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
           <div class="status" id="chatStatus" style="margin:0;"></div>
-          <button class="btn secondary" id="chatClearBtn" style="font-size:12px;padding:6px 12px;">清空对话</button>
+          <button class="btn secondary" id="chatClearBtn" style="width:auto;font-size:12px;padding:6px 12px;">清空对话</button>
         </div>
       </div>
     </div><!-- end tabChat -->
