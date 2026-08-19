@@ -898,6 +898,17 @@
   .cameraPlaceholder .bigIcon{font-size:38px;opacity:.7;}
   .cameraStage.off .cameraPlaceholder{display:flex;}
   .cameraStage:not(.off) .cameraPlaceholder{display:none;}
+  .scanModeRow{
+    display:flex;gap:6px;margin-bottom:10px;
+  }
+  .scanModePill{
+    flex:1;text-align:center;padding:7px 6px;border-radius:8px;
+    border:1px solid var(--panel-border);background:#faf9f6;
+    font-size:12.5px;font-weight:600;cursor:pointer;user-select:none;
+    transition:all .15s ease;
+  }
+  .scanModePill:hover{border-color:#c7c0b0;}
+  .scanModePill.active{background:var(--ink);color:#fff;border-color:var(--ink);}
   .scanGuide{
     position:absolute;
     left:8%; right:8%; bottom:14%;
@@ -906,14 +917,22 @@
     border-radius:8px;
     box-shadow:0 0 0 999px rgba(0,0,0,.42);
     pointer-events:none;
+    transition:all .2s ease;
+  }
+  /* 名称/金额模式：取景框挪到画面中上部，票面标题/价格通常在这一带 */
+  .scanGuide.modeCenter{
+    left:14%; right:14%; bottom:auto; top:24%;
+    height:20%;
   }
   .scanGuide::before{
-    content:'对准编码区域';
+    content:'对准编号区域';
     position:absolute;
     top:-26px;left:50%;transform:translateX(-50%);
     font-size:12px;color:#f1d688;white-space:nowrap;
     font-weight:600;letter-spacing:.02em;
   }
+  .scanGuide.modeName::before{ content:'对准票名区域'; }
+  .scanGuide.modeAmount::before{ content:'对准面值区域'; }
   .scanControls{
     display:flex;gap:8px;margin-top:12px;
   }
@@ -932,19 +951,30 @@
   }
   .scanResultActions{display:flex;gap:8px;margin-top:10px;}
   .scanResultActions .btn{flex:1;}
-  .manualAddRow{
-    display:flex;gap:8px;margin-top:14px;
+  .scanFieldsForm{margin-top:14px;}
+  .scanFieldRow{
+    display:flex;gap:8px;margin-bottom:10px;align-items:flex-end;
   }
-  .manualAddRow input{
-    flex:1;padding:10px 12px;border:1px solid var(--panel-border);
-    border-radius:8px;font-size:14px;font-family:"Rajdhani",monospace;
+  .scanFieldRow .field{flex:1;margin-bottom:0;}
+  .scanFieldRow .field label{
+    display:block;font-size:12px;color:var(--muted);margin-bottom:5px;
   }
-  .manualAddRow .btn{width:auto;padding:10px 16px;white-space:nowrap;}
+  .scanFieldRow .field input{
+    width:100%;padding:9px 11px;border:1px solid var(--panel-border);
+    border-radius:8px;font-size:14px;font-family:inherit;
+  }
+  .scanFieldRow .miniCamBtn{
+    width:auto;padding:9px 12px;white-space:nowrap;
+    border:1px solid var(--panel-border);background:#faf9f6;color:var(--ink);
+    border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;
+  }
+  .scanFieldRow .miniCamBtn:hover{border-color:#c7c0b0;}
+  .scanFieldRow .miniCamBtn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
   .scanTableWrap{
-    margin-top:18px;max-height:360px;overflow-y:auto;
+    margin-top:18px;max-height:360px;overflow-y:auto;overflow-x:auto;
     border:1px solid var(--panel-border);border-radius:12px;
   }
-  .scanTable{width:100%;border-collapse:collapse;font-size:13px;}
+  .scanTable{width:100%;min-width:560px;border-collapse:collapse;font-size:13px;}
   .scanTable th{
     position:sticky;top:0;background:var(--ink);color:#f1d688;
     padding:9px 10px;text-align:left;font-weight:600;font-size:11.5px;
@@ -1235,7 +1265,7 @@
 
     <!-- 扫码存档Tab内容 -->
     <div id="tabScan" class="tabContent">
-      <p class="appSub">对准刮刮乐右下角白框内的编码，拍照自动识别，记录会同步保存到 GitHub 仓库，也可一键导出Excel。</p>
+      <p class="appSub">名称/金额/编号支持摄像头拍照识别，中奖金额刮开后手动填写。四项凑齐后加入清单，记录同步保存到 GitHub 仓库，也可一键导出Excel。</p>
 
       <div class="scanLayout">
         <div class="panel">
@@ -1254,12 +1284,17 @@
 
         <div class="panel">
           <h2>摄像头取景</h2>
+          <div class="scanModeRow">
+            <div class="scanModePill" data-mode="name">① 拍票名</div>
+            <div class="scanModePill" data-mode="amount">② 拍面值</div>
+            <div class="scanModePill active" data-mode="code">③ 拍编号</div>
+          </div>
           <div class="cameraStage off" id="cameraStage">
             <video id="scanVideo" autoplay playsinline muted></video>
-            <div class="scanGuide" id="scanGuide"></div>
+            <div class="scanGuide modeCode" id="scanGuide"></div>
             <div class="cameraPlaceholder">
               <div class="bigIcon">📷</div>
-              <div>点击下方「开启摄像头」，将编码对准取景框</div>
+              <div>选择上方拍摄内容，点击「开启摄像头」后对准取景框</div>
             </div>
           </div>
           <canvas id="scanCanvas" style="display:none;"></canvas>
@@ -1270,18 +1305,36 @@
           </div>
           <div class="status" id="scanCameraStatus"></div>
 
-          <div class="scanResultBox" id="scanResultBox" style="display:none;">
-            <label>识别结果（如有误可手动修正后再加入清单）</label>
-            <input type="text" id="scanResultInput" placeholder="识别到的编码将显示在这里">
-            <div class="scanResultActions">
-              <button class="btn" id="scanConfirmBtn">✓ 加入清单</button>
-              <button class="btn ghost" id="scanDiscardBtn">重新拍照</button>
+          <div class="scanFieldsForm">
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>① 票名</label>
+                <input type="text" id="fieldName" placeholder="例如：心想事成">
+              </div>
+              <button class="miniCamBtn" data-mode="name">📷拍</button>
             </div>
-          </div>
-
-          <div class="manualAddRow">
-            <input type="text" id="manualCodeInput" placeholder="或直接手动输入编码…">
-            <button class="btn secondary" id="manualAddBtn">添加</button>
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>② 面值（票面价格）</label>
+                <input type="text" id="fieldAmount" placeholder="例如：10元">
+              </div>
+              <button class="miniCamBtn" data-mode="amount">📷拍</button>
+            </div>
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>③ 编号</label>
+                <input type="text" id="fieldCode" placeholder="例如：J0790-26147-0040880-135-3">
+              </div>
+              <button class="miniCamBtn" data-mode="code">📷拍</button>
+            </div>
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>④ 中奖金额（刮开后手动填写，未中奖填0）</label>
+                <input type="text" id="fieldPrize" placeholder="例如：50 或 0">
+              </div>
+            </div>
+            <button class="btn" id="scanConfirmBtn" style="margin-top:4px;">✓ 加入清单</button>
+            <div class="status" id="scanFormStatus"></div>
           </div>
         </div>
 
@@ -1291,10 +1344,14 @@
           <div class="scanTableWrap">
             <table class="scanTable">
               <thead>
-                <tr><th style="width:34px;">#</th><th>编码</th><th style="width:120px;">识别时间</th><th style="width:36px;"></th></tr>
+                <tr>
+                  <th style="width:30px;">#</th>
+                  <th>票名</th><th>面值</th><th>编号</th><th>中奖金额</th>
+                  <th style="width:100px;">时间</th><th style="width:32px;"></th>
+                </tr>
               </thead>
               <tbody id="scanTableBody">
-                <tr class="scanEmptyRow"><td colspan="4">暂无记录，拍照或手动添加后会显示在这里</td></tr>
+                <tr class="scanEmptyRow"><td colspan="7">暂无记录，拍照或手动添加后会显示在这里</td></tr>
               </tbody>
             </table>
           </div>
@@ -3762,15 +3819,16 @@ loadChatHistory();
 renderChatMessages();
 
 /* ═══════════════════════════════════════════════════
-   扫码存档：摄像头取景 + OCR识别 + 清单管理（存GitHub） + Excel导出
+   扫码存档：摄像头取景 + OCR识别（票名/面值/编号三项） + 手动填中奖金额
+   + 清单管理（存GitHub） + Excel导出
 ═══════════════════════════════════════════════════ */
-const SCAN_CACHE_KEY   = 'fucaiScanRecordsCache';   // 离线兜底缓存，GitHub才是数据的真正来源
-const SCAN_FILE_PATH    = 'scan_records.json';
+const SCAN_CACHE_KEY  = 'fucaiScanRecordsCache';   // 离线兜底缓存，GitHub才是数据的真正来源
+const SCAN_FILE_PATH  = 'scan_records.json';
 let scanStream = null;
 let scanWorker = null;      // Tesseract worker，首次拍照时才初始化，避免一进页面就加载OCR模型
 let scanWorkerLoading = null;
 let scanRecords = [];       // 当前内存里的记录列表（页面打开时从GitHub拉取）
-let scanFileSha = null;     // GitHub文件的sha，更新时需要带上避免版本冲突
+let scanCaptureMode = 'code';   // 当前拍摄目标：name / amount / code
 
 function getScanConfig(){
   return {
@@ -3782,16 +3840,16 @@ function getScanConfig(){
 /* ── GitHub 读写 ── */
 async function ghScanFetch(){
   const { repo } = getScanConfig();
-  if(!repo) return { list: [], sha: null, ok: false, reason: '未配置仓库地址' };
+  if(!repo) return { list: [], ok: false, reason: '未配置仓库地址' };
   try{
     const url = `https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`;
     const resp = await fetch(url);
-    if(resp.status === 404) return { list: [], sha: null, ok: true };  // 文件还不存在，视为空列表
-    if(!resp.ok) return { list: [], sha: null, ok: false, reason: `HTTP ${resp.status}` };
+    if(resp.status === 404) return { list: [], ok: true };  // 文件还不存在，视为空列表
+    if(!resp.ok) return { list: [], ok: false, reason: `HTTP ${resp.status}` };
     const list = await resp.json();
     return { list: Array.isArray(list) ? list : [], ok: true };
   } catch(e){
-    return { list: [], sha: null, ok: false, reason: e.message };
+    return { list: [], ok: false, reason: e.message };
   }
 }
 
@@ -3881,7 +3939,7 @@ async function syncScanToGithub(){
 /* ── 从GitHub加载最新记录（进入页签/刷新按钮触发）── */
 async function loadScanFromGithub(){
   const syncEl = document.getElementById('scanSyncStatus');
-  const { repo, token } = getScanConfig();
+  const { repo } = getScanConfig();
   if(!repo){
     syncEl.className = 'status err';
     syncEl.textContent = '⚠️ 尚未配置GitHub仓库地址，当前使用本机浏览器缓存，配置后点「从GitHub刷新」同步。';
@@ -3904,19 +3962,23 @@ async function loadScanFromGithub(){
   renderScanTable();
 }
 
+/* ── 表格渲染（兼容旧数据：早期版本只有code+time两个字段，缺失的字段显示为空）── */
 function renderScanTable(){
   const body = document.getElementById('scanTableBody');
   const badge = document.getElementById('scanCountBadge');
   badge.textContent = scanRecords.length;
   if(scanRecords.length === 0){
-    body.innerHTML = '<tr class="scanEmptyRow"><td colspan="4">暂无记录，拍照或手动添加后会显示在这里</td></tr>';
+    body.innerHTML = '<tr class="scanEmptyRow"><td colspan="7">暂无记录，拍照或手动添加后会显示在这里</td></tr>';
     return;
   }
   body.innerHTML = scanRecords.map((item, i) => `
     <tr>
       <td>${i+1}</td>
-      <td>${escapeHtml(item.code)}</td>
-      <td style="font-size:11.5px;color:var(--muted);">${item.time}</td>
+      <td>${escapeHtml(item.name||'')}</td>
+      <td>${escapeHtml(item.amount||'')}</td>
+      <td>${escapeHtml(item.code||'')}</td>
+      <td>${escapeHtml(item.prize||'')}</td>
+      <td style="font-size:11.5px;color:var(--muted);">${item.time||''}</td>
       <td><button class="delBtn" data-idx="${i}" title="删除">✕</button></td>
     </tr>
   `).join('');
@@ -3930,19 +3992,14 @@ function renderScanTable(){
   });
 }
 
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
+// escapeHtml 复用文件前面已定义的同名函数（逻辑完全一致，见约1639行）
 
-async function addScanRecord(code){
-  const trimmed = code.trim();
-  if(!trimmed) return false;
+async function addScanRecord(rec){
   const now = new Date();
   const timeStr = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  scanRecords.push({ code: trimmed, time: timeStr });
+  scanRecords.push({ name: rec.name||'', amount: rec.amount||'', code: rec.code||'', prize: rec.prize||'', time: timeStr });
   renderScanTable();
   await syncScanToGithub();
-  return true;
 }
 
 /* ── GitHub 存储设置 ── */
@@ -3972,6 +4029,35 @@ document.getElementById('scanSaveConfigBtn').addEventListener('click', ()=>{
 
 document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFromGithub);
 
+/* ── 拍摄模式切换：票名/面值/编号 三选一，决定取景框位置+OCR规则+目标字段 ── */
+const SCAN_MODE_CONFIG = {
+  name:   { guideClass:'modeCenter modeName',  fieldId:'fieldName',   whitelist:null, lang:'chi_sim+eng' },
+  amount: { guideClass:'modeCenter modeAmount',fieldId:'fieldAmount', whitelist:'0123456789.元角¥￥YUAN', lang:'chi_sim+eng' },
+  code:   { guideClass:'modeCode',             fieldId:'fieldCode',   whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-', lang:'eng' },
+};
+
+function setScanMode(mode){
+  scanCaptureMode = mode;
+  document.querySelectorAll('.scanModePill').forEach(p=>{
+    p.classList.toggle('active', p.dataset.mode === mode);
+  });
+  document.querySelectorAll('.miniCamBtn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  const guide = document.getElementById('scanGuide');
+  guide.className = 'scanGuide ' + SCAN_MODE_CONFIG[mode].guideClass;
+}
+document.querySelectorAll('.scanModePill').forEach(pill=>{
+  pill.addEventListener('click', ()=> setScanMode(pill.dataset.mode));
+});
+document.querySelectorAll('.miniCamBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    setScanMode(btn.dataset.mode);
+    // 若摄像头还没开，顺手帮忙开启，减少操作步骤
+    if(!scanStream) startScanCamera();
+  });
+});
+
 /* ── 摄像头控制 ── */
 async function startScanCamera(){
   const statusEl = document.getElementById('scanCameraStatus');
@@ -3990,15 +4076,15 @@ async function startScanCamera(){
     toggleBtn.textContent = '关闭摄像头';
     captureBtn.disabled = false;
     statusEl.className = 'status ok';
-    statusEl.textContent = '✓ 已开启，将编码对准取景框后点击「拍照识别」';
+    statusEl.textContent = '✓ 已开启，将对应内容对准取景框后点击「拍照识别」';
   } catch(e){
     statusEl.className = 'status err';
     if(e.name === 'NotAllowedError'){
-      statusEl.textContent = '⚠️ 未授权摄像头权限，请在浏览器设置中允许访问摄像头，或使用下方手动输入。';
+      statusEl.textContent = '⚠️ 未授权摄像头权限，请在浏览器设置中允许访问摄像头，或使用下方手动填写。';
     } else if(e.name === 'NotFoundError'){
-      statusEl.textContent = '⚠️ 未检测到摄像头设备，可使用下方手动输入。';
+      statusEl.textContent = '⚠️ 未检测到摄像头设备，可使用下方手动填写。';
     } else {
-      statusEl.textContent = '⚠️ 摄像头启动失败：' + e.message + '，可使用下方手动输入。';
+      statusEl.textContent = '⚠️ 摄像头启动失败：' + e.message + '，可使用下方手动填写。';
     }
   }
 }
@@ -4020,16 +4106,13 @@ document.getElementById('scanCameraToggleBtn').addEventListener('click', ()=>{
   else{ startScanCamera(); }
 });
 
-/* ── 拍照 + 裁剪取景框区域 + OCR识别 ── */
+/* ── OCR Worker：中英文合并加载一次即可，票名用中文包，面值/编号用限定字符集提升准确率 ── */
 async function ensureScanWorker(){
   if(scanWorker) return scanWorker;
   if(scanWorkerLoading) return scanWorkerLoading;
   scanWorkerLoading = (async ()=>{
-    const worker = await Tesseract.createWorker('eng');
-    // 编码格式为大写字母+数字+短横线，限定识别字符集能显著提升准确率
-    await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-    });
+    // 中文识别包体积较大，首次加载会慢一些，之后复用同一个worker不用重复下载
+    const worker = await Tesseract.createWorker(['chi_sim','eng']);
     scanWorker = worker;
     return worker;
   })();
@@ -4039,10 +4122,10 @@ async function ensureScanWorker(){
 document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
   const video = document.getElementById('scanVideo');
   const canvas = document.getElementById('scanCanvas');
+  const guide = document.getElementById('scanGuide');
   const captureBtn = document.getElementById('scanCaptureBtn');
   const statusEl = document.getElementById('scanCameraStatus');
-  const resultBox = document.getElementById('scanResultBox');
-  const resultInput = document.getElementById('scanResultInput');
+  const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
 
   if(!video.videoWidth){
     statusEl.className = 'status err'; statusEl.textContent = '摄像头画面尚未就绪，请稍候再试。';
@@ -4050,15 +4133,19 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
   }
 
   captureBtn.disabled = true;
-  statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型，请稍候…';
+  statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
 
   try{
-    // 取景框相对video容器的比例位置（与CSS里.scanGuide的left/right/bottom/height一致）
+    // 根据当前拍摄模式，取对应取景框在画面中的比例位置（需与CSS里.scanGuide各变体一致）
     const vw = video.videoWidth, vh = video.videoHeight;
-    const gx = Math.round(vw * 0.08);
-    const gw = Math.round(vw * 0.84);
-    const gh = Math.round(vh * 0.15);
-    const gy = Math.round(vh * (1 - 0.14) - gh);
+    let gx, gy, gw, gh;
+    if(scanCaptureMode === 'code'){
+      gx = Math.round(vw * 0.08); gw = Math.round(vw * 0.84);
+      gh = Math.round(vh * 0.15); gy = Math.round(vh * (1 - 0.14) - gh);
+    } else {
+      gx = Math.round(vw * 0.14); gw = Math.round(vw * 0.72);
+      gh = Math.round(vh * 0.20); gy = Math.round(vh * 0.24);
+    }
 
     canvas.width = gw; canvas.height = gh;
     const ctx = canvas.getContext('2d');
@@ -4066,15 +4153,25 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
 
     const worker = await ensureScanWorker();
     statusEl.textContent = '识别中…';
+    // 每次识别前按当前模式设置字符白名单（编号/面值限定字符集提升准确率，票名不限制）
+    await worker.setParameters({ tessedit_char_whitelist: cfg.whitelist || '' });
     const { data: { text } } = await worker.recognize(canvas);
-    const cleaned = (text || '').toUpperCase().replace(/[^A-Z0-9\-]/g, '').trim();
 
-    resultInput.value = cleaned;
-    resultBox.style.display = 'block';
+    let cleaned = (text || '').trim();
+    if(scanCaptureMode === 'code'){
+      cleaned = cleaned.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+    } else if(scanCaptureMode === 'amount'){
+      cleaned = cleaned.replace(/\s+/g, '');
+    } else {
+      cleaned = cleaned.replace(/\s+/g, '');
+    }
+
+    const targetInput = document.getElementById(cfg.fieldId);
+    targetInput.value = cleaned;
     statusEl.className = cleaned ? 'status ok' : 'status err';
     statusEl.textContent = cleaned
-      ? '✓ 识别完成，请核对下方结果是否正确，可手动修正'
-      : '⚠️ 未识别到有效编码，请调整角度/光线后重拍，或直接手动输入';
+      ? '✓ 识别完成，已填入下方对应字段，请核对是否正确'
+      : '⚠️ 未识别到有效内容，请调整角度/光线后重拍，或直接在下方手动填写';
   } catch(e){
     statusEl.className = 'status err';
     statusEl.textContent = '识别出错：' + e.message;
@@ -4083,44 +4180,27 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
   }
 });
 
+/* ── 加入清单：汇总四个字段 ── */
 document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
-  const resultInput = document.getElementById('scanResultInput');
-  const resultBox = document.getElementById('scanResultBox');
-  const listStatus = document.getElementById('scanListStatus');
-  const code = resultInput.value.trim();
-  if(!code){
-    listStatus.className = 'status err'; listStatus.textContent = '编码为空，无法加入清单。';
+  const formStatus = document.getElementById('scanFormStatus');
+  const nameVal = document.getElementById('fieldName').value.trim();
+  const amountVal = document.getElementById('fieldAmount').value.trim();
+  const codeVal = document.getElementById('fieldCode').value.trim();
+  const prizeVal = document.getElementById('fieldPrize').value.trim();
+
+  if(!nameVal && !amountVal && !codeVal && !prizeVal){
+    formStatus.className = 'status err'; formStatus.textContent = '四项均为空，无法加入清单，请至少填写编号等关键信息。';
     return;
   }
-  await addScanRecord(code);
-  resultInput.value = '';
-  resultBox.style.display = 'none';
-  listStatus.className = 'status ok';
-  listStatus.textContent = `✓ 已加入清单：${code}`;
-});
 
-document.getElementById('scanDiscardBtn').addEventListener('click', ()=>{
-  document.getElementById('scanResultBox').style.display = 'none';
-  document.getElementById('scanResultInput').value = '';
-  document.getElementById('scanCameraStatus').textContent = '请重新对准编码并拍照';
-});
+  await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
 
-/* ── 手动输入添加 ── */
-document.getElementById('manualAddBtn').addEventListener('click', async ()=>{
-  const input = document.getElementById('manualCodeInput');
-  const listStatus = document.getElementById('scanListStatus');
-  const code = input.value.trim();
-  if(!code){
-    listStatus.className = 'status err'; listStatus.textContent = '请先输入编码。';
-    return;
-  }
-  await addScanRecord(code);
-  input.value = '';
-  listStatus.className = 'status ok';
-  listStatus.textContent = `✓ 已加入清单：${code}`;
-});
-document.getElementById('manualCodeInput').addEventListener('keydown', (e)=>{
-  if(e.key === 'Enter') document.getElementById('manualAddBtn').click();
+  document.getElementById('fieldName').value = '';
+  document.getElementById('fieldAmount').value = '';
+  document.getElementById('fieldCode').value = '';
+  document.getElementById('fieldPrize').value = '';
+  formStatus.className = 'status ok';
+  formStatus.textContent = '✓ 已加入清单';
 });
 
 /* ── 清空全部 ── */
@@ -4142,9 +4222,12 @@ document.getElementById('scanExportBtn').addEventListener('click', ()=>{
     listStatus.className = 'status err'; listStatus.textContent = '暂无记录可导出。';
     return;
   }
-  const rows = scanRecords.map((item, i) => ({ '序号': i+1, '编码': item.code, '识别时间': item.time }));
+  const rows = scanRecords.map((item, i) => ({
+    '序号': i+1, '票名': item.name||'', '面值': item.amount||'',
+    '编号': item.code||'', '中奖金额': item.prize||'', '记录时间': item.time||''
+  }));
   const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [{wch:6},{wch:28},{wch:14}];
+  ws['!cols'] = [{wch:6},{wch:16},{wch:10},{wch:28},{wch:10},{wch:14}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '扫码记录');
   const today = new Date();
