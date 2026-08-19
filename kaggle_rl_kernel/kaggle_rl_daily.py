@@ -888,41 +888,68 @@ def run_kl8_daily(records, ml_pred):
         f"选{['','','','','四','五','六','','','九','十'][n]}净收益{backtest_by_play[n]['avg_net_per_game']}元/期" for n in play_sizes))
     print(f"  回测表现最好的玩法：选{['','','','','四','五','六','','','九','十'][best_play_n]}")
 
-    # 今日推荐：用同一套打分对全部80个球排序，取不同TopN覆盖各玩法
+    # 今日推荐：综合加权融合——每一组都同时结合RL打分/遗漏值/近期频率/传统ML区间预测四类信号，
+    # 不是"只看单一信号"的割裂做法，而是像不同风险偏好的投资组合一样，配比略有不同但全部信息都参与
     idx = len(records)-1
     state = build_state(idx)
-    # 生成多组推荐：以确定性预测（deterministic=True）为准，因为这是诊断验证过的可靠结果；
-    # 不再用model.predict(deterministic=False)反复带噪声采样——
-    # 那种方式会因为动作空间被限制在[-1,1]，均值已接近边界+1的球在加噪声后大概率还是被裁剪在+1附近，
-    # 导致这些球"稳定"占据高分位置，而中间地带的球分数忽高忽低反而难进前列，
-    # 造成"确定性预测明明分布均匀，但采样出来的多组展示结果却集中在某个区间"的假象。
-    # 现在改成：用同一份可靠的确定性排序，对分数做小幅度、可控的扰动来生成多样性。
     rankings = []
+    ranking_names = ['综合均衡', '偏重遗漏回补', '偏重ML区间预测']
     if state is not None:
         base_action,_ = model.predict(state, deterministic=True)
+
+        # 信号①：RL打分（已经融合了ML概率+LSTM/TFM隐层+走势特征的神经网络综合判断）
+        ppo_norm = (base_action - base_action.min()) / (base_action.max() - base_action.min() + 1e-8)
+
+        # 信号②：遗漏值（0-3，本身就是归一化范围，直接除以3）
+        om_now = omit_arr[idx] if omit_arr is not None else np.zeros(80)
+        om_norm = om_now / 3.0
+
+        # 信号③：近期频率（除以当期最大值归一化到0-1）
+        fr_now = freq_arr[idx] if freq_arr is not None else np.zeros(80)
+        fr_norm = fr_now / (fr_now.max() + 1e-8)
+
+        # 信号④：传统ML的区间(zone_dom)+五行(five_dom)预测——球落在ML预测的主力区间/五行段，加分
+        models_data = ml_pred.get('models', {})
+        zone_probs_raw = models_data.get('zone_dom', {}).get('prediction', {}).get('probs', {})
+        five_probs_raw = models_data.get('five_dom', {}).get('prediction', {}).get('probs', {})
+        zone_probs = [float(zone_probs_raw.get(str(i), 0.0)) for i in range(4)]   # 4个区间(1-20/21-40/41-60/61-80)
+        five_probs = [float(five_probs_raw.get(str(i), 0.0)) for i in range(5)]   # 5个五行段
+        ml_bonus = np.zeros(80)
+        for b in range(1, 81):
+            zone_idx = (b-1)//20
+            five_idx = (b-1)//16
+            ml_bonus[b-1] = 0.5*zone_probs[zone_idx] + 0.5*five_probs[five_idx]
+        ml_norm = ml_bonus / (ml_bonus.max() + 1e-8) if ml_bonus.max() > 0 else ml_bonus
+
+        # 三组权重配比：全部四类信号都参与，只是侧重不同，不是只看单一信号
+        weight_sets = [
+            {'ppo':0.35, 'omission':0.30, 'freq':0.15, 'ml':0.20},   # 综合均衡
+            {'ppo':0.30, 'omission':0.45, 'freq':0.10, 'ml':0.15},   # 偏重遗漏回补
+            {'ppo':0.30, 'omission':0.20, 'freq':0.15, 'ml':0.35},   # 偏重ML区间预测
+        ]
+        for w in weight_sets:
+            composite = (w['ppo']*ppo_norm + w['omission']*om_norm +
+                         w['freq']*fr_norm + w['ml']*ml_norm)
+            order = [int(i)+1 for i in np.argsort(composite)[::-1]]
+            rankings.append(order)
+
+        print(f"  [综合推荐] 融合RL打分+遗漏值+近期频率+ML区间预测，生成{len(rankings)}组不同权重配比的推荐")
+
         first_action = base_action
-        rng = np.random.RandomState(int(date.today().strftime('%Y%m%d')))
-        for i in range(3):
-            noise_scale = 0.05 * i   # 第1组用原始确定性排序，第2/3组加小幅可控扰动制造差异
-            perturbed = base_action + rng.normal(0, noise_scale, size=base_action.shape) if noise_scale > 0 else base_action
-            order = np.argsort(perturbed)[::-1]
-            rankings.append([int(j)+1 for j in order])
 
         # ── 诊断：检验打分是否跟球号系统性绑定（即"是否还存在偏向大号/小号"的机制性bug）──
         if first_action is not None:
             ball_idx = np.arange(1, 81)
             corr = float(np.corrcoef(ball_idx, first_action)[0, 1])
-            print(f"  [诊断1] 打分与球号(1-80)的相关系数: {corr:.3f}")
+            print(f"  [诊断1] RL原始打分与球号(1-80)的相关系数: {corr:.3f}")
             if abs(corr) > 0.3:
                 direction = '偏向大号' if corr > 0 else '偏向小号'
-                print(f"  ⚠️ [诊断1警告] 相关系数绝对值>0.3，打分很可能仍跟球号序号系统性绑定（{direction}）")
+                print(f"  ⚠️ [诊断1警告] 相关系数绝对值>0.3，RL打分本身可能仍跟球号系统性绑定（{direction}），"
+                      f"但下方综合推荐已融合遗漏/频率/ML信号一起加权，实际推荐结果不会完全照搬RL原始偏向")
             else:
-                print(f"  ✓ [诊断1通过] 打分与球号无明显系统性相关")
+                print(f"  ✓ [诊断1通过] RL打分与球号无明显系统性相关")
 
         # ── 诊断2（关键）：对比多个不同历史时间点的推荐结果 ──
-        # 如果模型是真的在响应"当天的遗漏/频率数据"，那么不同历史时期（遗漏/频率状况完全不同）
-        # 推荐出的号码应该有明显差异；如果好几个完全不同时期都推荐出几乎相同的号码，
-        # 就直接证明模型压根没在看状态，是训练过程中学出的固定偏见（而不是反映真实遗漏数据）。
         if games >= 4:
             test_points = sorted(set([
                 max(SEQ_LEN+30, len(records)-200),
@@ -937,9 +964,9 @@ def run_kl8_daily(records, ml_pred):
                 act,_ = model.predict(st, deterministic=True)
                 top6 = set(int(i)+1 for i in np.argsort(act)[-6:])
                 snapshot_top6[tp] = top6
-            print(f"  [诊断2] 不同历史时期(共{len(snapshot_top6)}个采样点)的Top6推荐对比：")
+            print(f"  [诊断2] 不同历史时期(共{len(snapshot_top6)}个采样点)的RL原始Top6对比：")
             for tp, top6 in snapshot_top6.items():
-                print(f"    第{tp}期状态 → 推荐{sorted(top6)}")
+                print(f"    第{tp}期状态 → {sorted(top6)}")
             if len(snapshot_top6) >= 2:
                 all_sets = list(snapshot_top6.values())
                 pairwise_overlaps = []
@@ -947,33 +974,31 @@ def run_kl8_daily(records, ml_pred):
                     for j in range(i+1, len(all_sets)):
                         pairwise_overlaps.append(len(all_sets[i] & all_sets[j]))
                 avg_overlap = sum(pairwise_overlaps)/len(pairwise_overlaps)
-                print(f"  [诊断2] 不同时期推荐结果平均重合数: {avg_overlap:.1f}/6")
+                print(f"  [诊断2] 不同时期RL打分重合数: {avg_overlap:.1f}/6")
                 if avg_overlap >= 4:
-                    print(f"  ⚠️⚠️ [诊断2严重警告] 完全不同历史时期的状态推荐出几乎相同的号码(重合≥4/6)，"
-                          f"证明模型没有在响应状态变化，是训练中学出的固定偏见，不是反映真实遗漏/频率数据！"
-                          f"需要重新审视训练本身（比如降低学习率、加大熵系数、或减少训练步数避免过早收敛）")
+                    print(f"  ⚠️⚠️ [诊断2警告] RL打分本身对不同状态区分度不高，重合≥4/6")
                 elif avg_overlap <= 1:
-                    print(f"  ✓ [诊断2通过] 不同时期推荐差异明显，模型确实在响应状态变化，"
-                          f"当前偏向大号很可能真实反映了最新一期的遗漏/频率数据，不是训练bug")
+                    print(f"  ✓ [诊断2通过] RL打分对不同状态区分度高")
                 else:
-                    print(f"  ⚠️ [诊断2中性] 重合度中等，无法完全确定，建议结合诊断1一起判断")
+                    print(f"  ⚠️ [诊断2中性] 重合度中等")
 
     def group(ranking_idx, n):
         return sorted(rankings[ranking_idx][:n]) if rankings else []
 
     # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
+    # 每组都是"RL打分+遗漏+频率+ML区间预测"的综合加权结果，只是权重侧重不同
     plays = {
-        'xuan4':    {'name':'选四','balls':4, 'tip':'PPO全量打分排序',
+        'xuan4':    {'name':'选四','balls':4, 'tip':'第1注综合均衡/第2注偏重遗漏回补/第3注偏重ML区间预测',
                      'groups':[group(0,4), group(1,4), group(2,4)]},
-        'xuan5':    {'name':'选五','balls':5, 'tip':'PPO全量打分排序',
+        'xuan5':    {'name':'选五','balls':5, 'tip':'第1注综合均衡/第2注偏重遗漏回补/第3注偏重ML区间预测',
                      'groups':[group(0,5), group(1,5), group(2,5)]},
-        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注',
+        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注（综合均衡策略前8）',
                      'groups':[group(0,8)]},
-        'xuan6':    {'name':'选六','balls':6, 'tip':'PPO全量打分排序（回测标准）',
+        'xuan6':    {'name':'选六','balls':6, 'tip':'第1注综合均衡/第2注偏重遗漏回补/第3注偏重ML区间预测（回测标准）',
                      'groups':[group(0,6), group(1,6), group(2,6)]},
-        'xuan9':    {'name':'选九','balls':9, 'tip':'PPO全量打分排序',
+        'xuan9':    {'name':'选九','balls':9, 'tip':'第1注综合均衡/第2注偏重遗漏回补',
                      'groups':[group(0,9), group(1,9)]},
-        'xuan10':   {'name':'选十','balls':10,'tip':'PPO全量打分排序',
+        'xuan10':   {'name':'选十','balls':10,'tip':'综合均衡策略前10',
                      'groups':[group(0,10)]},
     }
     picks_by_n = {4:group(0,4), 5:group(0,5), 6:group(0,6), 9:group(0,9), 10:group(0,10)}
@@ -1086,28 +1111,58 @@ def run_ssq_daily(records, ml_pred):
     avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
     print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
 
-    # 今日推荐：以确定性预测为基准+小幅可控扰动生成6注不同组合（原因同快乐8，见上方说明）
+    # 今日推荐：综合加权融合——每组都同时结合RL打分/遗漏值/ML的AC值+主力区预测，权重侧重不同
     idx = len(records)-1
     state = build_state(idx)
     groups=[]
     if state is not None:
         base_action,_ = model.predict(state, deterministic=True)
-        rng = np.random.RandomState(int(date.today().strftime('%Y%m%d')))
-        seen=set(); attempts=0
-        while len(groups)<6 and attempts<30:
-            noise_scale = 0.05 * (attempts // 2)   # 逐步加大扰动幅度，制造足够多样性
-            action = base_action + rng.normal(0, noise_scale, size=base_action.shape) if noise_scale > 0 else base_action
-            red_scores = action[:33]; blue_scores = action[33:]
-            top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-            red_sel = tuple(sorted([int(i)+1 for i in top_idx]))
-            blue_sel = int(np.argmax(blue_scores))+1
-            key=(red_sel, blue_sel)
-            if key not in seen:
-                seen.add(key)
-                groups.append({'red': list(red_sel), 'blue': blue_sel})
-            attempts+=1
-        while len(groups)<6:
-            groups.append(groups[-1] if groups else {'red':[],'blue':1})
+        red_scores = base_action[:33]; blue_scores = base_action[33:]
+        blue_sel = int(np.argmax(blue_scores))+1   # 蓝球固定用RL确定性预测
+
+        # 信号①：RL红球打分（已融合ML概率+LSTM/TFM隐层+走势特征）
+        ppo_norm = (red_scores - red_scores.min()) / (red_scores.max() - red_scores.min() + 1e-8)
+
+        # 信号②：红球遗漏值
+        om_now = omit_arr[idx] if omit_arr is not None else np.zeros(49)
+        om_red = om_now[:33] / 3.0
+
+        # 信号③：传统ML的AC值区间+红球主力区预测——号码落在ML预测的有利区间，加分
+        models_data = ml_pred.get('models', {})
+        zone_probs_raw = models_data.get('red_zone_dom', {}).get('prediction', {}).get('probs', {})
+        zone_probs = [float(zone_probs_raw.get(str(i), 0.0)) for i in range(3)]   # 一区/二区/三区
+        ml_bonus = np.zeros(33)
+        for b in range(1, 34):
+            zone_idx = 0 if b<=11 else (1 if b<=22 else 2)
+            ml_bonus[b-1] = zone_probs[zone_idx]
+        ml_norm = ml_bonus / (ml_bonus.max() + 1e-8) if ml_bonus.max() > 0 else ml_bonus
+
+        weight_sets = [
+            ('综合均衡',      {'ppo':0.45, 'omission':0.30, 'ml':0.25}),
+            ('偏重遗漏回补',  {'ppo':0.35, 'omission':0.50, 'ml':0.15}),
+            ('偏重ML区间预测',{'ppo':0.35, 'omission':0.20, 'ml':0.45}),
+        ]
+        red_orders = []
+        for name, w in weight_sets:
+            composite = w['ppo']*ppo_norm + w['omission']*om_red + w['ml']*ml_norm
+            order = [int(i)+1 for i in np.argsort(composite)[::-1]]
+            red_orders.append((name, order))
+
+        # 每种权重配比生成2注（取排序里的[0:6]和[3:9]两段，制造合理差异且不重复）
+        for name, order in red_orders:
+            for offset in [0, 3]:
+                red_sel = tuple(sorted(order[offset:offset+6]))
+                if len(red_sel) == 6 and not any(g['red']==list(red_sel) for g in groups):
+                    groups.append({'red': list(red_sel), 'blue': blue_sel, 'strategy': name})
+        # 保底：不足6注时继续用综合均衡排序补
+        i = 0
+        while len(groups) < 6 and red_orders:
+            red_sel = sorted(red_orders[0][1][i:i+6])
+            if len(red_sel) == 6 and not any(g['red']==red_sel for g in groups):
+                groups.append({'red': red_sel, 'blue': blue_sel, 'strategy': '综合均衡'})
+            i += 1
+            if i > 30: break
+
     # 兼容旧字段：主推荐仍取第一注
     red_selected = groups[0]['red'] if groups else []
     blue_pred = groups[0]['blue'] if groups else None
