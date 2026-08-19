@@ -7,6 +7,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;900&family=Noto+Sans+SC:wght@400;500;700&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root{
     --panel-bg:#fff;
@@ -872,6 +874,100 @@
     color:#f7e7b0;
     font-weight:500;
   }
+
+  /* ═══════════════ 扫码存档 Tab ═══════════════ */
+  .scanLayout{max-width:640px;margin:0 auto;}
+  .cameraStage{
+    position:relative;
+    width:100%;
+    aspect-ratio:3/4;
+    background:#1a1712;
+    border-radius:14px;
+    overflow:hidden;
+    border:1px solid var(--panel-border);
+  }
+  .cameraStage video{
+    width:100%;height:100%;object-fit:cover;display:block;
+  }
+  .cameraStage.off video{display:none;}
+  .cameraPlaceholder{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;color:#c9c2b4;font-size:13px;text-align:center;padding:24px;
+  }
+  .cameraPlaceholder .bigIcon{font-size:38px;opacity:.7;}
+  .cameraStage.off .cameraPlaceholder{display:flex;}
+  .cameraStage:not(.off) .cameraPlaceholder{display:none;}
+  .scanGuide{
+    position:absolute;
+    left:8%; right:8%; bottom:14%;
+    height:15%;
+    border:2px solid #f1d688;
+    border-radius:8px;
+    box-shadow:0 0 0 999px rgba(0,0,0,.42);
+    pointer-events:none;
+  }
+  .scanGuide::before{
+    content:'对准编码区域';
+    position:absolute;
+    top:-26px;left:50%;transform:translateX(-50%);
+    font-size:12px;color:#f1d688;white-space:nowrap;
+    font-weight:600;letter-spacing:.02em;
+  }
+  .scanControls{
+    display:flex;gap:8px;margin-top:12px;
+  }
+  .scanControls .btn{flex:1;}
+  .scanResultBox{
+    margin-top:14px;padding:14px;
+    background:#faf9f6;border:1px solid var(--panel-border);border-radius:12px;
+  }
+  .scanResultBox label{
+    display:block;font-size:12px;color:var(--muted);margin-bottom:6px;
+  }
+  .scanResultBox input{
+    width:100%;padding:10px 12px;border:1px solid var(--panel-border);
+    border-radius:8px;font-size:15px;font-family:"Rajdhani",monospace;
+    letter-spacing:.04em;font-weight:700;color:var(--ink);
+  }
+  .scanResultActions{display:flex;gap:8px;margin-top:10px;}
+  .scanResultActions .btn{flex:1;}
+  .manualAddRow{
+    display:flex;gap:8px;margin-top:14px;
+  }
+  .manualAddRow input{
+    flex:1;padding:10px 12px;border:1px solid var(--panel-border);
+    border-radius:8px;font-size:14px;font-family:"Rajdhani",monospace;
+  }
+  .manualAddRow .btn{width:auto;padding:10px 16px;white-space:nowrap;}
+  .scanTableWrap{
+    margin-top:18px;max-height:360px;overflow-y:auto;
+    border:1px solid var(--panel-border);border-radius:12px;
+  }
+  .scanTable{width:100%;border-collapse:collapse;font-size:13px;}
+  .scanTable th{
+    position:sticky;top:0;background:var(--ink);color:#f1d688;
+    padding:9px 10px;text-align:left;font-weight:600;font-size:11.5px;
+    letter-spacing:.03em;text-transform:uppercase;
+  }
+  .scanTable td{
+    padding:9px 10px;border-top:1px solid var(--panel-border);
+    font-family:"Rajdhani",monospace;color:var(--ink);
+  }
+  .scanTable tr:nth-child(even) td{background:#faf9f6;}
+  .scanTable .delBtn{
+    color:var(--accent);cursor:pointer;font-weight:700;font-size:16px;
+    background:none;border:none;padding:0 4px;
+  }
+  .scanEmptyRow td{
+    text-align:center;color:var(--muted);padding:22px 10px;font-family:inherit;
+  }
+  .scanFootActions{display:flex;gap:8px;margin-top:12px;}
+  .scanFootActions .btn{flex:1;}
+  .scanCountBadge{
+    display:inline-block;background:var(--accent);color:#fff;
+    border-radius:999px;padding:1px 9px;font-size:12px;font-weight:700;margin-left:6px;
+  }
 </style>
 </head>
 <body>
@@ -887,6 +983,7 @@
       <div class="mainTab" data-tab="trend">📊 走势图</div>
       <div class="mainTab" data-tab="predict">🤖 ML预测报告</div>
       <div class="mainTab" data-tab="chat">💬 AI文案助手</div>
+      <div class="mainTab" data-tab="scan">📷 扫码存档</div>
     </div>
 
     <!-- 海报Tab内容 -->
@@ -1135,6 +1232,81 @@
         </div>
       </div>
     </div><!-- end tabChat -->
+
+    <!-- 扫码存档Tab内容 -->
+    <div id="tabScan" class="tabContent">
+      <p class="appSub">对准刮刮乐右下角白框内的编码，拍照自动识别，记录会同步保存到 GitHub 仓库，也可一键导出Excel。</p>
+
+      <div class="scanLayout">
+        <div class="panel">
+          <h2>GitHub 存储设置</h2>
+          <div class="field">
+            <label>仓库地址（复用「海报生成」页签已保存的仓库）</label>
+            <input type="text" id="scanRepoInput" placeholder="例如 your-name/fucai-data">
+          </div>
+          <div class="field">
+            <label>GitHub Token（需勾选 Contents 读写权限，仅保存在本机浏览器）</label>
+            <input type="password" id="scanTokenInput" placeholder="github_pat_… 或 ghp_…">
+          </div>
+          <button class="btn secondary" id="scanSaveConfigBtn">保存设置</button>
+          <div class="status" id="scanConfigStatus"></div>
+        </div>
+
+        <div class="panel">
+          <h2>摄像头取景</h2>
+          <div class="cameraStage off" id="cameraStage">
+            <video id="scanVideo" autoplay playsinline muted></video>
+            <div class="scanGuide" id="scanGuide"></div>
+            <div class="cameraPlaceholder">
+              <div class="bigIcon">📷</div>
+              <div>点击下方「开启摄像头」，将编码对准取景框</div>
+            </div>
+          </div>
+          <canvas id="scanCanvas" style="display:none;"></canvas>
+
+          <div class="scanControls">
+            <button class="btn secondary" id="scanCameraToggleBtn">开启摄像头</button>
+            <button class="btn" id="scanCaptureBtn" disabled>拍照识别</button>
+          </div>
+          <div class="status" id="scanCameraStatus"></div>
+
+          <div class="scanResultBox" id="scanResultBox" style="display:none;">
+            <label>识别结果（如有误可手动修正后再加入清单）</label>
+            <input type="text" id="scanResultInput" placeholder="识别到的编码将显示在这里">
+            <div class="scanResultActions">
+              <button class="btn" id="scanConfirmBtn">✓ 加入清单</button>
+              <button class="btn ghost" id="scanDiscardBtn">重新拍照</button>
+            </div>
+          </div>
+
+          <div class="manualAddRow">
+            <input type="text" id="manualCodeInput" placeholder="或直接手动输入编码…">
+            <button class="btn secondary" id="manualAddBtn">添加</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>已存档记录<span class="scanCountBadge" id="scanCountBadge">0</span></h2>
+          <div class="status" id="scanSyncStatus" style="margin-bottom:8px;"></div>
+          <div class="scanTableWrap">
+            <table class="scanTable">
+              <thead>
+                <tr><th style="width:34px;">#</th><th>编码</th><th style="width:120px;">识别时间</th><th style="width:36px;"></th></tr>
+              </thead>
+              <tbody id="scanTableBody">
+                <tr class="scanEmptyRow"><td colspan="4">暂无记录，拍照或手动添加后会显示在这里</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="scanFootActions">
+            <button class="btn ghost" id="scanRefreshBtn">🔄 从GitHub刷新</button>
+            <button class="btn" id="scanExportBtn">📥 导出Excel</button>
+            <button class="btn ghost" id="scanClearAllBtn">清空全部</button>
+          </div>
+          <div class="status" id="scanListStatus"></div>
+        </div>
+      </div>
+    </div><!-- end tabScan -->
 
   <!-- ===================== PREVIEW ===================== -->
   <div class="previewWrap">
@@ -2144,9 +2316,12 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
     const stage=document.getElementById('stage');
     const trendWrap=document.getElementById('trendWrap');
     const credit=document.getElementById('previewCredit');
+    // 离开扫码页签时释放摄像头，避免占用/耗电
+    if(which!=='scan' && typeof stopScanCamera==='function') stopScanCamera();
+
     if(which==='trend'){
       stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
-    } else if(which==='predict' || which==='chat'){
+    } else if(which==='predict' || which==='chat' || which==='scan'){
       stage.style.display='none'; trendWrap.style.display='none'; credit.style.display='none';
       if(which==='chat'){
         const hint = document.getElementById('chatGwHint');
@@ -2160,6 +2335,7 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
           hint.textContent = '⚠️ 尚未配置 Gateway，请先到「走势图」页签填写 Gateway 地址和密钥并保存。';
         }
       }
+      if(which==='scan' && typeof loadScanFromGithub==='function') loadScanFromGithub();
     } else {
       stage.style.display=''; trendWrap.style.display='none'; credit.style.display='';
       renderPoster();
@@ -3584,6 +3760,403 @@ document.getElementById('chatClearBtn').addEventListener('click', ()=>{
 
 loadChatHistory();
 renderChatMessages();
+
+/* ═══════════════════════════════════════════════════
+   扫码存档：摄像头取景 + OCR识别 + 清单管理（存GitHub） + Excel导出
+═══════════════════════════════════════════════════ */
+const SCAN_CACHE_KEY   = 'fucaiScanRecordsCache';   // 离线兜底缓存，GitHub才是数据的真正来源
+const SCAN_FILE_PATH    = 'scan_records.json';
+let scanStream = null;
+let scanWorker = null;      // Tesseract worker，首次拍照时才初始化，避免一进页面就加载OCR模型
+let scanWorkerLoading = null;
+let scanRecords = [];       // 当前内存里的记录列表（页面打开时从GitHub拉取）
+let scanFileSha = null;     // GitHub文件的sha，更新时需要带上避免版本冲突
+
+function getScanConfig(){
+  return {
+    repo: (localStorage.getItem('fucaiGithubRepo') || '').trim(),
+    token: (localStorage.getItem('fucaiScanGhToken') || '').trim(),
+  };
+}
+
+/* ── GitHub 读写 ── */
+async function ghScanFetch(){
+  const { repo } = getScanConfig();
+  if(!repo) return { list: [], sha: null, ok: false, reason: '未配置仓库地址' };
+  try{
+    const url = `https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`;
+    const resp = await fetch(url);
+    if(resp.status === 404) return { list: [], sha: null, ok: true };  // 文件还不存在，视为空列表
+    if(!resp.ok) return { list: [], sha: null, ok: false, reason: `HTTP ${resp.status}` };
+    const list = await resp.json();
+    return { list: Array.isArray(list) ? list : [], ok: true };
+  } catch(e){
+    return { list: [], sha: null, ok: false, reason: e.message };
+  }
+}
+
+async function ghScanGetSha(){
+  const { repo, token } = getScanConfig();
+  if(!repo || !token) return null;
+  try{
+    const url = `https://api.github.com/repos/${repo}/contents/${SCAN_FILE_PATH}`;
+    const resp = await fetch(url, {
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if(resp.status === 404) return null;
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    return data.sha || null;
+  } catch(e){ return null; }
+}
+
+async function ghScanPush(list){
+  const { repo, token } = getScanConfig();
+  if(!repo || !token) return { ok:false, reason:'未配置仓库地址或Token' };
+  try{
+    const sha = await ghScanGetSha();
+    const url = `https://api.github.com/repos/${repo}/contents/${SCAN_FILE_PATH}`;
+    const contentStr = JSON.stringify(list, null, 2);
+    const body = {
+      message: `扫码存档更新 ${new Date().toISOString()}`,
+      content: btoa(unescape(encodeURIComponent(contentStr))),
+      branch: 'main',
+    };
+    if(sha) body.sha = sha;
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify(body)
+    });
+    if(!resp.ok){
+      const err = await resp.json().catch(()=>({}));
+      return { ok:false, reason: `HTTP ${resp.status} ${err.message||''}` };
+    }
+    return { ok:true };
+  } catch(e){
+    return { ok:false, reason: e.message };
+  }
+}
+
+/* ── 本地兜底缓存（GitHub不可用/未配置时使用，避免拍了照片却什么都存不下）── */
+function loadLocalCache(){
+  try{
+    const raw = localStorage.getItem(SCAN_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+function saveLocalCache(list){
+  try{ localStorage.setItem(SCAN_CACHE_KEY, JSON.stringify(list)); } catch(e){}
+}
+
+/* ── 同步：把内存里的最新列表推送到GitHub，成功后更新本地缓存作为镜像 ── */
+async function syncScanToGithub(){
+  const syncEl = document.getElementById('scanSyncStatus');
+  const { repo, token } = getScanConfig();
+  if(!repo || !token){
+    syncEl.className = 'status err';
+    syncEl.textContent = '⚠️ 未配置GitHub仓库/Token，当前仅保存在本机浏览器，请在上方「GitHub 存储设置」中填写后保存。';
+    saveLocalCache(scanRecords);
+    return false;
+  }
+  syncEl.className = 'status'; syncEl.textContent = '正在同步到GitHub…';
+  const result = await ghScanPush(scanRecords);
+  if(result.ok){
+    saveLocalCache(scanRecords);   // 同步成功后镜像一份到本地，供离线时兜底展示
+    syncEl.className = 'status ok';
+    syncEl.textContent = `✓ 已同步到 GitHub（${repo}/${SCAN_FILE_PATH}）`;
+    return true;
+  } else {
+    syncEl.className = 'status err';
+    syncEl.textContent = `⚠️ 同步到GitHub失败：${result.reason}（本次记录已保留在本机，稍后可点「从GitHub刷新」重试）`;
+    saveLocalCache(scanRecords);
+    return false;
+  }
+}
+
+/* ── 从GitHub加载最新记录（进入页签/刷新按钮触发）── */
+async function loadScanFromGithub(){
+  const syncEl = document.getElementById('scanSyncStatus');
+  const { repo, token } = getScanConfig();
+  if(!repo){
+    syncEl.className = 'status err';
+    syncEl.textContent = '⚠️ 尚未配置GitHub仓库地址，当前使用本机浏览器缓存，配置后点「从GitHub刷新」同步。';
+    scanRecords = loadLocalCache();
+    renderScanTable();
+    return;
+  }
+  syncEl.className = 'status'; syncEl.textContent = '正在从GitHub读取记录…';
+  const result = await ghScanFetch();
+  if(result.ok){
+    scanRecords = result.list;
+    saveLocalCache(scanRecords);
+    syncEl.className = 'status ok';
+    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录`;
+  } else {
+    scanRecords = loadLocalCache();
+    syncEl.className = 'status err';
+    syncEl.textContent = `⚠️ 从GitHub读取失败(${result.reason})，暂时显示本机缓存的 ${scanRecords.length} 条记录`;
+  }
+  renderScanTable();
+}
+
+function renderScanTable(){
+  const body = document.getElementById('scanTableBody');
+  const badge = document.getElementById('scanCountBadge');
+  badge.textContent = scanRecords.length;
+  if(scanRecords.length === 0){
+    body.innerHTML = '<tr class="scanEmptyRow"><td colspan="4">暂无记录，拍照或手动添加后会显示在这里</td></tr>';
+    return;
+  }
+  body.innerHTML = scanRecords.map((item, i) => `
+    <tr>
+      <td>${i+1}</td>
+      <td>${escapeHtml(item.code)}</td>
+      <td style="font-size:11.5px;color:var(--muted);">${item.time}</td>
+      <td><button class="delBtn" data-idx="${i}" title="删除">✕</button></td>
+    </tr>
+  `).join('');
+  body.querySelectorAll('.delBtn').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const idx = parseInt(btn.dataset.idx, 10);
+      scanRecords.splice(idx, 1);
+      renderScanTable();
+      await syncScanToGithub();
+    });
+  });
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function addScanRecord(code){
+  const trimmed = code.trim();
+  if(!trimmed) return false;
+  const now = new Date();
+  const timeStr = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  scanRecords.push({ code: trimmed, time: timeStr });
+  renderScanTable();
+  await syncScanToGithub();
+  return true;
+}
+
+/* ── GitHub 存储设置 ── */
+try{
+  const cfg = getScanConfig();
+  const repoInput = document.getElementById('scanRepoInput');
+  if(repoInput && !repoInput.value) repoInput.value = cfg.repo;
+  const tokenInput = document.getElementById('scanTokenInput');
+  if(tokenInput && cfg.token) tokenInput.value = cfg.token;
+} catch(e){}
+
+document.getElementById('scanSaveConfigBtn').addEventListener('click', ()=>{
+  const repoVal = document.getElementById('scanRepoInput').value.trim();
+  const tokenVal = document.getElementById('scanTokenInput').value.trim();
+  const cfgStatus = document.getElementById('scanConfigStatus');
+  try{
+    if(repoVal) localStorage.setItem('fucaiGithubRepo', repoVal);
+    if(tokenVal) localStorage.setItem('fucaiScanGhToken', tokenVal);
+    cfgStatus.className = 'status ok';
+    cfgStatus.textContent = '✓ 设置已保存（仅存在本机浏览器），正在拉取该仓库的现有记录…';
+    loadScanFromGithub();
+  } catch(e){
+    cfgStatus.className = 'status err';
+    cfgStatus.textContent = '保存失败（浏览器不支持本地存储）。';
+  }
+});
+
+document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFromGithub);
+
+/* ── 摄像头控制 ── */
+async function startScanCamera(){
+  const statusEl = document.getElementById('scanCameraStatus');
+  const stage = document.getElementById('cameraStage');
+  const video = document.getElementById('scanVideo');
+  const toggleBtn = document.getElementById('scanCameraToggleBtn');
+  const captureBtn = document.getElementById('scanCaptureBtn');
+  try{
+    statusEl.className = 'status'; statusEl.textContent = '正在请求摄像头权限…';
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 1280 } },
+      audio: false
+    });
+    video.srcObject = scanStream;
+    stage.classList.remove('off');
+    toggleBtn.textContent = '关闭摄像头';
+    captureBtn.disabled = false;
+    statusEl.className = 'status ok';
+    statusEl.textContent = '✓ 已开启，将编码对准取景框后点击「拍照识别」';
+  } catch(e){
+    statusEl.className = 'status err';
+    if(e.name === 'NotAllowedError'){
+      statusEl.textContent = '⚠️ 未授权摄像头权限，请在浏览器设置中允许访问摄像头，或使用下方手动输入。';
+    } else if(e.name === 'NotFoundError'){
+      statusEl.textContent = '⚠️ 未检测到摄像头设备，可使用下方手动输入。';
+    } else {
+      statusEl.textContent = '⚠️ 摄像头启动失败：' + e.message + '，可使用下方手动输入。';
+    }
+  }
+}
+function stopScanCamera(){
+  if(scanStream){
+    scanStream.getTracks().forEach(t=>t.stop());
+    scanStream = null;
+  }
+  const stage = document.getElementById('cameraStage');
+  const toggleBtn = document.getElementById('scanCameraToggleBtn');
+  const captureBtn = document.getElementById('scanCaptureBtn');
+  if(stage) stage.classList.add('off');
+  if(toggleBtn) toggleBtn.textContent = '开启摄像头';
+  if(captureBtn) captureBtn.disabled = true;
+}
+
+document.getElementById('scanCameraToggleBtn').addEventListener('click', ()=>{
+  if(scanStream){ stopScanCamera(); }
+  else{ startScanCamera(); }
+});
+
+/* ── 拍照 + 裁剪取景框区域 + OCR识别 ── */
+async function ensureScanWorker(){
+  if(scanWorker) return scanWorker;
+  if(scanWorkerLoading) return scanWorkerLoading;
+  scanWorkerLoading = (async ()=>{
+    const worker = await Tesseract.createWorker('eng');
+    // 编码格式为大写字母+数字+短横线，限定识别字符集能显著提升准确率
+    await worker.setParameters({
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+    });
+    scanWorker = worker;
+    return worker;
+  })();
+  return scanWorkerLoading;
+}
+
+document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
+  const video = document.getElementById('scanVideo');
+  const canvas = document.getElementById('scanCanvas');
+  const captureBtn = document.getElementById('scanCaptureBtn');
+  const statusEl = document.getElementById('scanCameraStatus');
+  const resultBox = document.getElementById('scanResultBox');
+  const resultInput = document.getElementById('scanResultInput');
+
+  if(!video.videoWidth){
+    statusEl.className = 'status err'; statusEl.textContent = '摄像头画面尚未就绪，请稍候再试。';
+    return;
+  }
+
+  captureBtn.disabled = true;
+  statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型，请稍候…';
+
+  try{
+    // 取景框相对video容器的比例位置（与CSS里.scanGuide的left/right/bottom/height一致）
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const gx = Math.round(vw * 0.08);
+    const gw = Math.round(vw * 0.84);
+    const gh = Math.round(vh * 0.15);
+    const gy = Math.round(vh * (1 - 0.14) - gh);
+
+    canvas.width = gw; canvas.height = gh;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, gx, gy, gw, gh, 0, 0, gw, gh);
+
+    const worker = await ensureScanWorker();
+    statusEl.textContent = '识别中…';
+    const { data: { text } } = await worker.recognize(canvas);
+    const cleaned = (text || '').toUpperCase().replace(/[^A-Z0-9\-]/g, '').trim();
+
+    resultInput.value = cleaned;
+    resultBox.style.display = 'block';
+    statusEl.className = cleaned ? 'status ok' : 'status err';
+    statusEl.textContent = cleaned
+      ? '✓ 识别完成，请核对下方结果是否正确，可手动修正'
+      : '⚠️ 未识别到有效编码，请调整角度/光线后重拍，或直接手动输入';
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '识别出错：' + e.message;
+  } finally{
+    captureBtn.disabled = false;
+  }
+});
+
+document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
+  const resultInput = document.getElementById('scanResultInput');
+  const resultBox = document.getElementById('scanResultBox');
+  const listStatus = document.getElementById('scanListStatus');
+  const code = resultInput.value.trim();
+  if(!code){
+    listStatus.className = 'status err'; listStatus.textContent = '编码为空，无法加入清单。';
+    return;
+  }
+  await addScanRecord(code);
+  resultInput.value = '';
+  resultBox.style.display = 'none';
+  listStatus.className = 'status ok';
+  listStatus.textContent = `✓ 已加入清单：${code}`;
+});
+
+document.getElementById('scanDiscardBtn').addEventListener('click', ()=>{
+  document.getElementById('scanResultBox').style.display = 'none';
+  document.getElementById('scanResultInput').value = '';
+  document.getElementById('scanCameraStatus').textContent = '请重新对准编码并拍照';
+});
+
+/* ── 手动输入添加 ── */
+document.getElementById('manualAddBtn').addEventListener('click', async ()=>{
+  const input = document.getElementById('manualCodeInput');
+  const listStatus = document.getElementById('scanListStatus');
+  const code = input.value.trim();
+  if(!code){
+    listStatus.className = 'status err'; listStatus.textContent = '请先输入编码。';
+    return;
+  }
+  await addScanRecord(code);
+  input.value = '';
+  listStatus.className = 'status ok';
+  listStatus.textContent = `✓ 已加入清单：${code}`;
+});
+document.getElementById('manualCodeInput').addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter') document.getElementById('manualAddBtn').click();
+});
+
+/* ── 清空全部 ── */
+document.getElementById('scanClearAllBtn').addEventListener('click', async ()=>{
+  if(scanRecords.length === 0) return;
+  if(confirm(`确定要清空全部 ${scanRecords.length} 条记录吗？此操作不可撤销，且会同步删除GitHub上的记录。`)){
+    scanRecords = [];
+    renderScanTable();
+    await syncScanToGithub();
+    const listStatus = document.getElementById('scanListStatus');
+    listStatus.className = 'status ok'; listStatus.textContent = '已清空全部记录。';
+  }
+});
+
+/* ── 导出Excel ── */
+document.getElementById('scanExportBtn').addEventListener('click', ()=>{
+  const listStatus = document.getElementById('scanListStatus');
+  if(scanRecords.length === 0){
+    listStatus.className = 'status err'; listStatus.textContent = '暂无记录可导出。';
+    return;
+  }
+  const rows = scanRecords.map((item, i) => ({ '序号': i+1, '编码': item.code, '识别时间': item.time }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [{wch:6},{wch:28},{wch:14}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '扫码记录');
+  const today = new Date();
+  const fname = `扫码存档_${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  listStatus.className = 'status ok';
+  listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}`;
+});
+
+// 初次加载：先用本地缓存快速显示，再尝试从GitHub拉取最新版本
+scanRecords = loadLocalCache();
+renderScanTable();
 </script>
 </body>
 </html>
