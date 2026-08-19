@@ -935,6 +935,19 @@
   }
   .scanGuide.modeName::before{ content:'对准票名区域'; }
   .scanGuide.modeAmount::before{ content:'对准面值区域'; }
+  /* 实时清晰度反馈：暗红=模糊(需调整距离)，黄=检测中，绿=可以拍了 */
+  .scanGuide.sharpBlur{ border-color:#c0392b; box-shadow:0 0 0 999px rgba(0,0,0,.42), 0 0 14px rgba(192,57,43,.7); }
+  .scanGuide.sharpBlur::after{
+    content:'画面模糊，请调整距离';
+    position:absolute; bottom:-24px; left:50%; transform:translateX(-50%);
+    font-size:11px; color:#e97a6e; white-space:nowrap; font-weight:600;
+  }
+  .scanGuide.sharpOk{ border-color:#27ae60; box-shadow:0 0 0 999px rgba(0,0,0,.42), 0 0 14px rgba(39,174,96,.8); }
+  .scanGuide.sharpOk::after{
+    content:'✓ 清晰，可以拍照';
+    position:absolute; bottom:-24px; left:50%; transform:translateX(-50%);
+    font-size:11px; color:#6fcf97; white-space:nowrap; font-weight:600;
+  }
   .scanControls{
     display:flex;gap:8px;margin-top:12px;
   }
@@ -4085,6 +4098,74 @@ document.querySelectorAll('.miniCamBtn').forEach(btn=>{
 });
 
 /* ── 摄像头控制 ── */
+/* ── 实时清晰度检测 ──
+   原理：取景框区域的画面每隔约400ms采样一次，缩小到小尺寸计算灰度梯度方差
+   （拉普拉斯方差的简化近似——图像越清晰，边缘处像素灰度跳变越剧烈，方差越大；
+   越模糊，边缘越平滑，方差越小）。据此判断当前距离/对焦状态是否适合拍照，
+   实时把取景框染成暗红(模糊)或绿色(清晰)，用户不用拍了才知道结果。 */
+let sharpnessTimer = null;
+
+function computeSharpness(canvas){
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const w = canvas.width, h = canvas.height;
+  const { data } = ctx.getImageData(0, 0, w, h);
+  // 先转灰度，缩小计算量
+  const gray = new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const o = i*4;
+    gray[i] = 0.299*data[o] + 0.587*data[o+1] + 0.114*data[o+2];
+  }
+  // 简化拉普拉斯：水平+垂直二阶差分的方差
+  let sum=0, sumSq=0, n=0;
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      const i = y*w+x;
+      const lap = gray[i-1] + gray[i+1] + gray[i-w] + gray[i+w] - 4*gray[i];
+      sum += lap; sumSq += lap*lap; n++;
+    }
+  }
+  if(n===0) return 0;
+  const mean = sum/n;
+  return sumSq/n - mean*mean;   // 方差，数值越大越清晰
+}
+
+function startSharpnessMonitor(){
+  stopSharpnessMonitor();
+  const video = document.getElementById('scanVideo');
+  const guide = document.getElementById('scanGuide');
+  const sampleCanvas = document.createElement('canvas');
+  const SHARPNESS_THRESHOLD = 25;   // 经验阈值，方差高于此值视为"足够清晰可拍"
+
+  sharpnessTimer = setInterval(()=>{
+    if(!video.videoWidth || !scanStream) return;
+    try{
+      const vw = video.videoWidth, vh = video.videoHeight;
+      let gx, gy, gw, gh;
+      if(scanCaptureMode === 'code'){
+        gx = Math.round(vw * 0.08); gw = Math.round(vw * 0.84);
+        gh = Math.round(vh * 0.15); gy = Math.round(vh * (1 - 0.14) - gh);
+      } else {
+        gx = Math.round(vw * 0.14); gw = Math.round(vw * 0.72);
+        gh = Math.round(vh * 0.20); gy = Math.round(vh * 0.24);
+      }
+      // 缩小采样尺寸，避免每400ms算一次大图拖慢页面
+      const sw = 160, sh = Math.max(1, Math.round(sw * gh / gw));
+      sampleCanvas.width = sw; sampleCanvas.height = sh;
+      sampleCanvas.getContext('2d').drawImage(video, gx, gy, gw, gh, 0, 0, sw, sh);
+      const score = computeSharpness(sampleCanvas);
+
+      guide.classList.remove('sharpBlur','sharpOk');
+      guide.classList.add(score >= SHARPNESS_THRESHOLD ? 'sharpOk' : 'sharpBlur');
+    } catch(e){ /* 采样失败不影响主流程，静默跳过本次 */ }
+  }, 400);
+}
+
+function stopSharpnessMonitor(){
+  if(sharpnessTimer){ clearInterval(sharpnessTimer); sharpnessTimer = null; }
+  const guide = document.getElementById('scanGuide');
+  if(guide) guide.classList.remove('sharpBlur','sharpOk');
+}
+
 async function startScanCamera(){
   const statusEl = document.getElementById('scanCameraStatus');
   const stage = document.getElementById('cameraStage');
@@ -4120,8 +4201,10 @@ async function startScanCamera(){
       }
     } catch(e){ /* 静默失败，不影响主流程，走下面的点按对焦兜底 */ }
 
-    // 检测数码变焦能力（zoom同样是非标准扩展），支持的话显示变焦滑块，
-    // 让用户不用把手机怼得太近（太近容易超出摄像头最近对焦距离导致对不上焦）
+    // 检测数码变焦能力（zoom同样是非标准扩展）。
+    // ⚠️重要：数码变焦只是把已拍到的像素放大显示，不会让画面变清晰，
+    // 如果画面本身没对上焦，变焦只会让模糊更明显——所以这里默认收起，
+    // 只在用户主动展开时才用，避免误导（之前的版本容易让人误以为"变焦=拉近对焦"）。
     try{
       const track = scanStream.getVideoTracks()[0];
       const caps = track.getCapabilities ? track.getCapabilities() : {};
@@ -4131,12 +4214,26 @@ async function startScanCamera(){
         zoomSlider.min = caps.zoom.min;
         zoomSlider.max = caps.zoom.max;
         zoomSlider.step = caps.zoom.step || 0.1;
-        zoomSlider.value = caps.zoom.min;
+        zoomSlider.value = caps.zoom.min;   // 默认回到不放大的状态，避免残留上次的放大倍数误导
+        document.getElementById('scanZoomVal').textContent = parseFloat(zoomSlider.value).toFixed(1) + '×';
         zoomRow.style.display = 'flex';
       } else {
         zoomRow.style.display = 'none';
       }
     } catch(e){}
+
+    // 尝试直接设置对焦距离到近距离（focusDistance比focusMode更直接——
+    // 不是"开个自动对焦模式祈祷它工作"，而是直接告诉摄像头"往近处对焦"，
+    // 部分安卓设备支持，取capabilities里允许的最小值(通常代表最近对焦距离)
+    try{
+      const track = scanStream.getVideoTracks()[0];
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      if(caps.focusDistance && typeof caps.focusDistance.min === 'number'){
+        await track.applyConstraints({ advanced: [{ focusMode:'manual', focusDistance: caps.focusDistance.min }] });
+      }
+    } catch(e){ /* 不支持则静默忽略，不影响主流程 */ }
+
+    startSharpnessMonitor();
 
     statusEl.className = 'status ok';
     statusEl.textContent = focusSupported
@@ -4185,6 +4282,7 @@ document.getElementById('scanZoomSlider').addEventListener('input', async (e)=>{
   } catch(e){ /* 设备不支持变焦写入则静默忽略 */ }
 });
 function stopScanCamera(){
+  stopSharpnessMonitor();
   if(scanStream){
     scanStream.getTracks().forEach(t=>t.stop());
     scanStream = null;
@@ -4230,6 +4328,9 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
   }
 
   captureBtn.disabled = true;
+
+  const guideEl = document.getElementById('scanGuide');
+  const wasBlurWarned = guideEl.classList.contains('sharpBlur');
 
   try{
     // 根据当前拍摄模式，取对应取景框在画面中的比例位置（需与CSS里.scanGuide各变体一致）
@@ -4282,9 +4383,10 @@ document.getElementById('scanCaptureBtn').addEventListener('click', async ()=>{
     const targetInput = document.getElementById(cfg.fieldId);
     targetInput.value = cleaned;
     statusEl.className = cleaned ? 'status ok' : 'status err';
+    const blurNote = wasBlurWarned ? '（⚠️拍照时取景框显示为模糊状态，建议核对结果或重拍）' : '';
     statusEl.textContent = cleaned
-      ? '✓ 识别完成，已填入下方对应字段，请核对是否正确（上方预览图可帮助判断是否需要重拍）'
-      : '⚠️ 未识别到有效内容——请看上方预览图：若模糊说明需要对焦/调整距离/用变焦后重拍；若清晰但仍未识别，可直接手动填写';
+      ? `✓ 识别完成，已填入下方对应字段，请核对是否正确（上方预览图可帮助判断是否需要重拍）${blurNote}`
+      : `⚠️ 未识别到有效内容——请看上方预览图：若模糊说明需要调整距离后重拍（不建议用数码变焦，帮不了对焦）；若清晰但仍未识别，可直接手动填写${blurNote}`;
   } catch(e){
     statusEl.className = 'status err';
     statusEl.textContent = '识别出错：' + e.message;
