@@ -513,6 +513,22 @@
   .pred-prob-label{font-size:11px;color:#666;margin-bottom:2px;}
   .pred-bar-wrap{background:#eee;border-radius:4px;height:14px;overflow:hidden;}
   .pred-bar-fill{height:14px;border-radius:4px;background:#c81e1e;transition:width .4s;}
+
+  /* ── AI文案助手 ── */
+  .card{background:#faf9f6;border:1px solid #e3e0d8;border-radius:12px;padding:14px;margin-bottom:14px;}
+  .cardTitle{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:10px;}
+  .chatQuickBtn{font-size:12px;padding:8px 14px;}
+  #chatInput{background:#fff;border:1px solid #d8d3c5;color:var(--ink);}
+  #chatInput:focus{outline:none;border-color:#a89a6f;}
+  .chatBubble{max-width:85%;padding:10px 14px;border-radius:14px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
+  .chatBubble.user{align-self:flex-end;background:#1a1a2e;color:#fff;border-bottom-right-radius:4px;}
+  .chatBubble.ai{align-self:flex-start;background:#fff;border:1px solid #e3e0d8;color:var(--ink);border-bottom-left-radius:4px;}
+  .chatBubbleRow{display:flex;flex-direction:column;}
+  .chatBubbleRow.user{align-items:flex-end;}
+  .chatBubbleRow.ai{align-items:flex-start;}
+  .chatCopyBtn{font-size:11px;color:#888;background:none;border:none;cursor:pointer;padding:4px 0;text-align:left;}
+  .chatCopyBtn:hover{color:var(--ink);text-decoration:underline;}
+
   .rec-group{display:inline-block;margin:4px;padding:6px 10px;background:#1a1a2e;border-radius:8px;color:#f1d688;font-size:13px;font-weight:700;}
   .rec-group .ball-r{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#c81e1e;color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px;}
   .rec-group .ball-b{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#1560c8;color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px;}
@@ -870,6 +886,7 @@
       <div class="mainTab active" data-tab="poster">🎨 海报生成</div>
       <div class="mainTab" data-tab="trend">📊 走势图</div>
       <div class="mainTab" data-tab="predict">🤖 ML预测报告</div>
+      <div class="mainTab" data-tab="chat">💬 AI文案助手</div>
     </div>
 
     <!-- 海报Tab内容 -->
@@ -1077,6 +1094,49 @@
         </div>
       </div>
     </div><!-- end tabPredict -->
+
+    <!-- AI文案助手Tab内容 -->
+    <div id="tabChat" class="tabContent">
+      <p class="appSub">告诉AI你的需求，帮你写朋友圈、微信文案，或者聊聊其它的都可以。用的是「走势图分析」里配置的同一个AI通道。</p>
+
+      <div class="card">
+        <div class="cardTitle">⚙️ AI通道设置</div>
+        <div class="status" style="margin-bottom:10px;" id="chatGwHint">
+          与走势图AI解读共用同一个 Gateway 配置，若尚未填写请先在「走势图」页签设置一次。
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">✨ 快捷场景</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px;">
+          <button class="btn secondary chatQuickBtn" data-preset="moments">朋友圈文案</button>
+          <button class="btn secondary chatQuickBtn" data-preset="wechat">微信聊天话术</button>
+          <button class="btn secondary chatQuickBtn" data-preset="product">产品/活动推广</button>
+          <button class="btn secondary chatQuickBtn" data-preset="holiday">节日祝福文案</button>
+          <button class="btn secondary chatQuickBtn" data-preset="reply">得体回复建议</button>
+        </div>
+        <div class="status" style="font-size:11px;color:#888;margin-top:6px;">
+          点击快捷场景会在输入框里填入提示模板，你可以直接改成自己的具体需求再发送。
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">💬 对话</div>
+        <div id="chatMessages" style="display:flex;flex-direction:column;gap:10px;max-height:480px;overflow-y:auto;padding:4px 0;margin-bottom:12px;">
+          <div class="status" id="chatEmptyHint">还没有对话，说说你的需求吧，比如："帮我写一条发朋友圈的文案，周末去爬山拍的照片，想要轻松一点的风格"</div>
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:flex-end;">
+          <textarea id="chatInput" rows="3" placeholder="输入你的需求…比如：帮我写一句适合发朋友圈的加班文案，带点自嘲幽默"
+            style="flex:1;padding:10px 12px;border-radius:10px;font-size:14px;resize:vertical;"></textarea>
+          <button class="btn" id="chatSendBtn" style="white-space:nowrap;">发送</button>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+          <div class="status" id="chatStatus" style="margin:0;"></div>
+          <button class="btn secondary" id="chatClearBtn" style="font-size:12px;padding:6px 12px;">清空对话</button>
+        </div>
+      </div>
+    </div><!-- end tabChat -->
 
   <!-- ===================== PREVIEW ===================== -->
   <div class="previewWrap">
@@ -1519,7 +1579,7 @@ function buildPrompt(type, records, mlContext=''){
 
 要求：
 1. 自然融合三类信息，不要割裂成独立板块，让分析有层次有深度。
-2. 提到模型时不要使用"模型信号"/"深度学习信号"/"强化学习策略"等表述，不夸大准确性。
+2. 提到模型时用"模型信号"/"深度学习信号"/"强化学习策略"等表述，不夸大准确性。
 3. 多模型一致时重点强调，分歧时如实说明各自倾向。
 4. 所有观点基于提供的数据，不虚构规律，不保证命中。
 5. 结构清晰，语言自然生动，像专业彩票资讯网站的每日深度解读。
@@ -1548,7 +1608,7 @@ ${mlContext ? '- 结合模型预测信号（ML/LSTM/TFM/RL）给出综合判断\
 
 写作要求：
 - 必须随机自由调整分析顺序，自然衔接各个观点，例如先分析走势，再结合号码分布，最后总结并给出参考号码。
-- 各项分析内容应自然融合在正文中，不要让读者感觉是在完成一份提纲，不要使用机器学习里的专用名词。
+- 各项分析内容应自然融合在正文中，不要让读者感觉是在完成一份提纲。
 - 可以使用2~4个符合内容的小标题，但小标题不要直接对应上述要求，应更像彩票资讯网站每日专家解读，例如："走势观察"、"冷热变化"、"近期焦点"、"综合判断"等。
 - 推荐号码随便放，以"参考号码"或"关注号码"形式展示即可。
 - 每个观点尽量结合数据说明原因，避免空洞描述。
@@ -2088,8 +2148,20 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
     const credit=document.getElementById('previewCredit');
     if(which==='trend'){
       stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
-    } else if(which==='predict'){
+    } else if(which==='predict' || which==='chat'){
       stage.style.display='none'; trendWrap.style.display='none'; credit.style.display='none';
+      if(which==='chat'){
+        const hint = document.getElementById('chatGwHint');
+        const gwUrl = document.getElementById('gwUrlInput').value.trim();
+        const gwSecret = document.getElementById('gwSecretInput').value.trim();
+        if(gwUrl && gwSecret){
+          hint.className = 'status ok';
+          hint.textContent = '✓ 已复用走势图页签的 Gateway 配置，可以直接开始对话。';
+        } else {
+          hint.className = 'status err';
+          hint.textContent = '⚠️ 尚未配置 Gateway，请先到「走势图」页签填写 Gateway 地址和密钥并保存。';
+        }
+      }
     } else {
       stage.style.display=''; trendWrap.style.display='none'; credit.style.display='';
       renderPoster();
@@ -3335,6 +3407,172 @@ async function drawKL8Canvas(records){
   ctx.setTransform(1,0,0,1,0,0);
   return c;
 }
+
+/* ═══════════════════════════════════════════════════
+   AI文案助手
+═══════════════════════════════════════════════════ */
+let chatHistory = [];   // [{role:'user'|'assistant', content:'...'}]
+
+const CHAT_PRESETS = {
+  moments: '帮我写一条发朋友圈的文案，主题是：[请在这里描述你想发的内容，比如今天做了什么/心情/照片场景]，风格要轻松自然，不要太长，带1-2个合适的emoji。',
+  wechat:  '帮我想一句微信聊天该怎么回复，场景是：[请描述对方说了什么/你想表达什么]，语气要得体自然。',
+  product: '帮我写一段产品/活动推广文案，产品/活动是：[请描述]，卖点是：[请描述]，要简短有吸引力，适合发朋友圈或群里。',
+  holiday: '帮我写一条节日祝福文案，节日是：[请填写]，发给：[朋友/客户/家人]，风格：[温馨/幽默/正式，任选]。',
+  reply:   '帮我想一个得体的回复，场景是：[请描述对方发了什么消息/什么情况]，我想表达的意思是：[请描述]。',
+};
+
+document.querySelectorAll('.chatQuickBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const preset = CHAT_PRESETS[btn.dataset.preset];
+    if(preset){
+      document.getElementById('chatInput').value = preset;
+      document.getElementById('chatInput').focus();
+    }
+  });
+});
+
+function renderChatMessages(){
+  const wrap = document.getElementById('chatMessages');
+  const emptyHint = document.getElementById('chatEmptyHint');
+  if(chatHistory.length === 0){
+    if(emptyHint) emptyHint.style.display = 'block';
+    wrap.querySelectorAll('.chatBubbleRow').forEach(el=>el.remove());
+    return;
+  }
+  if(emptyHint) emptyHint.style.display = 'none';
+  wrap.querySelectorAll('.chatBubbleRow').forEach(el=>el.remove());
+  chatHistory.forEach(msg=>{
+    const row = document.createElement('div');
+    row.className = 'chatBubbleRow ' + (msg.role==='user' ? 'user' : 'ai');
+    const bubble = document.createElement('div');
+    bubble.className = 'chatBubble ' + (msg.role==='user' ? 'user' : 'ai');
+    bubble.textContent = msg.content;
+    row.appendChild(bubble);
+    if(msg.role === 'assistant'){
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'chatCopyBtn';
+      copyBtn.textContent = '📋 复制';
+      copyBtn.addEventListener('click', ()=>{
+        navigator.clipboard.writeText(msg.content).then(()=>{
+          copyBtn.textContent = '✓ 已复制';
+          setTimeout(()=>{ copyBtn.textContent = '📋 复制'; }, 1500);
+        }).catch(()=>{
+          copyBtn.textContent = '复制失败，请手动选中';
+        });
+      });
+      row.appendChild(copyBtn);
+    }
+    wrap.appendChild(row);
+  });
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function sendChatMessage(){
+  const input = document.getElementById('chatInput');
+  const statusEl = document.getElementById('chatStatus');
+  const sendBtn = document.getElementById('chatSendBtn');
+  const text = input.value.trim();
+  if(!text) return;
+
+  const gwUrl    = document.getElementById('gwUrlInput').value.trim();
+  const gwSecret = document.getElementById('gwSecretInput').value.trim();
+  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'auto';
+
+  if(!gwUrl || !gwSecret){
+    statusEl.className = 'status err';
+    statusEl.textContent = '请先在「走势图」页签配置好 Gateway 地址和密钥，再回来使用。';
+    return;
+  }
+
+  chatHistory.push({role:'user', content: text});
+  renderChatMessages();
+  input.value = '';
+  sendBtn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = 'AI 思考中…';
+
+  try{
+    const systemPrompt = `你是一个擅长写短文案的助手，主要帮用户写朋友圈文案、微信聊天话术、产品推广、节日祝福、得体回复等日常社交场景的文字，也可以陪用户聊其它话题。
+
+要求：
+1. 文案类需求默认给出简短版本（1-3句话为主，除非用户要求更长），语言自然口语化，不要写得像广告腔或AI腔。
+2. 可以适量使用emoji让文案更生动，但不要堆砌，1-3个即可，且要契合语境。
+3. 如果用户的描述不够具体（比如没说清楚场景、风格、对象），可以先用一两句话简短反问关键信息，不用啰嗦。
+4. 如果用户要的是文案，直接给出可以直接复制使用的最终文字，不需要额外解释"这是为您准备的文案"这类客套话，除非用户明确要求说明思路。
+5. 保持每次回复简洁，不要长篇大论，除非用户明确要求详细展开。
+6. 请使用中文回答。`;
+
+    const messages = [
+      {role:'system', content: systemPrompt},
+      ...chatHistory.map(m=>({role:m.role, content:m.content})),
+    ];
+
+    const endpoint = gwUrl.replace(/\/$/, '') + '/v1/chat/completions';
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + gwSecret,
+      },
+      body: JSON.stringify({
+        model:       gwModel,
+        messages:    messages,
+        max_tokens:  800,
+        temperature: 0.8,
+      }),
+    });
+
+    if(!resp.ok){
+      const err = await resp.text().catch(()=>'');
+      throw new Error(`Gateway 返回 HTTP ${resp.status}：${err.slice(0,150)}`);
+    }
+    const data = await resp.json();
+    const replyText = data.choices?.[0]?.message?.content || '';
+    if(!replyText) throw new Error('AI 返回内容为空');
+
+    chatHistory.push({role:'assistant', content: replyText});
+    renderChatMessages();
+    saveChatHistory();
+    statusEl.className = 'status ok';
+    statusEl.textContent = '✓ 完成';
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '失败：' + e.message;
+    chatHistory.pop();   // 失败时移除刚才添加的用户消息，避免历史里留个没有回应的孤立提问
+    renderChatMessages();
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+function saveChatHistory(){
+  try{ localStorage.setItem('fucaiChatHistory', JSON.stringify(chatHistory.slice(-40))); }catch(e){}
+}
+function loadChatHistory(){
+  try{
+    const raw = localStorage.getItem('fucaiChatHistory');
+    if(raw) chatHistory = JSON.parse(raw);
+  }catch(e){ chatHistory = []; }
+}
+
+document.getElementById('chatSendBtn').addEventListener('click', sendChatMessage);
+document.getElementById('chatInput').addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter' && !e.shiftKey){
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+document.getElementById('chatClearBtn').addEventListener('click', ()=>{
+  if(chatHistory.length === 0) return;
+  if(confirm('确定要清空全部对话记录吗？')){
+    chatHistory = [];
+    renderChatMessages();
+    saveChatHistory();
+  }
+});
+
+loadChatHistory();
+renderChatMessages();
 </script>
 </body>
 </html>
