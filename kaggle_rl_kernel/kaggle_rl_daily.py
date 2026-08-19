@@ -891,22 +891,22 @@ def run_kl8_daily(records, ml_pred):
     # 今日推荐：用同一套打分对全部80个球排序，取不同TopN覆盖各玩法
     idx = len(records)-1
     state = build_state(idx)
-    # 随机采样3次，得到3份不同的排序结果（用于生成每个玩法下的多组推荐，避免每组都完全相同）
+    # 生成多组推荐：以确定性预测（deterministic=True）为准，因为这是诊断验证过的可靠结果；
+    # 不再用model.predict(deterministic=False)反复带噪声采样——
+    # 那种方式会因为动作空间被限制在[-1,1]，均值已接近边界+1的球在加噪声后大概率还是被裁剪在+1附近，
+    # 导致这些球"稳定"占据高分位置，而中间地带的球分数忽高忽低反而难进前列，
+    # 造成"确定性预测明明分布均匀，但采样出来的多组展示结果却集中在某个区间"的假象。
+    # 现在改成：用同一份可靠的确定性排序，对分数做小幅度、可控的扰动来生成多样性。
     rankings = []
     if state is not None:
-        random.seed(int(date.today().strftime('%Y%m%d')))
-        first_action = None
-        for _ in range(3):
-            action,_ = model.predict(state, deterministic=False)
-            if first_action is None: first_action = action
-            order = np.argsort(action)[::-1]
-            rankings.append([int(i)+1 for i in order])
-        # 保底：若采样失败导致列表为空，用一次确定性预测填充
-        if not rankings:
-            action,_ = model.predict(state, deterministic=True)
-            order = np.argsort(action)[::-1]
-            rankings = [[int(i)+1 for i in order]] * 3
-            first_action = action
+        base_action,_ = model.predict(state, deterministic=True)
+        first_action = base_action
+        rng = np.random.RandomState(int(date.today().strftime('%Y%m%d')))
+        for i in range(3):
+            noise_scale = 0.05 * i   # 第1组用原始确定性排序，第2/3组加小幅可控扰动制造差异
+            perturbed = base_action + rng.normal(0, noise_scale, size=base_action.shape) if noise_scale > 0 else base_action
+            order = np.argsort(perturbed)[::-1]
+            rankings.append([int(j)+1 for j in order])
 
         # ── 诊断：检验打分是否跟球号系统性绑定（即"是否还存在偏向大号/小号"的机制性bug）──
         if first_action is not None:
@@ -1086,15 +1086,17 @@ def run_ssq_daily(records, ml_pred):
     avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
     print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
 
-    # 今日推荐：随机采样生成6注不同组合（红球6个+蓝球1个），而非固定输出1注
+    # 今日推荐：以确定性预测为基准+小幅可控扰动生成6注不同组合（原因同快乐8，见上方说明）
     idx = len(records)-1
     state = build_state(idx)
     groups=[]
     if state is not None:
-        random.seed(int(date.today().strftime('%Y%m%d')))
+        base_action,_ = model.predict(state, deterministic=True)
+        rng = np.random.RandomState(int(date.today().strftime('%Y%m%d')))
         seen=set(); attempts=0
         while len(groups)<6 and attempts<30:
-            action,_ = model.predict(state, deterministic=False)
+            noise_scale = 0.05 * (attempts // 2)   # 逐步加大扰动幅度，制造足够多样性
+            action = base_action + rng.normal(0, noise_scale, size=base_action.shape) if noise_scale > 0 else base_action
             red_scores = action[:33]; blue_scores = action[33:]
             top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
             red_sel = tuple(sorted([int(i)+1 for i in top_idx]))
