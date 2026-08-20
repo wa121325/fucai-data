@@ -3830,8 +3830,7 @@ renderChatMessages();
 ═══════════════════════════════════════════════════ */
 const SCAN_CACHE_KEY  = 'fucaiScanRecordsCache';   // 离线兜底缓存，GitHub才是数据的真正来源
 const SCAN_FILE_PATH  = 'scan_records.json';
-let scanWorker = null;      // Tesseract worker，首次拍照时才初始化，避免一进页面就加载OCR模型
-let scanWorkerLoading = null;
+// OCR worker 实例改由下方 scanWorkers/scanWorkerLoads 按语言分别管理
 let scanRecords = [];       // 当前内存里的记录列表（页面打开时从GitHub拉取）
 let scanCaptureMode = 'code';   // 当前拍摄目标：name / amount / code
 let lastCapturedDataUrl = null; // 最近一次拍的照片，供"重新框选"复用，不用每次都重新调起相机
@@ -4080,11 +4079,28 @@ const SCAN_MODE_CONFIG = {
 
               if(!candidates.length) return '';
               // 优先选最长的候选（信息量最完整），长度相同时优先选带字母开头的标准格式
-              candidates.sort((a,b)=>{
+              // 尾段修复：编号标准格式是5段，若最优候选只有4段，
+              // 说明最后一小段（通常只有1位数字）被漏读了。
+              // 到原文里该候选紧随其后的位置找回它——这段字符少、又贴在图片边缘，
+              // 是OCR最容易丢的部分，但它在原始文本里往往还是留有痕迹的。
+              const repaired = candidates.map(c=>{
+                if(c.split('-').length >= 5) return c;
+                const idx = cleaned.indexOf(c);
+                if(idx < 0) return c;
+                const tail = cleaned.slice(idx + c.length, idx + c.length + 4);
+                const m = tail.match(/^\s*-?\s*(\d{1,2})(?!\d)/);
+                return m ? `${c}-${m[1]}` : c;
+              });
+
+              // 择优：先比段数（5段完整格式优先，避免采用漏了尾段的4段结果），
+              // 段数相同再比长度，最后偏好字母开头的标准格式
+              repaired.sort((a,b)=>{
+                const sa = a.split('-').length, sb = b.split('-').length;
+                if(sa !== sb) return sb - sa;
                 if(b.length !== a.length) return b.length - a.length;
                 return (/^[A-Z]/.test(b)?1:0) - (/^[A-Z]/.test(a)?1:0);
               });
-              return candidates[0];
+              return repaired[0];
             } },
 };
 
@@ -4099,16 +4115,28 @@ document.querySelectorAll('.scanModePill').forEach(pill=>{
 });
 
 /* ── OCR Worker：中英文合并加载一次即可 ── */
-async function ensureScanWorker(){
-  if(scanWorker) return scanWorker;
-  if(scanWorkerLoading) return scanWorkerLoading;
-  scanWorkerLoading = (async ()=>{
-    const worker = await Tesseract.createWorker(['chi_sim','eng']);
-    scanWorker = worker;
+/* OCR Worker 按需加载：
+   编号/面值只需要英文数字，用体积小、推理快的 eng 包即可；
+   票名才需要中文包（体积大好几倍、推理也慢），只在真正拍票名时才下载加载。
+   之前不管识别什么都强制加载中文包，是速度慢的主要原因。 */
+const scanWorkers = {};      // lang -> worker 实例
+const scanWorkerLoads = {};  // lang -> 加载中的Promise
+
+async function ensureScanWorker(lang){
+  const key = lang || 'eng';
+  if(scanWorkers[key]) return scanWorkers[key];
+  if(scanWorkerLoads[key]) return scanWorkerLoads[key];
+  scanWorkerLoads[key] = (async ()=>{
+    const langs = key === 'chi' ? ['chi_sim','eng'] : ['eng'];
+    const worker = await Tesseract.createWorker(langs);
+    scanWorkers[key] = worker;
     return worker;
   })();
-  return scanWorkerLoading;
+  return scanWorkerLoads[key];
 }
+
+// 当前拍摄模式需要哪个语言包（票名要中文，其余只要英文）
+function workerLangFor(mode){ return mode === 'name' ? 'chi' : 'eng'; }
 
 /* ── 拍照（调起系统相机）── */
 document.getElementById('nativeCamBtn').addEventListener('click', ()=>{
@@ -4201,37 +4229,36 @@ async function onPhotoLoaded(img){
     return;
   }
 
-  statusEl.className = 'status'; statusEl.textContent = '首次识别需加载OCR模型（含中文包），请稍候…';
+  statusEl.className = 'status'; statusEl.textContent = '正在识别，请稍候…';
   try{
-    const worker = await ensureScanWorker();
+    const worker = await ensureScanWorker(workerLangFor(scanCaptureMode));
     const results = [];
 
-    // 多个候选区域：默认区域猜不准时，多试几个不同高度的横条，
-    // 覆盖"编号在票面偏上/居中/偏下"等不同构图情况
+    // 候选区域：横向一律取满宽（编号那行常贴近票面左右边缘，
+    // 之前留5%边距会把最后一段 -3 切掉，导致识别结果缺段），
+    // 纵向给两个常见位置，覆盖构图差异；策略数量精简以保证速度
     const regions = scanCaptureMode === 'code'
-      ? [ {left:0.05,top:0.60,width:0.90,height:0.18},
-          {left:0.05,top:0.70,width:0.90,height:0.18},
-          {left:0.05,top:0.50,width:0.90,height:0.20},
-          {left:0.02,top:0.40,width:0.96,height:0.45} ]
-      : [ {left:0.10,top:0.20,width:0.80,height:0.20},
-          {left:0.10,top:0.10,width:0.80,height:0.25},
-          {left:0.05,top:0.05,width:0.90,height:0.40} ];
+      ? [ {left:0.0,top:0.55,width:1.0,height:0.25},
+          {left:0.0,top:0.30,width:1.0,height:0.55} ]
+      : [ {left:0.05,top:0.15,width:0.90,height:0.28},
+          {left:0.0,top:0.0,width:1.0,height:0.55} ];
 
-    for(let i=0;i<regions.length && !results.length;i++){
-      statusEl.textContent = `正在识别（策略 ${i+1}/${regions.length}）…`;
-      const base = cropToCanvas(img, regions[i], cropImgNaturalW, cropImgNaturalH, 1200);
-      // 每个区域先用原图试单行模式，不行再用增强图，再不行换稀疏文本模式
-      const attempts = [
-        [base, '7'], [enhanceForOcr(base), '7'],
-        [base, '6'], [enhanceForOcr(base), '11'],
-      ];
-      for(const [cv, psm] of attempts){
+    outer:
+    for(let i=0;i<regions.length;i++){
+      statusEl.textContent = `正在识别（${i+1}/${regions.length}）…`;
+      const base = cropToCanvas(img, regions[i], cropImgNaturalW, cropImgNaturalH, 1400);
+      // 每个区域只试2种：原图单行模式 + 增强图单行模式（够用且快）
+      for(const [cv, psm] of [[base,'7'], [enhanceForOcr(base),'7']]){
         const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
-        if(got){ results.push(got); break; }
+        if(got){
+          results.push(got);
+          // 编号模式下，若已拿到完整5段结果就立即停止，不再浪费时间试其它策略
+          if(scanCaptureMode !== 'code' || got.split('-').length >= 5) break outer;
+        }
       }
     }
 
-    // 所有区域都没结果，最后整图兜底试一次
+    // 前面都没结果，整图兜底试一次
     if(!results.length){
       statusEl.textContent = '正在识别整张照片（最后尝试）…';
       const scale = Math.min(1, 1800 / Math.max(cropImgNaturalW, cropImgNaturalH));
@@ -4239,14 +4266,20 @@ async function onPhotoLoaded(img){
       fullCanvas.width = Math.round(cropImgNaturalW * scale);
       fullCanvas.height = Math.round(cropImgNaturalH * scale);
       fullCanvas.getContext('2d').drawImage(img, 0, 0, fullCanvas.width, fullCanvas.height);
-      for(const [cv, psm] of [[fullCanvas,'11'], [enhanceForOcr(fullCanvas),'11'], [fullCanvas,'6']]){
+      for(const [cv, psm] of [[fullCanvas,'11'], [enhanceForOcr(fullCanvas),'11']]){
         const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
         if(got){ results.push(got); break; }
       }
     }
 
+    // 择优：编号优先选"段数最完整"的结果（已知是5段格式，
+    // 4段的结果说明尾段被漏读，不能因为它先出现就采用），段数相同再比长度
     const extracted = results.length
-      ? results.sort((a,b)=>b.length-a.length)[0]   // 多个结果时取最完整的那个
+      ? results.sort((a,b)=>{
+          const sa = a.split('-').length, sb = b.split('-').length;
+          if(sa !== sb) return sb - sa;
+          return b.length - a.length;
+        })[0]
       : '';
 
     if(extracted){
@@ -4386,7 +4419,7 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
     cropImg.src = canvas.toDataURL('image/png');
     cropPreview.style.display = 'block';
 
-    const worker = await ensureScanWorker();
+    const worker = await ensureScanWorker(workerLangFor(scanCaptureMode));
     // 多策略尝试：原图/对比度增强图 × 单行/块状模式，任一策略提取成功就采用
     let cleaned = '';
     if(cfg.autoExtract){
