@@ -17,6 +17,7 @@ Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
 import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess
 from datetime import datetime, date
 from collections import Counter, defaultdict
+from itertools import combinations
 warnings.filterwarnings('ignore')
 
 _secrets_client = None
@@ -1172,29 +1173,35 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
                 else:
                     print(f"  ⚠️ [诊断2中性] 重合度中等")
 
-    def group(n, tier=0):
-        # 不重叠区段切分：第1组用排名第1~n名(第一梯队/RL最看好)，
-        # 第2组用排名第(n+1)~2n名(第二梯队/次优选项)，第3组用第(2n+1)~3n名(第三梯队)。
-        # 之前用滑动窗口(错开1位)会导致相邻组之间(n-1)/n的球完全重复，不是真正的次优组合；
-        # 现在每个梯队都是排序里完全不同的一批球，真正体现"RL认为的次优选项是什么"。
+    def group(n, rank=0):
+        """
+        取模型联合得分第 rank+1 高的 n 球组合。
+        之前是切梯队(第2组取排名n+1~2n名)，那等于故意给出模型认为更差的球；
+        现在从打分最高的 n+6 个球里枚举组合，按组内各球得分之和排序，
+        取第 rank+1 名的组合——保证每一注都是模型真正看好的高分组合。
+        """
         if not rl_order: return []
-        start = tier * n
-        return sorted(rl_order[start:start+n])
+        pool_n = min(len(rl_order), n + 6)
+        pool = rl_order[:pool_n]
+        combos = [(sorted(c), float(sum(base_action[b-1] for b in c)))
+                  for c in combinations(pool, n)]
+        combos.sort(key=lambda x: -x[1])
+        return combos[rank][0] if rank < len(combos) else sorted(rl_order[:n])
 
     # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
-    # 每组是RL排序里完全不同的梯队，代表"最优/次优/第三优"三档真实不同的组合
+    # 每注都是从RL打分中枚举组合得出的高分组合，按联合得分排名第1/2/3，而非越切越差的梯队
     plays = {
-        'xuan4':    {'name':'选四','balls':4, 'tip':'第1注最优梯队/第2注次优梯队/第3注第三梯队',
+        'xuan4':    {'name':'选四','balls':4, 'tip':'联合得分Top3组合',
                      'groups':[group(4,0), group(4,1), group(4,2)]},
-        'xuan5':    {'name':'选五','balls':5, 'tip':'第1注最优梯队/第2注次优梯队/第3注第三梯队',
+        'xuan5':    {'name':'选五','balls':5, 'tip':'联合得分Top3组合',
                      'groups':[group(5,0), group(5,1), group(5,2)]},
-        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注（RL最优梯队前8）',
+        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注（RL打分最高的8球）',
                      'groups':[group(8,0)]},
-        'xuan6':    {'name':'选六','balls':6, 'tip':'第1注最优梯队/第2注次优梯队/第3注第三梯队（回测标准）',
+        'xuan6':    {'name':'选六','balls':6, 'tip':'联合得分Top3组合（回测标准）',
                      'groups':[group(6,0), group(6,1), group(6,2)]},
-        'xuan9':    {'name':'选九','balls':9, 'tip':'第1注最优梯队/第2注次优梯队',
+        'xuan9':    {'name':'选九','balls':9, 'tip':'联合得分Top2组合',
                      'groups':[group(9,0), group(9,1)]},
-        'xuan10':   {'name':'选十','balls':10,'tip':'RL最优梯队前10',
+        'xuan10':   {'name':'选十','balls':10,'tip':'RL联合得分最高的10球组合',
                      'groups':[group(10,0)]},
     }
     picks_by_n = {4:group(4,0), 5:group(5,0), 6:group(6,0), 9:group(9,0), 10:group(10,0)}
@@ -1327,15 +1334,41 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
         if _b_gap < 0.15:
             print(f"    ⚠️ 蓝球区分度偏低，模型对16个蓝球基本无偏好")
 
-        # 红球：不重叠区段切分，3个梯队各6个球（第1梯队排名1-6/第2梯队7-12/第3梯队13-18），
-        # 之前用滑动窗口每次只挪1位，相邻注5/6红球重复，不是真正的次优组合。
-        # 现在3个红球梯队 × 2个蓝球候选 = 6注，两个维度都是RL排序里真正不同的选项。
-        red_tiers = [sorted(rl_red_order[t*6:(t+1)*6]) for t in range(3)]
-        for red_sel in red_tiers:
-            for b in blue_order[:2]:
-                if len(red_sel) == 6:
-                    groups.append({'red': red_sel, 'blue': b})
-        blue_sel = blue_order[0]   # 供下方ref_info/兼容字段使用，主推荐仍是排名第一的蓝球
+        # ── 红球：枚举组合，取模型联合得分最高的6注 ──
+        # 之前是把排序切成梯队(1-6名/7-12名/…)，但第2注开始就是模型认为"第7到12好"的球，
+        # 等于故意给出越来越差的推荐，这不是"最可能出现的6注"。
+        # 现在从打分最高的12个球里枚举 C(12,6)=924 种组合，按组合内各球得分之和排序取前6，
+        # 保证6注全都是模型真正看好的高分组合（思路与3D的联合概率枚举一致）。
+        RED_POOL_N = 12
+        pool = rl_red_order[:RED_POOL_N]
+        scored_combos = []
+        for c in combinations(pool, 6):
+            scored_combos.append((sorted(c), float(sum(red_scores[n-1] for n in c))))
+        scored_combos.sort(key=lambda x: -x[1])
+        red_top6 = [c for c, _ in scored_combos[:6]]
+
+        # ── 蓝球：预测几个算几个，不固定数量 ──
+        # 对16个蓝球分数做softmax，把明显高于均匀分布(1/16=6.25%)的候选都算作"模型的预测"，
+        # 最多取3个。模型只看好1个就给1个，看好3个就给3个。
+        _bexp = np.exp(blue_scores - np.max(blue_scores))
+        _bprob = _bexp / (_bexp.sum() + 1e-12)
+        _border = np.argsort(_bprob)[::-1]
+        blue_cands, blue_probs = [], []
+        for bi in _border[:3]:
+            p = float(_bprob[bi])
+            if p >= (1.0/16) * 1.3 or not blue_cands:   # 至少给1个，其余需明显高于均匀分布
+                blue_cands.append(int(bi) + 1); blue_probs.append(round(p*100, 1))
+        print(f"  [蓝球预测] 共{len(blue_cands)}个候选: "
+              + "  ".join(f"{b:02d}({p}%)" for b, p in zip(blue_cands, blue_probs)))
+
+        for red_sel in red_top6:
+            groups.append({
+                'red': red_sel,
+                'blue': blue_cands[0] if blue_cands else None,   # 兼容旧字段
+                'blues': blue_cands,          # 模型预测的全部蓝球候选，前端有几个显示几个
+                'blue_probs': blue_probs,
+            })
+        blue_sel = blue_cands[0] if blue_cands else blue_order[0]
 
         # 参考信息：遗漏值+ML主力区预测，仅用于展示说明，不参与排序计算
         om_now = omit_arr[idx] if omit_arr is not None else np.zeros(49)
