@@ -650,6 +650,44 @@ TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 
 
+def diverse_picks(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
+    """
+    多样化选号：胆码 + 拖码轮转。
+
+    ── 为什么不用"联合得分Top-N" ──
+    按组合总分排序取前N注，结果必然是N注共享同样的头几个高分球、只有末尾一两个位置在微调
+    （实测双色球6注平均重合4.8/6个球，只用到8个不同号码），
+    这跟只推1注没有本质区别，完全体现不出多元化，实际参考意义很低。
+
+    ── 现在的做法 ──
+    1) 候选池：按模型打分取前 pool_mult 倍于所需球数的号码，超出的说明模型不看好，不予考虑
+    2) 胆码：池中打分最高的那少数几个球，模型最确信，进入每一注
+    3) 拖码：池中其余球轮转填充各注剩余位置，让模型看好的号码都有机会出场
+
+    这样既尊重模型的置信度层次（越看好的球出现越频繁），又保证各注之间有实质差异。
+    返回 (各注号码列表, 胆码, 候选池)
+    """
+    order = np.argsort(scores)[::-1]
+    pool_size = min(len(scores), max(n_pick + 2, int(round(n_pick * pool_mult))))
+    pool = [int(order[i]) + 1 for i in range(pool_size)]
+    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
+    core, rest = pool[:core_n], pool[core_n:]
+    bets, ri = [], 0
+    for _ in range(n_bets):
+        sel = list(core)
+        guard = 0
+        while len(sel) < n_pick and rest and guard < len(rest) * 3:
+            cand = rest[ri % len(rest)]; ri += 1; guard += 1
+            if cand not in sel: sel.append(cand)
+        # 池子不够时（理论上不会），用全局排序补齐
+        oi = 0
+        while len(sel) < n_pick and oi < len(order):
+            c = int(order[oi]) + 1; oi += 1
+            if c not in sel: sel.append(c)
+        bets.append(sorted(sel))
+    return bets, sorted(core), sorted(pool)
+
+
 # ══════════════════════════════════════════════════════
 #  新数据检测：避免拿完全相同的数据反复训练（过拟合防护）
 #  三个游戏共用。记录"上次训练时用了多少期数据"，
@@ -1173,35 +1211,44 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
                 else:
                     print(f"  ⚠️ [诊断2中性] 重合度中等")
 
+    # 各玩法预先用"胆码+拖码轮转"算好各注（原因同双色球：
+    # 按联合得分取Top-N会让各注共享同样的高分球、只在末位微调，体现不出多元化）
+    _play_bets = {}
+    _play_core = {}
+    for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
+        if rl_order:
+            _b, _c, _p = diverse_picks(base_action, _n, _cnt)
+            _play_bets[_n], _play_core[_n] = _b, _c
+        else:
+            _play_bets[_n], _play_core[_n] = [[] for _ in range(_cnt)], []
+    if rl_order:
+        _o6 = [len(set(_play_bets[6][i]) & set(_play_bets[6][j]))
+               for i in range(len(_play_bets[6])) for j in range(i+1, len(_play_bets[6]))]
+        _a6 = set()
+        for c in _play_bets[6]: _a6 |= set(c)
+        print(f"  [选六] 胆码{_play_core[6]}  3注共用到{len(_a6)}个号码"
+              + (f"，两两平均重合{np.mean(_o6):.1f}/6" if _o6 else ""))
+
     def group(n, rank=0):
-        """
-        取模型联合得分第 rank+1 高的 n 球组合。
-        之前是切梯队(第2组取排名n+1~2n名)，那等于故意给出模型认为更差的球；
-        现在从打分最高的 n+6 个球里枚举组合，按组内各球得分之和排序，
-        取第 rank+1 名的组合——保证每一注都是模型真正看好的高分组合。
-        """
-        if not rl_order: return []
-        pool_n = min(len(rl_order), n + 6)
-        pool = rl_order[:pool_n]
-        combos = [(sorted(c), float(sum(base_action[b-1] for b in c)))
-                  for c in combinations(pool, n)]
-        combos.sort(key=lambda x: -x[1])
-        return combos[rank][0] if rank < len(combos) else sorted(rl_order[:n])
+        """取该玩法第 rank+1 注（已由 diverse_picks 保证各注之间有实质差异）"""
+        bets = _play_bets.get(n, [])
+        if rank < len(bets): return bets[rank]
+        return sorted(rl_order[:n]) if rl_order else []
 
     # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
-    # 每注都是从RL打分中枚举组合得出的高分组合，按联合得分排名第1/2/3，而非越切越差的梯队
+    # 每注由"胆码+拖码轮转"生成：模型最确信的球进每注，其余候选轮转分配，兼顾置信度与多样性
     plays = {
-        'xuan4':    {'name':'选四','balls':4, 'tip':'联合得分Top3组合',
+        'xuan4':    {'name':'选四','balls':4, 'tip':'胆码+拖码轮转3注',
                      'groups':[group(4,0), group(4,1), group(4,2)]},
-        'xuan5':    {'name':'选五','balls':5, 'tip':'联合得分Top3组合',
+        'xuan5':    {'name':'选五','balls':5, 'tip':'胆码+拖码轮转3注',
                      'groups':[group(5,0), group(5,1), group(5,2)]},
-        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注（RL打分最高的8球）',
+        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注',
                      'groups':[group(8,0)]},
-        'xuan6':    {'name':'选六','balls':6, 'tip':'联合得分Top3组合（回测标准）',
+        'xuan6':    {'name':'选六','balls':6, 'tip':'胆码+拖码轮转3注（回测标准）',
                      'groups':[group(6,0), group(6,1), group(6,2)]},
-        'xuan9':    {'name':'选九','balls':9, 'tip':'联合得分Top2组合',
+        'xuan9':    {'name':'选九','balls':9, 'tip':'胆码+拖码轮转2注',
                      'groups':[group(9,0), group(9,1)]},
-        'xuan10':   {'name':'选十','balls':10,'tip':'RL联合得分最高的10球组合',
+        'xuan10':   {'name':'选十','balls':10,'tip':'RL打分最高的10球',
                      'groups':[group(10,0)]},
     }
     picks_by_n = {4:group(4,0), 5:group(5,0), 6:group(6,0), 9:group(9,0), 10:group(10,0)}
@@ -1310,6 +1357,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     state = build_state(idx)
     groups=[]
     ref_info = {}
+    red_core_info, red_pool_info = [], []
     if state is not None:
         base_action,_ = model.predict(state, deterministic=True)
         red_scores = base_action[:33]; blue_scores = base_action[33:]
@@ -1337,26 +1385,23 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
         # ── 红球：枚举组合，取模型联合得分最高的6注 ──
         # 之前是把排序切成梯队(1-6名/7-12名/…)，但第2注开始就是模型认为"第7到12好"的球，
         # 等于故意给出越来越差的推荐，这不是"最可能出现的6注"。
-        # 现在从打分最高的12个球里枚举 C(12,6)=924 种组合，按组合内各球得分之和排序取前6，
-        # 保证6注全都是模型真正看好的高分组合（思路与3D的联合概率枚举一致）。
-        RED_POOL_N = 12
-        pool = rl_red_order[:RED_POOL_N]
-        scored_combos = []
-        for c in combinations(pool, 6):
-            scored_combos.append((sorted(c), float(sum(red_scores[n-1] for n in c))))
-        scored_combos.sort(key=lambda x: -x[1])
-        red_top6 = [c for c, _ in scored_combos[:6]]
+        # ── 红球：胆码+拖码轮转，保证6注之间有实质差异 ──
+        red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
+        _ov = [len(set(red_top6[i]) & set(red_top6[j])) for i in range(6) for j in range(i+1,6)]
+        _allb = set()
+        for c in red_top6: _allb |= set(c)
+        print(f"  [红球] 候选池{len(red_pool)}球 胆码{red_core}  "
+              f"6注共用到{len(_allb)}个号码，两两平均重合{np.mean(_ov):.1f}/6")
 
-        # ── 蓝球：预测几个算几个，不固定数量 ──
-        # 对16个蓝球分数做softmax，把明显高于均匀分布(1/16=6.25%)的候选都算作"模型的预测"，
-        # 最多取3个。模型只看好1个就给1个，看好3个就给3个。
+        # ── 蓝球：模型预测几个算几个，全部展示 ──
+        # 对16个蓝球分数做softmax，把高于均匀分布(1/16=6.25%)的候选都算作模型的预测，最多3个
         _bexp = np.exp(blue_scores - np.max(blue_scores))
         _bprob = _bexp / (_bexp.sum() + 1e-12)
         _border = np.argsort(_bprob)[::-1]
         blue_cands, blue_probs = [], []
         for bi in _border[:3]:
             p = float(_bprob[bi])
-            if p >= (1.0/16) * 1.3 or not blue_cands:   # 至少给1个，其余需明显高于均匀分布
+            if p >= (1.0/16) or not blue_cands:   # 至少给1个，其余只需高于均匀分布即可
                 blue_cands.append(int(bi) + 1); blue_probs.append(round(p*100, 1))
         print(f"  [蓝球预测] 共{len(blue_cands)}个候选: "
               + "  ".join(f"{b:02d}({p}%)" for b, p in zip(blue_cands, blue_probs)))
@@ -1369,6 +1414,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
                 'blue_probs': blue_probs,
             })
         blue_sel = blue_cands[0] if blue_cands else blue_order[0]
+        red_core_info, red_pool_info = red_core, red_pool
 
         # 参考信息：遗漏值+ML主力区预测，仅用于展示说明，不参与排序计算
         om_now = omit_arr[idx] if omit_arr is not None else np.zeros(49)
@@ -1394,7 +1440,9 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
             'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
-            'ppo_groups':groups,'ref_info':ref_info,'is_first_train':is_new,
+            'ppo_groups':groups,'ref_info':ref_info,
+            'red_core':red_core_info,'red_pool':red_pool_info,
+            'is_first_train':is_new,
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
 
 
@@ -1475,7 +1523,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
 
     idx=len(records)-1; state=build_state(idx)
-    groups=[]
+    groups=[]; pos_candidates=[]
     if state is not None:
         # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
         # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
@@ -1486,25 +1534,47 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
             pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
 
-            # 全量枚举全部10×10×10=1000种组合，按联合概率排序取真正的Top6。
-            # 之前是每位只取Top2再组合(8种)，会漏掉真正的高分组合——
-            # 比如个位第3名概率只比第2名低一点点，它跟百位/十位第1名的组合，
-            # 联合概率可能高于"三位都取第2名"，但预筛机制根本不会考虑它。
-            # 1000次乘法开销可以忽略，但能保证取到的是模型真正认为最优的6组。
+            # 每位取Top3候选。之前用纯联合概率取Top6有个问题：
+            # 联合概率是相乘的，某一位第1名只要比第2名高出一截，乘法会把优势放大，
+            # 导致6注里那一位全被同一个数字垄断（比如十位0.200 vs 0.129，6注十位全是同一个），
+            # 模型对第2、3候选的判断就被白白浪费了。
+            # 改成"轮转+择优"：前3注让每位的3个候选各当一次主角（保证全部候选都露面），
+            # 后3注再从27种组合里按联合概率择优补足。
             p_bai, p_shi, p_ge = pos_probs[0], pos_probs[1], pos_probs[2]
-            joint = p_bai[:,None,None] * p_shi[None,:,None] * p_ge[None,None,:]   # 形状(10,10,10)
-            flat_idx = np.argsort(joint.ravel())[::-1][:6]
-            groups = []
-            for fi in flat_idx:
-                b, s, g = np.unravel_index(fi, joint.shape)
-                groups.append([int(b), int(s), int(g)])
+            top3 = []
+            for p in (p_bai, p_shi, p_ge):
+                idx3 = np.argsort(p)[::-1][:3]
+                top3.append([(int(d), float(p[d])) for d in idx3])
 
-            top_probs = [float(joint.ravel()[fi]) for fi in flat_idx]
-            print(f"  [主推荐] 百位Top3概率: {np.sort(p_bai)[-3:][::-1].round(3).tolist()}  "
-                  f"十位Top3: {np.sort(p_shi)[-3:][::-1].round(3).tolist()}  "
-                  f"个位Top3: {np.sort(p_ge)[-3:][::-1].round(3).tolist()}")
-            print(f"  [全量枚举1000种组合] 联合概率Top6: {groups}")
+            picked, seen = [], set()
+            for i in range(3):   # 前3注：各位第i候选组合，确保候选全覆盖
+                c = [top3[0][i][0], top3[1][i][0], top3[2][i][0]]
+                pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
+                picked.append((c, pr)); seen.add(tuple(c))
+            all27 = sorted(
+                (([b, s, g], pb*ps*pg)
+                 for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
+                key=lambda x: -x[1])
+            for c, pr in all27:   # 后3注：按联合概率补足
+                if len(picked) >= 6: break
+                if tuple(c) not in seen:
+                    picked.append((c, pr)); seen.add(tuple(c))
+            picked.sort(key=lambda x: -x[1])
+            groups = [c for c, _ in picked]
+            top_probs = [pr for _, pr in picked]
+
+            # 每位候选明细，供前端展示"模型认为这位可能是哪几个数字"
+            pos_candidates = [
+                [{'digit': d, 'prob': round(pv*100, 1)} for d, pv in t] for t in top3
+            ]
+
+            names = ['百位','十位','个位']
+            for ni, t in enumerate(top3):
+                print(f"  [{names[ni]}候选] " + "  ".join(f"{d}({pv*100:.1f}%)" for d, pv in t))
+            print(f"  [推荐6注] {groups}")
             print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
+            _cov = [len(set(c[i] for c in groups)) for i in range(3)]
+            print(f"    候选覆盖: 百位{_cov[0]}/3  十位{_cov[1]}/3  个位{_cov[2]}/3")
             # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
             ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
             print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
@@ -1527,8 +1597,10 @@ def run_3d_daily(records, ml_pred, prev_result=None):
 
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
-            'ppo_pred':pred,'ppo_groups':groups,'is_first_train':is_new,
-            'note':f'PPO按百十个位各自概率分布排序，联合概率从高到低生成6注（而非随机采样），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
+            'ppo_pred':pred,'ppo_groups':groups,
+            'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
+            'is_first_train':is_new,
+            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
