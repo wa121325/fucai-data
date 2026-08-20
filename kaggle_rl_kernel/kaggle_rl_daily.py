@@ -949,6 +949,20 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
         base_action,_ = model.predict(state, deterministic=True)
         rl_order = [int(i)+1 for i in np.argsort(base_action)[::-1]]
 
+        # 区分度诊断：模型对80个球的打分，Top6跟中位区拉不拉得开？
+        # 如果差距接近0，说明模型其实没在区分号码好坏，选Top6跟随便选6个没实质区别，
+        # 这比"回测净收益"更能直接反映模型到底学到没有。
+        _srt = np.sort(base_action)[::-1]
+        _top6, _mid = float(_srt[:6].mean()), float(_srt[34:40].mean())
+        _spread = float(_srt.max() - _srt.min())
+        _gap_ratio = (_top6 - _mid) / (_spread + 1e-9)
+        print(f"  [区分度] Top6均分{_top6:.4f}  中位区均分{_mid:.4f}  "
+              f"差距占全域{_gap_ratio*100:.1f}%")
+        if _gap_ratio < 0.15:
+            print(f"    ⚠️ 差距很小，说明模型对各号码的偏好不明显，本次推荐参考价值有限")
+        else:
+            print(f"    ✓ 模型对号码有明显区分")
+
         om_now = omit_arr[idx] if omit_arr is not None else np.zeros(80)
         fr_now = freq_arr[idx] if freq_arr is not None else np.zeros(80)
         models_data = ml_pred.get('models', {})
@@ -1157,6 +1171,19 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
 
         rl_red_order = [int(i)+1 for i in np.argsort(red_scores)[::-1]]
 
+        # 区分度诊断（红球/蓝球分开看）：模型的打分能不能把好坏号码拉开差距？
+        # 差距接近0说明模型没在真正区分，推荐等同于随机选，比看回测数字更直接。
+        _rs = np.sort(red_scores)[::-1]
+        _r_gap = (float(_rs[:6].mean()) - float(_rs[13:19].mean())) / (float(_rs.max()-_rs.min()) + 1e-9)
+        _bs = np.sort(blue_scores)[::-1]
+        _b_gap = (float(_bs[:3].mean()) - float(_bs[6:9].mean())) / (float(_bs.max()-_bs.min()) + 1e-9)
+        print(f"  [区分度] 红球Top6与中位区差距占全域{_r_gap*100:.1f}%  "
+              f"蓝球Top3与中位区差距占全域{_b_gap*100:.1f}%")
+        if _r_gap < 0.15:
+            print(f"    ⚠️ 红球区分度偏低，模型对各红球偏好不明显，推荐参考价值有限")
+        if _b_gap < 0.15:
+            print(f"    ⚠️ 蓝球区分度偏低，模型对16个蓝球基本无偏好")
+
         # 红球：不重叠区段切分，3个梯队各6个球（第1梯队排名1-6/第2梯队7-12/第3梯队13-18），
         # 之前用滑动窗口每次只挪1位，相邻注5/6红球重复，不是真正的次优组合。
         # 现在3个红球梯队 × 2个蓝球候选 = 6注，两个维度都是RL排序里真正不同的选项。
@@ -1283,19 +1310,28 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
             pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
 
-            # 每位取概率最高的前2个候选数字，组合出最多2×2×2=8种候选，按联合概率(三位概率相乘)排序取前6
-            candidates = []
-            for b in np.argsort(pos_probs[0])[::-1][:2]:
-                for s in np.argsort(pos_probs[1])[::-1][:2]:
-                    for g in np.argsort(pos_probs[2])[::-1][:2]:
-                        joint_prob = pos_probs[0][b] * pos_probs[1][s] * pos_probs[2][g]
-                        candidates.append(([int(b),int(s),int(g)], joint_prob))
-            candidates.sort(key=lambda x: -x[1])
-            groups = [c[0] for c in candidates[:6]]
-            print(f"  [主推荐] 百位Top2概率: {np.sort(pos_probs[0])[-2:][::-1].round(3).tolist()}  "
-                  f"十位Top2: {np.sort(pos_probs[1])[-2:][::-1].round(3).tolist()}  "
-                  f"个位Top2: {np.sort(pos_probs[2])[-2:][::-1].round(3).tolist()}")
-            print(f"  [次优组合] 按联合概率排序生成{len(groups)}组: {groups}")
+            # 全量枚举全部10×10×10=1000种组合，按联合概率排序取真正的Top6。
+            # 之前是每位只取Top2再组合(8种)，会漏掉真正的高分组合——
+            # 比如个位第3名概率只比第2名低一点点，它跟百位/十位第1名的组合，
+            # 联合概率可能高于"三位都取第2名"，但预筛机制根本不会考虑它。
+            # 1000次乘法开销可以忽略，但能保证取到的是模型真正认为最优的6组。
+            p_bai, p_shi, p_ge = pos_probs[0], pos_probs[1], pos_probs[2]
+            joint = p_bai[:,None,None] * p_shi[None,:,None] * p_ge[None,None,:]   # 形状(10,10,10)
+            flat_idx = np.argsort(joint.ravel())[::-1][:6]
+            groups = []
+            for fi in flat_idx:
+                b, s, g = np.unravel_index(fi, joint.shape)
+                groups.append([int(b), int(s), int(g)])
+
+            top_probs = [float(joint.ravel()[fi]) for fi in flat_idx]
+            print(f"  [主推荐] 百位Top3概率: {np.sort(p_bai)[-3:][::-1].round(3).tolist()}  "
+                  f"十位Top3: {np.sort(p_shi)[-3:][::-1].round(3).tolist()}  "
+                  f"个位Top3: {np.sort(p_ge)[-3:][::-1].round(3).tolist()}")
+            print(f"  [全量枚举1000种组合] 联合概率Top6: {groups}")
+            print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
+            # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
+            ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
+            print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
         except Exception as e:
             print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
             action,_ = model.predict(state, deterministic=True)
