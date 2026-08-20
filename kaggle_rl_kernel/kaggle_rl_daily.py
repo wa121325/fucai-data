@@ -505,6 +505,47 @@ KL8_PAYOUT = {(1,1):2,(2,2):10,(3,3):30,(4,4):100,(4,3):3,(4,2):1,(5,5):200,(5,4
 TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 
+
+# ══════════════════════════════════════════════════════
+#  新数据检测：避免拿完全相同的数据反复训练（过拟合防护）
+#  三个游戏共用。记录"上次训练时用了多少期数据"，
+#  下次运行时若期数没增加，说明没有新开奖，跳过训练直接沿用上次结果。
+#  这对手动重复触发尤其重要——否则同一批数据被训练N次，
+#  模型会对这批数据过度拟合，反而降低泛化能力。
+# ══════════════════════════════════════════════════════
+def get_last_trained_n(game):
+    """读取上次训练时的数据期数（优先读挂载的Dataset，那是上次运行持久化的结果）"""
+    for path in (f'{RL_MOUNTED}/{game}_last_trained_n.json',
+                 f'{RL_LOCAL_DIR}/{game}_last_trained_n.json'):
+        if os.path.exists(path):
+            try:
+                with open(path) as f: return json.load(f).get('n', 0)
+            except Exception: pass
+    return 0
+
+def save_last_trained_n(game, n):
+    """记录本次训练用到的数据期数，随RL_LOCAL_DIR一起推送到Dataset持久化"""
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(f'{RL_LOCAL_DIR}/{game}_last_trained_n.json', 'w') as f:
+            json.dump({'n': n}, f)
+    except Exception as e:
+        print(f"  ! 记录{game}训练期数失败: {e}")
+
+def carry_over_result(game, prev_result, cur_n, last_n, reason):
+    """无新数据时，沿用上次的完整结果（字段结构保持一致，前端渲染无需感知变化）"""
+    print(f"  {game} 无新开奖数据（当前{cur_n}期，上次训练时已是{last_n}期），"
+          f"跳过训练避免重复数据过拟合")
+    save_last_trained_n(game, cur_n)
+    if prev_result:
+        carried = dict(prev_result)
+        carried['skipped'] = True
+        carried['carried_over'] = True
+        carried['note'] = (carried.get('note','') or '') + f'（{reason}，以上为上次训练结果，本次未重新训练）'
+        return carried
+    return {'skipped': True, 'games_tested': 0, 'reason': reason,
+            'note': f'{reason}，且未找到上次训练结果可沿用（可能是首次运行）'}
+
 def normalize_state_segments(*segments):
     """
     分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
@@ -791,8 +832,16 @@ def push_rl_dataset():
 # ══════════════════════════════════════════════════════
 #  主流程：kl8 增量微调
 # ══════════════════════════════════════════════════════
-def run_kl8_daily(records, ml_pred):
+def run_kl8_daily(records, ml_pred, prev_result=None):
     print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
+
+    # 新数据检测：快乐8虽然每天开奖，但手动重复触发时数据是完全相同的，
+    # 反复训练会让模型对同一批数据过拟合，这里直接跳过
+    last_trained_n = get_last_trained_n('kl8')
+    if len(records) <= last_trained_n:
+        return carry_over_result('快乐8', prev_result, len(records), last_trained_n,
+                                 '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
+
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
     _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
@@ -993,6 +1042,9 @@ def run_kl8_daily(records, ml_pred):
     }
     picks_by_n = {4:group(4,0), 5:group(5,0), 6:group(6,0), 9:group(9,0), 10:group(10,0)}
 
+    # 记录本次训练时的期数，供下次运行判断是否有新数据
+    save_last_trained_n('kl8', len(records))
+
     return {'avg_net_per_game':avg_net,'games_tested':games,
             'ppo_selected':picks_by_n[6],   # 兼容旧字段
             'picks_by_n':picks_by_n,        # 兼容旧字段
@@ -1007,33 +1059,12 @@ def run_kl8_daily(records, ml_pred):
 def run_ssq_daily(records, ml_pred, prev_result=None):
     print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
 
-    # ── 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新一期数据 ──
-    # 之前每天不管有没有新开奖都会强制训练15000步，等于在4/7的天数里
-    # 拿完全相同的历史数据反复做梯度更新，纯粹浪费算力还会助推过拟合。
-    # 用一个持久化计数文件记录"上次训练时的期数"，跟当前期数对比，没有新增就跳过。
-    ssq_count_path_local  = f'{RL_LOCAL_DIR}/ssq_last_trained_n.json'
-    ssq_count_path_mount  = f'{RL_MOUNTED}/ssq_last_trained_n.json'
-    last_trained_n = 0
-    if os.path.exists(ssq_count_path_mount):
-        try:
-            with open(ssq_count_path_mount) as f: last_trained_n = json.load(f).get('n', 0)
-        except Exception: pass
-
+    # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据；
+    # 手动重复触发时也会命中这个检查，避免同一批数据被反复训练导致过拟合
+    last_trained_n = get_last_trained_n('ssq')
     if len(records) <= last_trained_n:
-        print(f"  今日双色球无新开奖（当前{len(records)}期，上次训练时已是{last_trained_n}期，"
-              f"本期非开奖日：周二/四/日才开奖），跳过训练，直接沿用上次结果")
-        os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-        with open(ssq_count_path_local, 'w') as f: json.dump({'n': len(records)}, f)  # 仍需持久化，供Dataset同步
-        if prev_result:
-            # 复制上次完整结果，字段结构原样保留（HTML那边渲染逻辑完全不用改），
-            # 只是叠加一下"本期是沿用"的标记和备注，方便区分
-            carried = dict(prev_result)
-            carried['skipped'] = True
-            carried['carried_over'] = True
-            carried['note'] = (carried.get('note','') or '') + '（今日非开奖日，以上为上次开奖日的结果，未重新训练）'
-            return carried
-        return {'skipped': True, 'games_tested': 0, 'reason': '非开奖日，无新数据',
-                'note': '双色球周二/四/日开奖，今日非开奖日，未产生新数据，且未找到上次训练结果可沿用（可能是首次运行）'}
+        return carry_over_result('双色球', prev_result, len(records), last_trained_n,
+                                 '双色球周二/四/日开奖，本次运行无新开奖数据')
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
@@ -1155,8 +1186,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     blue_pred = groups[0]['blue'] if groups else None
 
     # 记录本次训练时的期数，供下次运行判断是否有新开奖
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    with open(ssq_count_path_local, 'w') as f: json.dump({'n': len(records)}, f)
+    save_last_trained_n('ssq', len(records))
 
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
@@ -1165,8 +1195,15 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
 
 
-def run_3d_daily(records, ml_pred):
+def run_3d_daily(records, ml_pred, prev_result=None):
     print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
+
+    # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
+    last_trained_n = get_last_trained_n('3d')
+    if len(records) <= last_trained_n:
+        return carry_over_result('福彩3D', prev_result, len(records), last_trained_n,
+                                 '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
+
     ml_vec = extract_ml_prob_vec(ml_pred, '3d')
     _cur_feat_dim = len(f3d(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
@@ -1273,6 +1310,9 @@ def run_3d_daily(records, ml_pred):
                 groups.append(groups[-1])
     pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注（联合概率最高的组合）
 
+    # 记录本次训练时的期数，供下次运行判断是否有新数据
+    save_last_trained_n('3d', len(records))
+
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'ppo_pred':pred,'ppo_groups':groups,'is_first_train':is_new,
@@ -1311,10 +1351,8 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
         print(f"\n{game}: 数据不足，跳过"); continue
     ml_pred = ml_preds.get(game, {})
     try:
-        if game == 'ssq':
-            rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get('ssq'))
-        else:
-            rl_results[game] = run_fn(records, ml_pred)
+        # 三个游戏统一传入上次结果，无新数据时沿用，避免重复训练造成过拟合
+        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game))
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"{game} 失败: {e}")
