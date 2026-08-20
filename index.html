@@ -1924,7 +1924,10 @@ function getMlContext(type){
         if(ssqRlCtx.skipped) lines.push(`  ⏸️ 今日非开奖日，未重新训练，以下为${ssqRlCtx!==rlGame?'本机缓存的':''}上次训练结果`);
         lines.push(`  方法：红球33全量打分排序（Top6）+ 蓝球打分，联合优化，奖励按双色球真实奖级结构分级`);
         lines.push(`  回测（近${ssqRlCtx.games_tested??'—'}期）：红球平均命中${ssqRlCtx.avg_red_hit??'—'}个  蓝球准确率${ssqRlCtx.blue_acc_pct??'—'}%（随机基准6.25%）`);
-        if(ssqRlCtx.ppo_groups?.length) lines.push(`  PPO推荐（${ssqRlCtx.ppo_groups.length}注）：${ssqRlCtx.ppo_groups.map((g,i)=>`第${i+1}注[${(g.red||[]).join(' ')}]+蓝${g.blue}`).join(' ')}`);
+        if(ssqRlCtx.ppo_groups?.length) lines.push(`  PPO推荐（${ssqRlCtx.ppo_groups.length}注）：${ssqRlCtx.ppo_groups.map((g,i)=>{
+          const bs = g.blues?.length ? g.blues : (g.blue!=null?[g.blue]:[]);
+          return `第${i+1}注[${(g.red||[]).join(' ')}]+蓝${bs.join('/')}`;
+        }).join(' ')}`);
         else {
           if(ssqRlCtx.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${ssqRlCtx.ppo_red_selected.join(' ')}`);
           if(ssqRlCtx.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${ssqRlCtx.ppo_blue_pred}`);
@@ -2674,11 +2677,14 @@ function renderDLResult(dlResult){
         </div>`;
       }
       if(ssqRl.ppo_groups?.length){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${ssqRl.ppo_groups.length}注）：</span></div>`;
+        const nBlue = ssqRl.ppo_groups[0]?.blues?.length || 1;
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${ssqRl.ppo_groups.length}注，模型预测${nBlue}个蓝球候选）：</span></div>`;
         ssqRl.ppo_groups.forEach((g,i)=>{
           html += `<div class="rec-group">第${i+1}注：`;
           (g.red||[]).forEach(n=>{ html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`; });
-          if(g.blue!=null) html += `<span class="ball-b">${String(g.blue).padStart(2,'0')}</span>`;
+          // 模型预测几个蓝球就显示几个（不固定数量，由模型置信度决定）
+          const blues = g.blues?.length ? g.blues : (g.blue!=null ? [g.blue] : []);
+          blues.forEach(b=>{ html += `<span class="ball-b">${String(b).padStart(2,'0')}</span>`; });
           html += `</div>`;
         });
       } else if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
