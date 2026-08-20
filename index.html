@@ -4468,12 +4468,20 @@ document.getElementById('scanExportBtn').addEventListener('click', ()=>{
     listStatus.className = 'status err'; listStatus.textContent = '暂无记录可导出。';
     return;
   }
-  const rows = scanRecords.map((item, i) => ({
-    '序号': i+1, '票名': item.name||'', '面值': item.amount||'',
-    '编号': item.code||'', '中奖金额': item.prize||'', '记录时间': item.time||''
-  }));
+  const rows = scanRecords.map((item, i) => {
+    // 编号按短横线拆成5段，分别占5个单元格（如 J0792-26139-0176133-100-2）
+    const parts = (item.code || '').split('-');
+    const seg = [1,2,3,4,5].map(n => parts[n-1] || '');
+    // 万一识别出超过5段，多余部分并入第5段，避免数据丢失
+    if(parts.length > 5) seg[4] = parts.slice(4).join('-');
+    return {
+      '序号': i+1, '票名': item.name||'', '面值': item.amount||'',
+      '编号1': seg[0], '编号2': seg[1], '编号3': seg[2], '编号4': seg[3], '编号5': seg[4],
+      '中奖金额': item.prize||'', '记录时间': item.time||''
+    };
+  });
   const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [{wch:6},{wch:16},{wch:10},{wch:28},{wch:10},{wch:14}];
+  ws['!cols'] = [{wch:6},{wch:16},{wch:10},{wch:8},{wch:8},{wch:10},{wch:8},{wch:6},{wch:10},{wch:14}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '扫码记录');
   const today = new Date();
