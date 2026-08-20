@@ -266,8 +266,80 @@ print(f"\n依赖: sklearn={'✓' if HAS_SKL else '✗'}  xgb={'✓' if HAS_XGB e
 
 WINDOW = 50
 
+# ══════════════════════════════════════════════════════
+#  新增特征辅助函数（三个脚本共用，务必保持完全一致）
+#  补齐之前的空缺：遗漏统计、质合比、012路、和值尾数、重号/邻号、上期号码编码
+# ══════════════════════════════════════════════════════
+_PRIMES = set([2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79])
+
+def _omission_stats(w, pool_max, get_nums, prefix):
+    """
+    遗漏统计：之前遗漏信息只有强化学习在用，ML/DL的特征函数里一个都没有，
+    这是最明显的空缺。这里把它提炼成聚合统计量补进来。
+    - max/mean/std：整体遗漏分布的形态
+    - overdue_cnt：遗漏值超过"该号码理论平均间隔"的号码个数（即所谓"超期"号码有多少）
+    - last_draw_omit_mean：上期开出的那批号码，在开出之前平均冷了多久
+      （衡量"这期开的是热号还是冷号"，这个序列本身可能比单纯遗漏值更有结构）
+    """
+    f = {}
+    if not w:
+        for k in ['omit_max','omit_mean','omit_std','overdue_cnt','last_draw_omit_mean']:
+            f[f'{prefix}{k}'] = 0.0
+        return f
+    last_seen = {}
+    for i, rec in enumerate(w):
+        for n in get_nums(rec):
+            last_seen[n] = i
+    total = len(w)
+    omits = []
+    for n in range(1, pool_max+1):
+        omits.append(total - 1 - last_seen[n] if n in last_seen else total)
+    omits = np.array(omits, dtype=np.float32)
+    # 理论平均间隔 = 号池大小 / 每期开出个数
+    per_draw = len(get_nums(w[-1])) if w else 1
+    theoretical_gap = pool_max / max(per_draw, 1)
+    f[f'{prefix}omit_max']  = float(omits.max())
+    f[f'{prefix}omit_mean'] = float(omits.mean())
+    f[f'{prefix}omit_std']  = float(omits.std())
+    f[f'{prefix}overdue_cnt'] = float((omits > theoretical_gap).sum())
+    # 上期号码在开出前的遗漏（需要看倒数第二期为止的状态）
+    if len(w) >= 2:
+        prev_seen = {}
+        for i, rec in enumerate(w[:-1]):
+            for n in get_nums(rec):
+                prev_seen[n] = i
+        base = len(w) - 1
+        vals = [base - 1 - prev_seen[n] if n in prev_seen else base for n in get_nums(w[-1])]
+        f[f'{prefix}last_draw_omit_mean'] = float(np.mean(vals)) if vals else 0.0
+    else:
+        f[f'{prefix}last_draw_omit_mean'] = 0.0
+    return f
+
+def _prime_ratio(nums):
+    """质合比：彩票分析里的经典维度，号池内质数分布不均匀，这个比例的波动是真实统计量"""
+    return sum(1 for n in nums if n in _PRIMES) / max(len(nums), 1)
+
+def _road012_counts(nums):
+    """012路：按除3余数分三组。之前只有3D做了，双色球/快乐8同样适用"""
+    c = [0,0,0]
+    for n in nums: c[n % 3] += 1
+    return c
+
+def _repeat_neighbor(cur, prev):
+    """
+    重号：本期与上期重复的号码个数
+    邻号：本期号码中，是上期某号码±1的个数
+    这是走势图里很常见的跨期观察角度，之前只有3D零星涉及
+    """
+    if not prev: return 0, 0
+    ps = set(prev)
+    rep = len(set(cur) & ps)
+    nb = sum(1 for n in cur if (n-1 in ps or n+1 in ps) and n not in ps)
+    return rep, nb
+
 def _feat_window(w):
     return w
+
 
 def f3d(records, idx):
     w=records[max(0,idx-WINDOW):idx]
@@ -324,6 +396,26 @@ def f3d(records, idx):
         s3d=sorted(x['digits'])
         if (s3d[1]-s3d[0])==(s3d[2]-s3d[1]) and s3d[2]-s3d[0]>0: arith_cnt+=1
     f['arith_ratio'] = arith_cnt/n20
+    # ── 新增特征：遗漏统计 / 质合比 / 和值尾数 / 重号邻号 ──
+    # 3D按位处理：把每期三位数字当作号码集合（0-9映射到1-10避免0号问题）
+    f.update(_omission_stats(w, 10, lambda r: [d+1 for d in r['digits']], 'g_'))
+    primes = [_prime_ratio([d for d in x['digits'] if d>1]) for x in w[-20:]]
+    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
+    tails = [sum(x['digits']) % 10 for x in w[-20:]]
+    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
+    f['sumtail_std20']  = float(np.std(tails)) if len(tails)>1 else 0.0
+    reps, nbs = [], []
+    for i in range(1, len(w[-20:])):
+        chunk = w[-20:]
+        r, n = _repeat_neighbor(chunk[i]['digits'], chunk[i-1]['digits'])
+        reps.append(r); nbs.append(n)
+    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
+    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
+    # 上期号码原始编码：让模型能自己学出跨期关系，而不必全靠手工设计的聚合量
+    last = w[-1]['digits'] if w else [0,0,0]
+    for pi in range(3):
+        f[f'prev_pos{pi}'] = float(last[pi]) if pi < len(last) else 0.0
+
     return f
 
 
@@ -378,6 +470,32 @@ def fssq(records, idx):
     bcnt=Counter(x['blue'] for x in w[-20:])
     f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))
     f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))
+    # ── 新增特征：遗漏统计 / 质合比 / 012路 / 和值尾数 / 重号邻号 / 上期编码 ──
+    f.update(_omission_stats(w, 33, lambda r: r['red'], 'r_'))
+    f.update(_omission_stats(w, 16, lambda r: [r['blue']], 'b_'))
+    primes = [_prime_ratio(x['red']) for x in w[-20:]]
+    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
+    r0s, r1s, r2s = [], [], []
+    for x in w[-20:]:
+        c = _road012_counts(x['red']); r0s.append(c[0]); r1s.append(c[1]); r2s.append(c[2])
+    f['road0_mean20'] = float(np.mean(r0s)) if r0s else 0.0
+    f['road1_mean20'] = float(np.mean(r1s)) if r1s else 0.0
+    f['road2_mean20'] = float(np.mean(r2s)) if r2s else 0.0
+    tails = [sum(x['red']) % 10 for x in w[-20:]]
+    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
+    reps, nbs = [], []
+    chunk = w[-20:]
+    for i in range(1, len(chunk)):
+        r, n = _repeat_neighbor(chunk[i]['red'], chunk[i-1]['red'])
+        reps.append(r); nbs.append(n)
+    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
+    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
+    # 上期红球二值编码(33维)+上期蓝球，让模型自行学习跨期规律
+    prev_red = set(w[-1]['red']) if w else set()
+    for n in range(1, 34):
+        f[f'prev_r{n}'] = 1.0 if n in prev_red else 0.0
+    f['prev_blue'] = float(w[-1]['blue']) if w else 0.0
+
     return f
 
 
@@ -417,6 +535,31 @@ def fkl8(records, idx):
     cnt=Counter(n for x in w[-20:] for n in x['numbers'])
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'hz{zi+1}']=sum(cnt.get(n,0) for n in range(lo,hi+1))
+    # ── 新增特征：遗漏统计 / 质合比 / 012路 / 和值尾数 / 重号邻号 / 上期编码 ──
+    f.update(_omission_stats(w, 80, lambda r: r['numbers'], 'n_'))
+    primes = [_prime_ratio(x['numbers']) for x in w[-20:]]
+    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
+    r0s, r1s, r2s = [], [], []
+    for x in w[-20:]:
+        c = _road012_counts(x['numbers']); r0s.append(c[0]); r1s.append(c[1]); r2s.append(c[2])
+    f['road0_mean20'] = float(np.mean(r0s)) if r0s else 0.0
+    f['road1_mean20'] = float(np.mean(r1s)) if r1s else 0.0
+    f['road2_mean20'] = float(np.mean(r2s)) if r2s else 0.0
+    tails = [sum(x['numbers']) % 10 for x in w[-20:]]
+    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
+    reps, nbs = [], []
+    chunk = w[-20:]
+    for i in range(1, len(chunk)):
+        r, n = _repeat_neighbor(chunk[i]['numbers'], chunk[i-1]['numbers'])
+        reps.append(r); nbs.append(n)
+    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
+    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
+    # 快乐8每期开20个球，上期二值编码就是80维，维度偏大且信息稀疏，
+    # 改用"上期号码按四区分布"这种压缩表示，兼顾跨期信息与维度控制
+    prev = w[-1]['numbers'] if w else []
+    for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+        f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
+
     return f
 
 
