@@ -2557,6 +2557,20 @@ function renderDLResult(dlResult){
       html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
         命中分布：0位${md[0]??0}期 1位${md[1]??0}期 2位${md[2]??0}期 3位${md[3]??0}期
       </div>`;
+      // 每位候选明细：让模型对百/十/个位各自看好哪几个数字一目了然
+      if(d3Rl.pos_candidates?.length === 3){
+        const posNames = ['百位','十位','个位'];
+        html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:8px 10px;margin-bottom:8px;">`;
+        html += `<div style="margin-bottom:4px;">模型对各位的候选判断：</div>`;
+        d3Rl.pos_candidates.forEach((cands, pi)=>{
+          html += `<div style="margin:2px 0;">${posNames[pi]}：`;
+          cands.forEach(c=>{
+            html += `<span style="display:inline-block;background:#8b1a1a;color:#fff;border-radius:4px;padding:1px 6px;margin-right:5px;font-weight:700;">${c.digit}</span><span style="color:#aaa;margin-right:10px;">${c.prob}%</span>`;
+          });
+          html += `</div>`;
+        });
+        html += `</div>`;
+      }
       if(d3Rl.ppo_groups?.length){
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
         d3Rl.ppo_groups.forEach((g,i)=>{
@@ -2678,6 +2692,11 @@ function renderDLResult(dlResult){
       }
       if(ssqRl.ppo_groups?.length){
         const nBlue = ssqRl.ppo_groups[0]?.blues?.length || 1;
+        if(ssqRl.red_core?.length){
+          html += `<div style="font-size:11px;color:#888;margin-bottom:6px;">🎯 胆码（模型最确信，每注必含）：`;
+          ssqRl.red_core.forEach(n=>{ html += `<span style="display:inline-block;background:#c81e1e;color:#fff;border-radius:4px;padding:1px 7px;margin-right:5px;font-weight:700;">${String(n).padStart(2,'0')}</span>`; });
+          html += `　候选池${ssqRl.red_pool?.length||'—'}球</div>`;
+        }
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${ssqRl.ppo_groups.length}注，模型预测${nBlue}个蓝球候选）：</span></div>`;
         ssqRl.ppo_groups.forEach((g,i)=>{
           html += `<div class="rec-group">第${i+1}注：`;
