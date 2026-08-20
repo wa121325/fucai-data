@@ -1013,39 +1013,36 @@ def rec3d(records, ml, mk, om):
                 bonus = min((cnt - avg) / avg * 8, 15)  # 上限15分
                 score[pos][int(d)] = score[pos].get(int(d), 0) + bonus * 0.20
 
-    # 各位TOP5候选（带权重）
-    tops = [sorted(score[p].items(), key=lambda x: -x[1])[:5] for p in range(3)]
+    # 各位TOP3候选（带权重）
+    tops = [sorted(score[p].items(), key=lambda x: -x[1])[:3] for p in range(3)]
     candidates = [[int(v) for v, _ in t] for t in tops]
 
-    # 生成6注，确保不完全重复
-    random.seed(int(date.today().strftime('%Y%m%d')))
-    groups = []
-    seen = set()
-    attempts = 0
-    while len(groups) < 6 and attempts < 200:
-        attempts += 1
-        combo = []
-        for pos in range(3):
-            pool = [v for v, _ in tops[pos]] or list(range(10))
-            weights = [max(s, 0.1) for _, s in tops[pos]]
-            tot_w = sum(weights)
-            rv = random.uniform(0, tot_w)
-            cum = 0; chosen = pool[0]
-            for v, w in zip(pool, weights):
-                cum += w
-                if rv <= cum: chosen = v; break
-            combo.append(int(chosen))
-        key = tuple(combo)
-        if key not in seen:
-            seen.add(key)
-            groups.append(combo)
+    # 生成6注：轮转+择优（与强化学习脚本同一思路，不再用加权随机抽样）
+    # 前3注让每位的第1/2/3候选各当一次主角，保证模型看好的候选都能出场；
+    # 后3注从27种组合里按综合权重择优补足。
+    # 之所以不用纯"权重最高的Top6"：三位权重相乘时，某位第1名只要略高于第2名，
+    # 优势会被乘法放大，导致6注里那一位被同一个数字垄断，其余候选全被浪费。
+    groups, seen = [], set()
+    for i in range(3):
+        combo = [int(tops[p][i][0]) if i < len(tops[p]) else int(tops[p][0][0]) for p in range(3)]
+        if tuple(combo) not in seen:
+            seen.add(tuple(combo)); groups.append(combo)
 
-    # 如果加权随机不够6注，用候选补充
     from itertools import product
-    for b, s, g in product(candidates[0], candidates[1], candidates[2]):
+    scored_all = []
+    for bi, (b, wb) in enumerate(tops[0]):
+        for si, (s, ws) in enumerate(tops[1]):
+            for gi, (g, wg) in enumerate(tops[2]):
+                scored_all.append(([int(b), int(s), int(g)],
+                                   max(wb, .01) * max(ws, .01) * max(wg, .01)))
+    scored_all.sort(key=lambda x: -x[1])
+    for combo, _ in scored_all:
         if len(groups) >= 6: break
-        if (b, s, g) not in seen:
-            seen.add((b, s, g)); groups.append([b, s, g])
+        if tuple(combo) not in seen:
+            seen.add(tuple(combo)); groups.append(combo)
+    # 极端情况下候选不足，用各位首选补齐
+    while len(groups) < 6 and candidates[0]:
+        groups.append([candidates[0][0], candidates[1][0], candidates[2][0]])
 
     sm_m = ml.get('sum_grp', {})
     sm_pred = sm_m.get('prediction', {}).get('value', 1) if sm_m else 1
@@ -1135,58 +1132,53 @@ def recssq(records, ml, om):
         sm_m.get('prediction', {}).get('value', 1) if sm_m else 1, '中(70-99)')
     sm_val = sm_m.get('prediction', {}).get('value', 1) if sm_m else 1
 
-    # 候选红球：热号+遗漏号混合
-    pool = list(set(hot[:12] + overdue_r[:6]))
-    if len(pool) < 20:
-        pool += random.sample([n for n in range(1, 34) if n not in pool], 20 - len(pool))
+    # 给33个红球逐个打分（ML三区概率+热度+遗漏），让每个号码都有依据
+    ssq_scores = score_balls(
+        33, records, ml,
+        zone_defs=[(1,11),(12,22),(23,33)], zone_key='red_zone_dom',
+        get_nums=lambda r: r['red'])
+    base_bets, red_core, red_pool = picks_from_scores(ssq_scores, 6, 6)
 
-    random.seed(int(date.today().strftime('%Y%m%d')))
-    groups = []
-    seen = set()
-    attempts = 0
+    def _tune(picked):
+        """
+        按ML的奇偶/和值预测做定向微调：不满足时用候选池里分数最高的合适球替换，
+        而不是像以前那样"整注推倒重新随机生成"——那样号码全靠碰运气。
+        """
+        picked = list(picked)
+        ranked = [n for n, _ in sorted(ssq_scores.items(), key=lambda x: -x[1])]
+        # 奇偶调整
+        for _ in range(6):
+            cur_odd = sum(1 for n in picked if n % 2 != 0)
+            if abs(cur_odd - odd_pred) <= 1: break
+            need_odd = cur_odd < odd_pred
+            out = next((n for n in reversed(picked) if (n % 2 != 0) != need_odd), None)
+            inn = next((n for n in ranked if n not in picked and (n % 2 != 0) == need_odd), None)
+            if out is None or inn is None: break
+            picked[picked.index(out)] = inn
+        # 和值调整（0=低<70, 2=高>=100）
+        for _ in range(6):
+            cur_sum = sum(picked)
+            if sm_val == 0 and cur_sum < 100: break
+            if sm_val == 2 and cur_sum >= 70: break
+            if sm_val == 1: break
+            need_small = (sm_val == 0)
+            out = max(picked) if need_small else min(picked)
+            inn = next((n for n in ranked if n not in picked and
+                        (n < out if need_small else n > out)), None)
+            if inn is None: break
+            picked[picked.index(out)] = inn
+        return sorted(picked)
 
-    while len(groups) < 6 and attempts < 300:
-        attempts += 1
-        picked = []
-        # 三区各选2个，确保分布均衡
-        for lo, hi in [(1, 11), (12, 22), (23, 33)]:
-            zp = [n for n in pool if lo <= n <= hi] or list(range(lo, hi+1))
-            cnt_needed = 2
-            chosen_z = random.sample(zp, min(cnt_needed, len(zp)))
-            picked += chosen_z
-
-        # 如果不足6个，从池里补
-        if len(picked) < 6:
-            rem = [n for n in pool if n not in picked]
-            if not rem: rem = [n for n in range(1, 34) if n not in picked]
-            picked += random.sample(rem, 6 - len(picked))
-
-        picked = sorted(picked[:6])
-
-        # 按奇偶预测微调：如果奇数个数偏差太大，尝试换一个
-        cur_odd = sum(1 for n in picked if n % 2 != 0)
-        if abs(cur_odd - odd_pred) > 2:
-            continue  # 重新生成
-
-        # 按和值区间微调
-        cur_sum = sum(picked)
-        if sm_val == 0 and cur_sum >= 100: continue
-        if sm_val == 2 and cur_sum < 70: continue
-
+    groups, seen = [], set()
+    for i, bet in enumerate(base_bets):
+        picked = _tune(bet)
         key = tuple(picked)
-        if key not in seen:
-            seen.add(key)
-            blue = blue_top[len(groups) % len(blue_top)]
-            groups.append({'red': picked, 'blue': int(blue)})
-
-    # 不够6注则放宽限制补充
-    while len(groups) < 6:
-        picked = sorted(random.sample(pool if len(pool) >= 6 else list(range(1, 34)), 6))
-        key = tuple(picked)
-        if key not in seen:
-            seen.add(key)
-            blue = blue_top[len(groups) % len(blue_top)]
-            groups.append({'red': picked, 'blue': int(blue)})
+        if key in seen:   # 极少数情况下微调后撞车，用原始未微调的那注
+            picked = sorted(bet); key = tuple(picked)
+            if key in seen: continue
+        seen.add(key)
+        blue = blue_top[len(groups) % len(blue_top)] if blue_top else 1
+        groups.append({'red': picked, 'blue': int(blue)})
 
     return {
         'groups': groups,
@@ -1198,6 +1190,83 @@ def recssq(records, ml, om):
         'sum_pred': sm_label,
         'note': '综合ML预测+遗漏分析+三区均衡选号，按奇偶/和值约束生成6注参考，仅供娱乐。'
     }
+
+
+def score_balls(pool_max, records, ml, zone_defs, zone_key, five_defs=None, five_key=None,
+                get_nums=lambda r: r['numbers'], recent_n=30):
+    """
+    给号池里每个球算一个综合分数，让推荐的每个号码都有可追溯的依据。
+
+    ── 为什么要有这个 ──
+    原来的做法是"确定各区选几个 → random.sample 随机抽"，
+    即模型只决定了"哪个区多选几个"，具体抽中哪个球完全由随机数决定，
+    号码本身讲不出理由。现在改成每个球都有分数，按分数选。
+
+    分数构成（都是有明确含义的真实信号）：
+      · ML区间预测概率：球所在区间被模型看好的程度
+      · ML五行段预测概率：同上（快乐8专用，其它游戏传None跳过）
+      · 近期热度：近recent_n期出现次数（归一化）
+      · 遗漏程度：多久没出现（归一化），与热度互补
+    """
+    freq = Counter(n for r in records[-recent_n:] for n in get_nums(r))
+    last_seen = {}
+    for i, r in enumerate(records[-recent_n:]):
+        for n in get_nums(r): last_seen[n] = i
+    total = len(records[-recent_n:])
+
+    zone_probs_raw = (ml.get(zone_key, {}) or {}).get('prediction', {}).get('probs', {})
+    zone_w = [float(zone_probs_raw.get(str(i), 100.0/len(zone_defs))) for i in range(len(zone_defs))]
+    zmax = max(zone_w) or 1.0
+
+    if five_defs and five_key:
+        five_raw = (ml.get(five_key, {}) or {}).get('prediction', {}).get('probs', {})
+        five_w = [float(five_raw.get(str(i), 100.0/len(five_defs))) for i in range(len(five_defs))]
+        fmax = max(five_w) or 1.0
+    else:
+        five_w = None
+
+    fmax_cnt = max(freq.values()) if freq else 1
+    scores = {}
+    for n in range(1, pool_max + 1):
+        s = 0.0
+        # 权重配比说明：区间/五行预测提供"方向性"，但不能占比过高，
+        # 否则会把号码全部压到单一区间里（实测占40%时18个号码100%挤在同一区），
+        # 反而失去分布合理性。热度和遗漏提供号码个体差异，权重给足。
+        for zi, (lo, hi) in enumerate(zone_defs):
+            if lo <= n <= hi: s += 0.22 * (zone_w[zi] / zmax); break
+        if five_w:
+            for fi, (lo, hi) in enumerate(five_defs):
+                if lo <= n <= hi: s += 0.13 * (five_w[fi] / fmax); break
+        s += 0.35 * (freq.get(n, 0) / fmax_cnt)                       # 热度
+        omit = total - 1 - last_seen[n] if n in last_seen else total  # 遗漏
+        s += 0.30 * min(omit / max(total, 1), 1.0)
+        scores[n] = s
+    return scores
+
+
+def picks_from_scores(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
+    """
+    按分数选号：胆码 + 拖码轮转（与强化学习脚本同一套思路）。
+    分数最高的少数球作为胆码进每一注，其余候选轮转填充，
+    既保证号码有依据（全部按分数排序而来），又让各注之间有实质差异。
+    """
+    order = [n for n, _ in sorted(scores.items(), key=lambda x: -x[1])]
+    pool_size = min(len(order), max(n_pick + 2, int(round(n_pick * pool_mult))))
+    pool = order[:pool_size]
+    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
+    core, rest = pool[:core_n], pool[core_n:]
+    bets, ri = [], 0
+    for _ in range(n_bets):
+        sel = list(core); guard = 0
+        while len(sel) < n_pick and rest and guard < len(rest) * 3:
+            c = rest[ri % len(rest)]; ri += 1; guard += 1
+            if c not in sel: sel.append(c)
+        oi = 0
+        while len(sel) < n_pick and oi < len(order):
+            if order[oi] not in sel: sel.append(order[oi])
+            oi += 1
+        bets.append(sorted(sel))
+    return bets, sorted(core), sorted(pool)
 
 
 def reckl8(records, ml, om):
@@ -1246,32 +1315,26 @@ def reckl8(records, ml, om):
     range_label = {0:'集中(极差<60)',1:'适中(60-69)',2:'分散(≥70)'}.get(
         range_m.get('prediction',{}).get('value',1) if range_m else 1, '适中(60-69)')
 
-    # 候选池：热号+遗漏+近10期热号+ML预测主力五行段加权
-    pool = list(set([x[0] for x in freq10.most_common(12)] + hot[:18] + overdue[:10] + five_bonus))
-    if len(pool) < 35:
-        pool += random.sample([n for n in range(1, 81) if n not in pool], 35 - len(pool))
+    # 注：原来这里有个"热号+遗漏+随机补齐"的候选池，供 random.sample 抽号用。
+    # 现在选号改为按 score_balls 打分排序，该候选池已无用，一并移除。
+
+    # 给80个球逐个打分（ML区间概率+五行概率+热度+遗漏），号码从此有据可查
+    kl8_scores = score_balls(
+        80, records, ml,
+        zone_defs=[(1,20),(21,40),(41,60),(61,80)], zone_key='zone_dom',
+        five_defs=[(1,16),(17,32),(33,48),(49,64),(65,80)], five_key='five_dom',
+        get_nums=lambda r: r['numbers'])
+    _kl8_bets = {}
+    _kl8_core = {}
+    for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
+        _b, _c, _p = picks_from_scores(kl8_scores, _n, _cnt)
+        _kl8_bets[_n], _kl8_core[_n] = _b, _c
 
     def pick_balanced(n, seed_add=0):
-        """按ML区间概率权重选n个球，四区均有覆盖"""
-        random.seed(int(date.today().strftime('%Y%m%d')) + seed_add)
-        res = []
-        zone_ranges = [(1, 20), (21, 40), (41, 60), (61, 80)]
-        # 按权重分配各区数量
-        total_w = sum(zone_weights)
-        alloc = [max(1, round(n * w / total_w)) for w in zone_weights]
-        # 调整使总数等于n
-        while sum(alloc) > n: alloc[alloc.index(max(alloc))] -= 1
-        while sum(alloc) < n: alloc[alloc.index(min(alloc))] += 1
-        for (lo, hi), take in zip(zone_ranges, alloc):
-            zp = [x for x in pool if lo <= x <= hi] or list(range(lo, hi+1))
-            take = min(take, len(zp), n - len(res))
-            if take > 0: res += random.sample(zp, take)
-        # 不足则补
-        while len(res) < n:
-            ex = [x for x in range(1, 81) if x not in res]
-            if ex: res.append(random.choice(ex))
-            else: break
-        return sorted(res[:n])
+        """取该玩法第 seed_add+1 注（已按分数选出，各注间由胆码+拖码轮转保证差异）"""
+        bets = _kl8_bets.get(n, [])
+        if seed_add < len(bets): return bets[seed_add]
+        return sorted([x for x, _ in sorted(kl8_scores.items(), key=lambda t: -t[1])][:n])
 
     plays = {
         'xuan4':    {'name':'选四',     'balls':4,  'tip':'4球全中，赔率最高',
