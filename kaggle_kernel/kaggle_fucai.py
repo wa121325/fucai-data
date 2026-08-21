@@ -1115,12 +1115,26 @@ def recssq(records, ml, om):
     overdue_r = om.get('red_overdue', []) if om else []
     overdue_b = om.get('blue_overdue', []) if om else []
 
-    # 蓝球：ML概率前5
-    blue_m = ml.get('blue', {})
-    blue_probs = blue_m.get('prediction', {}).get('probs', {}) if blue_m else {}
-    blue_top = [int(k) for k, v in sorted(blue_probs.items(), key=lambda x: -x[1])[:5]]
-    if not blue_top:
-        blue_top = [x[0] for x in Counter(r['blue'] for r in records[-30:]).most_common(5)]
+    # ── 蓝球评分 ──
+    # 注意：ML的训练目标里已不含 'blue'（单个球号接近均匀噪声，训练意义不大），
+    # 所以这里不能再指望 ml.get('blue')，否则永远落到兜底的"近30期最高频前5"，
+    # 而该统计新增一期通常只让5个数字内部换序、集合不变，表现为推荐长期纹丝不动。
+    # 改为对16个蓝球逐个评分：热度 + 遗漏 + 近期趋势，三者都会随新开奖而变化。
+    blue_scores_ml = {}
+    _b_recent30 = [r['blue'] for r in records[-30:]]
+    _b_recent10 = [r['blue'] for r in records[-10:]]
+    _bf30, _bf10 = Counter(_b_recent30), Counter(_b_recent10)
+    _bmax30 = max(_bf30.values()) if _bf30 else 1
+    _bmax10 = max(_bf10.values()) if _bf10 else 1
+    _b_last = {}
+    for i, b in enumerate(_b_recent30): _b_last[b] = i
+    for b in range(1, 17):
+        s  = 0.30 * (_bf30.get(b, 0) / _bmax30)                     # 中期热度
+        s += 0.30 * (_bf10.get(b, 0) / _bmax10)                     # 近期趋势(权重同等，让新开奖更快体现)
+        omit = len(_b_recent30) - 1 - _b_last[b] if b in _b_last else len(_b_recent30)
+        s += 0.40 * min(omit / max(len(_b_recent30), 1), 1.0)       # 遗漏回补
+        blue_scores_ml[b] = s
+    blue_top = [b for b, _ in sorted(blue_scores_ml.items(), key=lambda x: -x[1])[:5]]
 
     # 奇偶预测
     odd_m = ml.get('odd', {})
