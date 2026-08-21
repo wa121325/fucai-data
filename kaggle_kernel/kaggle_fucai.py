@@ -932,19 +932,39 @@ def tgtkl8(r):
             'range_grp':0 if rng<60 else(1 if rng<70 else 2)}
 
 # 目标变量（单条记录）
+MARKOV_WINDOW = 200   # 马尔可夫只看最近N期
+
 def markov3d(records):
+    """
+    马尔可夫转移预测。
+    ── 为什么不用全部历史 ──
+    原来对几千期历史统计转移次数，新增1期对概率的影响微乎其微，
+    导致Top3连续很多天纹丝不动（实测全历史版本会连续3天给出完全相同的结果），
+    看起来像"没在学习"。现在只看最近 MARKOV_WINDOW 期，
+    并对越近的转移给越高权重，让预测能真正反映近期走势变化。
+    """
+    w = records[-MARKOV_WINDOW:] if len(records) > MARKOV_WINDOW else records
     trans=[defaultdict(Counter) for _ in range(3)]
-    for i in range(1,len(records)):
-        pv=records[i-1]['digits']; cv=records[i]['digits']
-        for p in range(3): trans[p][pv[p]][cv[p]]+=1
+    n = len(w)
+    for i in range(1, n):
+        pv=w[i-1]['digits']; cv=w[i]['digits']
+        # 时间衰减：最近的转移权重接近2.0，窗口最早的接近1.0
+        wt = 1.0 + (i / max(n-1, 1))
+        for p in range(3): trans[p][pv[p]][cv[p]] += wt
     last=records[-1]['digits']; out=[]
     for p in range(3):
         probs=trans[p][last[p]]; tot=sum(probs.values()) or 1
-        out.append({'pos':p,'from':last[p],'top3':[[int(k),round(v/tot*100,1)] for k,v in sorted(probs.items(),key=lambda x:-x[1])[:3]]})
+        out.append({'pos':p,'from':last[p],
+                    'top3':[[int(k),round(v/tot*100,1)] for k,v in sorted(probs.items(),key=lambda x:-x[1])[:3]]})
     return out
+
 def markov_blue(records):
+    w = records[-MARKOV_WINDOW:] if len(records) > MARKOV_WINDOW else records
     trans=defaultdict(Counter)
-    for i in range(1,len(records)): trans[records[i-1]['blue']][records[i]['blue']]+=1
+    n = len(w)
+    for i in range(1, n):
+        wt = 1.0 + (i / max(n-1, 1))
+        trans[w[i-1]['blue']][w[i]['blue']] += wt
     last=records[-1]['blue']; probs=trans[last]; tot=sum(probs.values()) or 1
     return [[int(k),round(v/tot*100,1)] for k,v in sorted(probs.items(),key=lambda x:-x[1])[:5]]
 
@@ -1017,6 +1037,22 @@ def rec3d(records, ml, mk, om):
     tops = [sorted(score[p].items(), key=lambda x: -x[1])[:3] for p in range(3)]
     candidates = [[int(v) for v, _ in t] for t in tops]
 
+    # 组型预测：0=豹子(三同) 1=组三(两同) 2=组六(全不同)
+    # 之前生成组合完全不看这个预测，导致出现"衍生玩法说组六(置信70%)，
+    # 但推荐里却有777(豹子)、677(组三)"这种自相矛盾的情况。
+    _gt_m = ml.get('group_type', {})
+    _gt_pred = _gt_m.get('prediction', {}).get('value', 2) if _gt_m else 2
+
+    def _gt_of(c):
+        b, s, g = c
+        if b == s == g: return 0
+        if b == s or s == g or b == g: return 1
+        return 2
+
+    def _match_gt(c):
+        """是否符合组型预测。组六预测下必须三位不同；组三预测下必须恰好两位相同。"""
+        return _gt_of(c) == _gt_pred
+
     # 生成6注：轮转+择优（与强化学习脚本同一思路，不再用加权随机抽样）
     # 前3注让每位的第1/2/3候选各当一次主角，保证模型看好的候选都能出场；
     # 后3注从27种组合里按综合权重择优补足。
@@ -1025,7 +1061,7 @@ def rec3d(records, ml, mk, om):
     groups, seen = [], set()
     for i in range(3):
         combo = [int(tops[p][i][0]) if i < len(tops[p]) else int(tops[p][0][0]) for p in range(3)]
-        if tuple(combo) not in seen:
+        if _match_gt(combo) and tuple(combo) not in seen:
             seen.add(tuple(combo)); groups.append(combo)
 
     from itertools import product
@@ -1036,6 +1072,13 @@ def rec3d(records, ml, mk, om):
                 scored_all.append(([int(b), int(s), int(g)],
                                    max(wb, .01) * max(ws, .01) * max(wg, .01)))
     scored_all.sort(key=lambda x: -x[1])
+    # 优先补入符合组型预测的组合
+    for combo, _ in scored_all:
+        if len(groups) >= 6: break
+        if _match_gt(combo) and tuple(combo) not in seen:
+            seen.add(tuple(combo)); groups.append(combo)
+    # 符合组型的候选不够时（比如组六要求三位全不同，候选池太窄凑不满），
+    # 放宽约束用其余高分组合补足，保证仍有6注
     for combo, _ in scored_all:
         if len(groups) >= 6: break
         if tuple(combo) not in seen:
