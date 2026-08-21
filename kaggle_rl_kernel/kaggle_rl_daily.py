@@ -650,6 +650,61 @@ TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 
 
+def cond_aware_picks(scores, n_pick, n_bets, conds, feat_fn, pool_mult=2.4, core_ratio=0.34, cand_n=300):
+    """
+    条件感知选号：在RL球分数的基础上，叠加"整体特征是否符合ML预测"的校验。
+
+    ── 为什么需要 ──
+    RL的状态向量里注入了ML的全部7个目标（和值区间/连号/AC值/组型等），
+    神经网络训练时确实看到了这些信息，但推荐生成时只用了它输出的"每个球的分数"，
+    模型对"这一注整体该长什么样"的判断在选号环节完全没被检验——
+    比如状态里知道该走高和值，但选出的6个球加起来到底是高是低，没人管。
+    这里补上这个校验：先按球分生成一批多样化候选，再按符合条件数择优。
+
+    conds:   {目标名: (预测值, 置信度0-1)}
+    feat_fn: 传入一注号码，返回 {目标名: 实际特征值}
+    """
+    order = np.argsort(scores)[::-1]
+    pool_size = min(len(scores), max(n_pick + 4, int(round(n_pick * pool_mult))))
+    pool = [int(order[i]) + 1 for i in range(pool_size)]
+    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
+    core, rest = pool[:core_n], pool[core_n:]
+    smax = float(np.max(scores)) or 1.0
+
+    # 用轮转起点+不同步长生成一批多样化候选（确定性，不引入随机）
+    cands, seen = [], set()
+    for start in range(len(rest)):
+        for step in (1, 2, 3):
+            sel, i, guard = list(core), start, 0
+            while len(sel) < n_pick and guard < len(rest) * 3:
+                c = rest[i % len(rest)]; i += step; guard += 1
+                if c not in sel: sel.append(c)
+            if len(sel) == n_pick:
+                key = tuple(sorted(sel))
+                if key not in seen: seen.add(key); cands.append(sorted(sel))
+            if len(cands) >= cand_n: break
+        if len(cands) >= cand_n: break
+
+    scored = []
+    for c in cands:
+        f = feat_fn(c)
+        cond_score = sum(w for k, (v, w) in conds.items() if f.get(k) == v)
+        pos_score = float(sum(scores[n-1] for n in c)) / (n_pick * abs(smax) + 1e-9)
+        scored.append((c, cond_score, pos_score))
+    scored.sort(key=lambda x: (-x[1], -x[2]))
+
+    bets, used = [], set()
+    for c, cs, ps in scored:
+        if len(bets) >= n_bets: break
+        if tuple(c) not in used: used.add(tuple(c)); bets.append(c)
+    while len(bets) < n_bets and cands:
+        for c in cands:
+            if len(bets) >= n_bets: break
+            if tuple(c) not in used: used.add(tuple(c)); bets.append(c)
+        break
+    return bets, sorted(core), sorted(pool)
+
+
 def diverse_picks(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
     """
     多样化选号：胆码 + 拖码轮转。
@@ -1213,11 +1268,47 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
 
     # 各玩法预先用"胆码+拖码轮转"算好各注（原因同双色球：
     # 按联合得分取Top-N会让各注共享同样的高分球、只在末位微调，体现不出多元化）
+    # ── 提取ML的7条预测作为选号条件（这些本来就已注入RL状态，
+    #    但之前只在训练时被"看到"，选号环节完全没检验，这里补上）──
+    def _kl8_cond_feats(c):
+        cs = sorted(c)
+        odd = sum(1 for x in c if x % 2 != 0)
+        big = sum(1 for x in c if x > 40)
+        zn = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,20),(21,40),(41,60),(61,80)]]
+        fv = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
+        tt = sum(c)
+        cg, inc = 0, False
+        for i in range(len(cs)-1):
+            if cs[i+1]-cs[i] == 1:
+                if not inc: cg += 1; inc = True
+            else: inc = False
+        rng = cs[-1] - cs[0]
+        # 分档阈值按每期20球定义，选4~10球时需按占比折算回20球口径，否则永远匹配不上
+        k = 20.0 / max(len(c), 1)
+        o20, b20, t20 = odd*k, big*k, tt*k
+        return {'odd_grp': 0 if o20 < 9 else (1 if o20 <= 11 else 2),
+                'zone_dom': int(max(range(4), key=lambda i: zn[i])),
+                'tot_grp': 0 if t20 < 640 else (1 if t20 < 820 else 2),
+                'big_grp': 0 if b20 < 9 else (1 if b20 <= 11 else 2),
+                'five_dom': int(max(range(5), key=lambda i: fv[i])),
+                'consec_grp': 0 if cg == 0 else (1 if cg <= 2 else 2),
+                'range_grp': 0 if rng < 60 else (1 if rng < 70 else 2)}
+
+    _kl8_conds = {}
+    _md = ml_pred.get('models', {})
+    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']:
+        _p = (_md.get(_k, {}) or {}).get('prediction', {})
+        if _p.get('value') is not None:
+            _kl8_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
+
     _play_bets = {}
     _play_core = {}
     for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
         if rl_order:
-            _b, _c, _p = diverse_picks(base_action, _n, _cnt)
+            if _kl8_conds:
+                _b, _c, _p = cond_aware_picks(base_action, _n, _cnt, _kl8_conds, _kl8_cond_feats)
+            else:
+                _b, _c, _p = diverse_picks(base_action, _n, _cnt)
             _play_bets[_n], _play_core[_n] = _b, _c
         else:
             _play_bets[_n], _play_core[_n] = [[] for _ in range(_cnt)], []
@@ -1228,6 +1319,10 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
         for c in _play_bets[6]: _a6 |= set(c)
         print(f"  [选六] 胆码{_play_core[6]}  3注共用到{len(_a6)}个号码"
               + (f"，两两平均重合{np.mean(_o6):.1f}/6" if _o6 else ""))
+        if _kl8_conds:
+            _cavg = sum(len([1 for k,(v,w) in _kl8_conds.items()
+                             if _kl8_cond_feats(b).get(k)==v]) for b in _play_bets[6]) / max(len(_play_bets[6]),1)
+            print(f"  [ML条件校验] 共{len(_kl8_conds)}条预测条件，选六3注平均符合{_cavg:.1f}条")
 
     def group(n, rank=0):
         """取该玩法第 rank+1 注（已由 diverse_picks 保证各注之间有实质差异）"""
@@ -1385,8 +1480,40 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
         # ── 红球：枚举组合，取模型联合得分最高的6注 ──
         # 之前是把排序切成梯队(1-6名/7-12名/…)，但第2注开始就是模型认为"第7到12好"的球，
         # 等于故意给出越来越差的推荐，这不是"最可能出现的6注"。
-        # ── 红球：胆码+拖码轮转，保证6注之间有实质差异 ──
-        red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
+        # ── 红球：胆码+拖码轮转 + ML条件校验 ──
+        # ML的7个目标(奇数/和值/AC值/主力区/间距/大数/连号)本就已注入RL状态，
+        # 但之前选号只看每个球的分数，"这一注整体符不符合那些预测"没人检验，这里补上。
+        def _ssq_cond_feats(red):
+            r = sorted(red); sm = sum(r)
+            d = set()
+            for i in range(len(r)):
+                for j in range(i+1, len(r)): d.add(r[j]-r[i])
+            ac = len(d) - (len(r)-1)
+            z = [sum(1 for x in r if x <= 11), sum(1 for x in r if 12 <= x <= 22),
+                 sum(1 for x in r if x >= 23)]
+            mg = max(r[i+1]-r[i] for i in range(len(r)-1)) if len(r) > 1 else 0
+            return {'odd': sum(1 for x in r if x % 2 != 0),
+                    'sum_grp': 0 if sm < 70 else (1 if sm < 100 else 2),
+                    'ac_grp': 0 if ac <= 2 else (1 if ac <= 5 else 2),
+                    'red_zone_dom': int(max(range(3), key=lambda i: z[i])),
+                    'gap_grp': 0 if mg <= 5 else (1 if mg <= 10 else 2),
+                    'big': sum(1 for x in r if x > 16),
+                    'consec': sum(1 for i in range(len(r)-1) if r[i+1]-r[i] == 1)}
+
+        _ssq_conds = {}
+        _md = ml_pred.get('models', {})
+        for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']:
+            _p = (_md.get(_k, {}) or {}).get('prediction', {})
+            if _p.get('value') is not None:
+                _ssq_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
+
+        if _ssq_conds:
+            red_top6, red_core, red_pool = cond_aware_picks(red_scores, 6, 6, _ssq_conds, _ssq_cond_feats)
+            _cavg = sum(len([1 for k,(v,w) in _ssq_conds.items()
+                             if _ssq_cond_feats(b).get(k)==v]) for b in red_top6) / max(len(red_top6),1)
+            print(f"  [ML条件校验] 共{len(_ssq_conds)}条预测条件，6注平均符合{_cavg:.1f}条")
+        else:
+            red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
         _ov = [len(set(red_top6[i]) & set(red_top6[j])) for i in range(6) for j in range(i+1,6)]
         _allb = set()
         for c in red_top6: _allb |= set(c)
@@ -1546,21 +1673,47 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                 idx3 = np.argsort(p)[::-1][:3]
                 top3.append([(int(d), float(p[d])) for d in idx3])
 
+            # ML的7条预测(和值/奇数/组型/大数/跨度/012路/斜连)已注入RL状态，
+            # 这里在选号环节也做校验，让"这一注整体像不像模型预测的样子"参与排序
+            def _d3_feats(c):
+                b, s, g = c; sm = b+s+g
+                tri = (b == s == g); g3 = (b == s or s == g or b == g) and not tri
+                s3 = sorted(c); rd = [x % 3 for x in c]
+                return {'sum_grp': 0 if sm <= 9 else (1 if sm <= 17 else 2),
+                        'odd': sum(1 for x in c if x % 2 != 0),
+                        'group_type': 0 if tri else (1 if g3 else 2),
+                        'big': sum(1 for x in c if x >= 5),
+                        'span_grp': (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c)-min(c)),
+                        'road_dom': max(set(rd), key=rd.count),
+                        'arith': int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0)}
+            _d3_conds = {}
+            _md3 = ml_pred.get('models', {})
+            for _k in ['sum_grp','odd','group_type','big','span_grp','road_dom','arith']:
+                _p = (_md3.get(_k, {}) or {}).get('prediction', {})
+                if _p.get('value') is not None:
+                    _d3_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
+
             picked, seen = [], set()
             for i in range(3):   # 前3注：各位第i候选组合，确保候选全覆盖
                 c = [top3[0][i][0], top3[1][i][0], top3[2][i][0]]
                 pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
                 picked.append((c, pr)); seen.add(tuple(c))
+            # 后3注：从27种组合里补足，优先选符合ML条件多的（同分再看联合概率）
             all27 = sorted(
                 (([b, s, g], pb*ps*pg)
                  for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
-                key=lambda x: -x[1])
-            for c, pr in all27:   # 后3注：按联合概率补足
+                key=lambda x: (-sum(w for k,(v,w) in _d3_conds.items() if _d3_feats(x[0]).get(k)==v),
+                               -x[1]))
+            for c, pr in all27:
                 if len(picked) >= 6: break
                 if tuple(c) not in seen:
                     picked.append((c, pr)); seen.add(tuple(c))
             picked.sort(key=lambda x: -x[1])
             groups = [c for c, _ in picked]
+            if _d3_conds:
+                _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
+                                 if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
+                print(f"  [ML条件校验] 共{len(_d3_conds)}条预测条件，6注平均符合{_cavg:.1f}条")
             top_probs = [pr for _, pr in picked]
 
             # 每位候选明细，供前端展示"模型认为这位可能是哪几个数字"
