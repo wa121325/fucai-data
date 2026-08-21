@@ -987,6 +987,30 @@ def load_ppo(game):
             return model
         except Exception as e:
             print(f"  ! 加载PPO失败: {e}，将重新训练")
+        return None
+    # 之前这里是静默返回None，导致日志里只看到"首次训练"却不知道为什么，
+    # 排查时会误以为是维度不匹配。现在把挂载目录的真实内容打出来。
+    print(f"  ! 未找到PPO模型文件: {path}")
+    if os.path.isdir(RL_MOUNTED):
+        try:
+            entries = sorted(os.listdir(RL_MOUNTED))
+            print(f"    挂载目录 {RL_MOUNTED} 实际内容({len(entries)}项): {entries[:20]}")
+            # 若被打包成 tar/zip，说明推送时的 --dir-mode 参数把文件归档了，路径自然对不上
+            arch = [e for e in entries if e.endswith(('.tar', '.tar.gz', '.zip')) and not e.endswith('_ppo.zip')]
+            if arch:
+                print(f"    ⚠️ 发现归档文件{arch}，模型可能被打包在里面而非以独立文件存在，"
+                      f"这会导致每次都读不到、退回首次训练")
+            # 递归找一层子目录，排除文件被放进子目录的可能
+            for e in entries:
+                sub = os.path.join(RL_MOUNTED, e)
+                if os.path.isdir(sub):
+                    print(f"    子目录 {e}/ 内容: {sorted(os.listdir(sub))[:20]}")
+        except Exception as e:
+            print(f"    读取挂载目录失败: {e}")
+    else:
+        print(f"    ⚠️ 挂载目录 {RL_MOUNTED} 不存在——"
+              f"说明 kernel-metadata.json 的 dataset_sources 里没挂载 {RL_DATASET_SLUG}，"
+              f"或该Dataset尚未创建")
     return None
 
 def save_ppo(model, game):
@@ -999,10 +1023,18 @@ def push_rl_dataset():
     try:
         meta = {"title":"Fucai RL Cache","id":RL_DATASET_ID,"licenses":[{"name":"CC0-1.0"}]}
         with open(f'{RL_LOCAL_DIR}/dataset-metadata.json','w') as f: json.dump(meta,f)
+        # 打印本次要上传的文件清单，便于跟下次运行时挂载目录的内容对照排查
+        try:
+            files = sorted(os.listdir(RL_LOCAL_DIR))
+            print(f"  本次上传文件({len(files)}项): {files[:20]}")
+        except Exception: pass
         env = os.environ.copy(); env['KAGGLE_API_TOKEN']=KAGGLE_TOKEN
+        # 注意：不要加 --dir-mode tar/zip。模型文件本来就直接放在 RL_LOCAL_DIR 下，
+        # 加了归档参数会把内容打包，挂载后看到的是压缩包而非 xxx_ppo.zip 独立文件，
+        # 导致 load_ppo 每次都找不到文件、静默退回"首次训练"，模型永远无法累积。
         for cmd in [
-            ['kaggle','datasets','version','-p',RL_LOCAL_DIR,'-m',f'daily-{date.today()}','--dir-mode','tar'],
-            ['kaggle','datasets','create','-p',RL_LOCAL_DIR,'--dir-mode','tar'],
+            ['kaggle','datasets','version','-p',RL_LOCAL_DIR,'-m',f'daily-{date.today()}'],
+            ['kaggle','datasets','create','-p',RL_LOCAL_DIR],
         ]:
             r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
             if r.returncode==0:
