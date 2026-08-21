@@ -1037,55 +1037,74 @@ def rec3d(records, ml, mk, om):
     tops = [sorted(score[p].items(), key=lambda x: -x[1])[:3] for p in range(3)]
     candidates = [[int(v) for v, _ in t] for t in tops]
 
-    # 组型预测：0=豹子(三同) 1=组三(两同) 2=组六(全不同)
-    # 之前生成组合完全不看这个预测，导致出现"衍生玩法说组六(置信70%)，
-    # 但推荐里却有777(豹子)、677(组三)"这种自相矛盾的情况。
-    _gt_m = ml.get('group_type', {})
-    _gt_pred = _gt_m.get('prediction', {}).get('value', 2) if _gt_m else 2
+    # ══════════════════════════════════════════════════════
+    #  条件筛选式选号
+    #  之前的做法：ML训练了7个目标(和值/奇数/组型/大数/跨度/012路/斜连)，
+    #  但生成号码时只用到其中1个做约束，其余6个要么只在页面显示成一行字、
+    #  要么完全没被碰过——等于辛苦训练出来的预测被白白丢掉。
+    #  现在改成：枚举全部1000种组合，逐个检查符合多少条ML预测，
+    #  用"符合条件数"作为主排序依据，位置概率分数作为次要依据。
+    #  不用硬性AND全部条件，是因为实测同时满足7个条件常常会筛到0种组合无解，
+    #  改成打分制既能体现每一条预测，又保证一定有结果。
+    # ══════════════════════════════════════════════════════
+    def _combo_feats(c):
+        b, s, g = c; sm = b + s + g
+        tri = (b == s == g)
+        grp3 = (b == s or s == g or b == g) and not tri
+        s3 = sorted(c); roads = [x % 3 for x in c]
+        return {
+            'sum_grp':    0 if sm <= 9 else (1 if sm <= 17 else 2),
+            'odd':        sum(1 for x in c if x % 2 != 0),
+            'group_type': 0 if tri else (1 if grp3 else 2),
+            'big':        sum(1 for x in c if x >= 5),
+            'span_grp':   (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c) - min(c)),
+            'road_dom':   max(set(roads), key=roads.count),
+            'arith':      int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0),
+        }
 
-    def _gt_of(c):
-        b, s, g = c
-        if b == s == g: return 0
-        if b == s or s == g or b == g: return 1
-        return 2
+    # 收集ML各目标的预测值与置信度（置信度作为该条件的权重，模型越有把握的条件越重要）
+    _conds = {}
+    for _k in ['sum_grp', 'odd', 'group_type', 'big', 'span_grp', 'road_dom', 'arith']:
+        _m = ml.get(_k, {})
+        _p = _m.get('prediction', {}) if _m else {}
+        if _p.get('value') is not None:
+            _conds[_k] = (int(_p['value']), float(_p.get('confidence', 50)) / 100.0)
 
-    def _match_gt(c):
-        """是否符合组型预测。组六预测下必须三位不同；组三预测下必须恰好两位相同。"""
-        return _gt_of(c) == _gt_pred
+    from itertools import product as _product
+    _scored = []
+    for _c in _product(range(10), repeat=3):
+        _cl = list(_c)
+        _f = _combo_feats(_cl)
+        # 条件得分：符合的条件按其置信度累加（模型越确信的条件，符合它越加分）
+        _cond_score = sum(w for k, (v, w) in _conds.items() if _f.get(k) == v)
+        # 位置得分：三位数字各自的ML/马尔可夫/遗漏综合分（归一化到0-1量级）
+        _pos_score = sum(score[p].get(_cl[p], 0) for p in range(3)) / 300.0
+        _scored.append((_cl, _cond_score, _pos_score))
+    # 主排序看符合的条件权重之和，次排序看位置分
+    _scored.sort(key=lambda x: (-x[1], -x[2]))
 
-    # 生成6注：轮转+择优（与强化学习脚本同一思路，不再用加权随机抽样）
-    # 前3注让每位的第1/2/3候选各当一次主角，保证模型看好的候选都能出场；
-    # 后3注从27种组合里按综合权重择优补足。
-    # 之所以不用纯"权重最高的Top6"：三位权重相乘时，某位第1名只要略高于第2名，
-    # 优势会被乘法放大，导致6注里那一位被同一个数字垄断，其余候选全被浪费。
-    groups, seen = [], set()
-    for i in range(3):
-        combo = [int(tops[p][i][0]) if i < len(tops[p]) else int(tops[p][0][0]) for p in range(3)]
-        if _match_gt(combo) and tuple(combo) not in seen:
-            seen.add(tuple(combo)); groups.append(combo)
-
-    from itertools import product
-    scored_all = []
-    for bi, (b, wb) in enumerate(tops[0]):
-        for si, (s, ws) in enumerate(tops[1]):
-            for gi, (g, wg) in enumerate(tops[2]):
-                scored_all.append(([int(b), int(s), int(g)],
-                                   max(wb, .01) * max(ws, .01) * max(wg, .01)))
-    scored_all.sort(key=lambda x: -x[1])
-    # 优先补入符合组型预测的组合
-    for combo, _ in scored_all:
+    groups, seen, seen_sets = [], set(), set()
+    # 第一轮：条件符合度优先，且要求数字集合不重复
+    # （否则会选出 235/253/325/352... 这种同3个数字的全排列，条件分一样但毫无多样性）
+    for _cl, _cs, _ps in _scored:
         if len(groups) >= 6: break
-        if _match_gt(combo) and tuple(combo) not in seen:
-            seen.add(tuple(combo)); groups.append(combo)
-    # 符合组型的候选不够时（比如组六要求三位全不同，候选池太窄凑不满），
-    # 放宽约束用其余高分组合补足，保证仍有6注
-    for combo, _ in scored_all:
+        _key, _sk = tuple(_cl), tuple(sorted(_cl))
+        if _key not in seen and _sk not in seen_sets:
+            seen.add(_key); seen_sets.add(_sk); groups.append(_cl)
+    # 第二轮：若去重后不足6注，放宽集合限制补足
+    for _cl, _cs, _ps in _scored:
         if len(groups) >= 6: break
-        if tuple(combo) not in seen:
-            seen.add(tuple(combo)); groups.append(combo)
-    # 极端情况下候选不足，用各位首选补齐
-    while len(groups) < 6 and candidates[0]:
-        groups.append([candidates[0][0], candidates[1][0], candidates[2][0]])
+        if tuple(_cl) not in seen:
+            seen.add(tuple(_cl)); groups.append(_cl)
+
+    # 记录筛选诊断信息，便于核对"到底按什么条件选出来的"
+    _match_info = []
+    for _g in groups:
+        _f = _combo_feats(_g)
+        _hit = [k for k, (v, w) in _conds.items() if _f.get(k) == v]
+        _match_info.append({'combo': _g, 'matched': _hit, 'matched_n': len(_hit)})
+    print(f"    [3D条件筛选] 共{len(_conds)}条ML预测条件，"
+          f"6注平均符合{sum(m['matched_n'] for m in _match_info)/max(len(_match_info),1):.1f}条")
 
     sm_m = ml.get('sum_grp', {})
     sm_pred = sm_m.get('prediction', {}).get('value', 1) if sm_m else 1
