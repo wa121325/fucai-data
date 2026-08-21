@@ -1213,7 +1213,43 @@ def recssq(records, ml, om):
         33, records, ml,
         zone_defs=[(1,11),(12,22),(23,33)], zone_key='red_zone_dom',
         get_nums=lambda r: r['red'])
-    base_bets, red_core, red_pool = picks_from_scores(ssq_scores, 6, 6)
+    # ── 条件筛选：把ML训练出的7个目标全部变成选号条件 ──
+    # 之前只用到 odd 和 sum_grp 两个，ac_grp/gap_grp/big/consec/red_zone_dom
+    # 要么完全没用、要么只在文案里出现，等于白训练。
+    def _ssq_feats(red):
+        r = sorted(red)
+        sm = sum(r)
+        diffs = set()
+        for i in range(len(r)):
+            for j in range(i+1, len(r)): diffs.add(r[j]-r[i])
+        ac = len(diffs) - (len(r) - 1)
+        z1 = sum(1 for x in r if x <= 11); z2 = sum(1 for x in r if 12 <= x <= 22)
+        z3 = sum(1 for x in r if x >= 23)
+        mg = max(r[i+1]-r[i] for i in range(len(r)-1)) if len(r) > 1 else 0
+        return {
+            'odd':          sum(1 for x in r if x % 2 != 0),
+            'sum_grp':      0 if sm < 70 else (1 if sm < 100 else 2),
+            'ac_grp':       0 if ac <= 2 else (1 if ac <= 5 else 2),
+            'red_zone_dom': int(max(range(3), key=lambda i: [z1,z2,z3][i])),
+            'gap_grp':      0 if mg <= 5 else (1 if mg <= 10 else 2),
+            'big':          sum(1 for x in r if x > 16),
+            'consec':       sum(1 for i in range(len(r)-1) if r[i+1]-r[i] == 1),
+        }
+
+    _ssq_conds = {}
+    for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']:
+        _m = ml.get(_k, {})
+        _p = _m.get('prediction', {}) if _m else {}
+        if _p.get('value') is not None:
+            _ssq_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50)) / 100.0)
+
+    base_bets, _ssq_detail = cond_filtered_picks(ssq_scores, 6, 6, _ssq_conds, _ssq_feats)
+    red_core = sorted(set.intersection(*[set(b) for b in base_bets])) if base_bets else []
+    red_pool = [n for n, _ in sorted(ssq_scores.items(), key=lambda x: -x[1])[:16]]
+    if _ssq_conds and base_bets:
+        _avg = sum(len([1 for k,(v,w) in _ssq_conds.items() if _ssq_feats(b).get(k)==v])
+                   for b in base_bets) / len(base_bets)
+        print(f"    [双色球条件筛选] 共{len(_ssq_conds)}条ML预测条件，6注平均符合{_avg:.1f}条")
 
     def _tune(picked):
         """
@@ -1246,12 +1282,13 @@ def recssq(records, ml, om):
         return sorted(picked)
 
     groups, seen = [], set()
+    # 注：这里原先还有一步 _tune()，按奇偶/和值预测对号码做替换微调。
+    # 现在 cond_filtered_picks 已经把奇偶、和值连同AC值、主力区、间距、大数、连号
+    # 一并作为筛选条件，再做微调只会破坏已筛好的组合，因此不再调用。
     for i, bet in enumerate(base_bets):
-        picked = _tune(bet)
+        picked = sorted(bet)
         key = tuple(picked)
-        if key in seen:   # 极少数情况下微调后撞车，用原始未微调的那注
-            picked = sorted(bet); key = tuple(picked)
-            if key in seen: continue
+        if key in seen: continue
         seen.add(key)
         blue = blue_top[len(groups) % len(blue_top)] if blue_top else 1
         groups.append({'red': picked, 'blue': int(blue)})
@@ -1318,6 +1355,71 @@ def score_balls(pool_max, records, ml, zone_defs, zone_key, five_defs=None, five
         s += 0.30 * min(omit / max(total, 1), 1.0)
         scores[n] = s
     return scores
+
+
+def cond_filtered_picks(scores, n_pick, n_bets, conds, feat_fn, pool_mult=2.6, oversample=400):
+    """
+    条件筛选式选号：让ML训练出的每个目标都真正参与选号，而不是只在页面上显示一行字。
+
+    ── 之前的问题 ──
+    双色球训练了7个目标(奇数/和值/AC值/主力区/间距/大数/连号)，选号只用到2个；
+    快乐8训练了7个目标，选号只用到2个，其余全部只是拿去生成展示文案。
+    等于辛苦训练出来的预测大部分被丢掉了。
+
+    ── 现在的做法 ──
+    1) 先用打分选出一批候选组合（保证号码本身有依据）
+    2) 逐个计算该组合的实际特征，看符合多少条ML预测
+    3) 按"符合条件的置信度之和"为主、"号码分数"为辅排序取前N注
+    不用硬性AND全部条件，因为实测同时满足7条常常无解；
+    改成加权打分，既体现每条预测，又保证一定有结果。
+
+    conds:  {目标名: (预测值, 置信度0-1)}
+    feat_fn: 传入一注号码，返回 {目标名: 实际特征值}
+    """
+    order = [n for n, _ in sorted(scores.items(), key=lambda x: -x[1])]
+    pool_size = min(len(order), max(n_pick + 4, int(round(n_pick * pool_mult))))
+    pool = order[:pool_size]
+    max_s = max(scores.values()) or 1.0
+
+    # 从候选池里采样一批组合作为候选（组合数可能极大，全枚举不现实，
+    # 用轮转起点+滑窗的确定性方式生成，避免引入随机性）
+    cands, seen = [], set()
+    step = 1
+    for start in range(len(pool)):
+        for step in range(1, 4):
+            sel = []
+            i = start
+            while len(sel) < n_pick and i < len(pool) * 3:
+                c = pool[i % len(pool)]
+                if c not in sel: sel.append(c)
+                i += step
+            if len(sel) == n_pick:
+                key = tuple(sorted(sel))
+                if key not in seen:
+                    seen.add(key); cands.append(sorted(sel))
+            if len(cands) >= oversample: break
+        if len(cands) >= oversample: break
+
+    scored = []
+    for c in cands:
+        f = feat_fn(c)
+        cond_score = sum(w for k, (v, w) in conds.items() if f.get(k) == v)
+        pos_score = sum(scores.get(n, 0) for n in c) / (n_pick * max_s)
+        scored.append((c, cond_score, pos_score))
+    scored.sort(key=lambda x: (-x[1], -x[2]))
+
+    bets, used = [], set()
+    for c, cs, ps in scored:
+        if len(bets) >= n_bets: break
+        key = tuple(c)
+        if key not in used:
+            used.add(key); bets.append(c)
+    # 不足时用纯分数排序补足
+    idx = 0
+    while len(bets) < n_bets and idx + n_pick <= len(order):
+        c = sorted(order[idx:idx + n_pick]); idx += 1
+        if tuple(c) not in used: used.add(tuple(c)); bets.append(c)
+    return bets, scored[:len(bets)]
 
 
 def picks_from_scores(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
@@ -1400,11 +1502,55 @@ def reckl8(records, ml, om):
         zone_defs=[(1,20),(21,40),(41,60),(61,80)], zone_key='zone_dom',
         five_defs=[(1,16),(17,32),(33,48),(49,64),(65,80)], five_key='five_dom',
         get_nums=lambda r: r['numbers'])
+    # ── 条件筛选：把ML训练出的7个目标全部变成选号条件 ──
+    # 之前 big_grp/consec_grp/range_grp/odd_grp 这几个预测只用来生成展示文案，
+    # 完全没参与选号，等于白训练。现在它们都成为筛选依据。
+    def _kl8_feats(c):
+        cs = sorted(c)
+        odd = sum(1 for x in c if x % 2 != 0)
+        big = sum(1 for x in c if x > 40)
+        zn = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,20),(21,40),(41,60),(61,80)]]
+        fv = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
+        tt = sum(c)
+        cg, inc = 0, False
+        for i in range(len(cs)-1):
+            if cs[i+1]-cs[i] == 1:
+                if not inc: cg += 1; inc = True
+            else: inc = False
+        rng = cs[-1] - cs[0]
+        # 注意：odd_grp/big_grp/tot_grp 的分档阈值是按每期开20球定义的，
+        # 选4~10球时数量级完全不同，直接套用会永远不匹配，
+        # 因此这几项按"占比"折算回20球口径再分档。
+        k = 20.0 / max(len(c), 1)
+        odd20, big20, tt20 = odd * k, big * k, tt * k
+        return {
+            'odd_grp':    0 if odd20 < 9 else (1 if odd20 <= 11 else 2),
+            'zone_dom':   int(max(range(4), key=lambda i: zn[i])),
+            'tot_grp':    0 if tt20 < 640 else (1 if tt20 < 820 else 2),
+            'big_grp':    0 if big20 < 9 else (1 if big20 <= 11 else 2),
+            'five_dom':   int(max(range(5), key=lambda i: fv[i])),
+            'consec_grp': 0 if cg == 0 else (1 if cg <= 2 else 2),
+            'range_grp':  0 if rng < 60 else (1 if rng < 70 else 2),
+        }
+
+    _kl8_conds = {}
+    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']:
+        _m = ml.get(_k, {})
+        _p = _m.get('prediction', {}) if _m else {}
+        if _p.get('value') is not None:
+            _kl8_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50)) / 100.0)
+
     _kl8_bets = {}
     _kl8_core = {}
     for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
-        _b, _c, _p = picks_from_scores(kl8_scores, _n, _cnt)
-        _kl8_bets[_n], _kl8_core[_n] = _b, _c
+        _b, _detail = cond_filtered_picks(kl8_scores, _n, _cnt, _kl8_conds, _kl8_feats)
+        _kl8_bets[_n] = _b
+        # 胆码：各注共同出现的号码（供展示）
+        _kl8_core[_n] = sorted(set.intersection(*[set(x) for x in _b])) if _b else []
+    if _kl8_conds and _kl8_bets.get(6):
+        _avg = sum(len([1 for k,(v,w) in _kl8_conds.items() if _kl8_feats(b).get(k)==v])
+                   for b in _kl8_bets[6]) / max(len(_kl8_bets[6]), 1)
+        print(f"    [快乐8条件筛选] 共{len(_kl8_conds)}条ML预测条件，选六3注平均符合{_avg:.1f}条")
 
     def pick_balanced(n, idx=0):
         """取该玩法第 idx+1 注（已按分数选出，各注间由胆码+拖码轮转保证差异）"""
