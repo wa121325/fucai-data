@@ -650,60 +650,6 @@ TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 
 
-def cond_aware_picks(scores, n_pick, n_bets, conds, feat_fn, pool_mult=2.4, core_ratio=0.34, cand_n=300):
-    """
-    条件感知选号：在RL球分数的基础上，叠加"整体特征是否符合ML预测"的校验。
-
-    ── 为什么需要 ──
-    RL的状态向量里注入了ML的全部7个目标（和值区间/连号/AC值/组型等），
-    神经网络训练时确实看到了这些信息，但推荐生成时只用了它输出的"每个球的分数"，
-    模型对"这一注整体该长什么样"的判断在选号环节完全没被检验——
-    比如状态里知道该走高和值，但选出的6个球加起来到底是高是低，没人管。
-    这里补上这个校验：先按球分生成一批多样化候选，再按符合条件数择优。
-
-    conds:   {目标名: (预测值, 置信度0-1)}
-    feat_fn: 传入一注号码，返回 {目标名: 实际特征值}
-    """
-    order = np.argsort(scores)[::-1]
-    pool_size = min(len(scores), max(n_pick + 4, int(round(n_pick * pool_mult))))
-    pool = [int(order[i]) + 1 for i in range(pool_size)]
-    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
-    core, rest = pool[:core_n], pool[core_n:]
-    smax = float(np.max(scores)) or 1.0
-
-    # 用轮转起点+不同步长生成一批多样化候选（确定性，不引入随机）
-    cands, seen = [], set()
-    for start in range(len(rest)):
-        for step in (1, 2, 3):
-            sel, i, guard = list(core), start, 0
-            while len(sel) < n_pick and guard < len(rest) * 3:
-                c = rest[i % len(rest)]; i += step; guard += 1
-                if c not in sel: sel.append(c)
-            if len(sel) == n_pick:
-                key = tuple(sorted(sel))
-                if key not in seen: seen.add(key); cands.append(sorted(sel))
-            if len(cands) >= cand_n: break
-        if len(cands) >= cand_n: break
-
-    scored = []
-    for c in cands:
-        f = feat_fn(c)
-        cond_score = sum(w for k, (v, w) in conds.items() if f.get(k) == v)
-        pos_score = float(sum(scores[n-1] for n in c)) / (n_pick * abs(smax) + 1e-9)
-        scored.append((c, cond_score, pos_score))
-    scored.sort(key=lambda x: (-x[1], -x[2]))
-
-    bets, used = [], set()
-    for c, cs, ps in scored:
-        if len(bets) >= n_bets: break
-        if tuple(c) not in used: used.add(tuple(c)); bets.append(c)
-    while len(bets) < n_bets and cands:
-        for c in cands:
-            if len(bets) >= n_bets: break
-            if tuple(c) not in used: used.add(tuple(c)); bets.append(c)
-        break
-    return bets, sorted(core), sorted(pool)
-
 
 def diverse_picks(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
     """
@@ -1305,10 +1251,11 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
     _play_core = {}
     for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
         if rl_order:
-            if _kl8_conds:
-                _b, _c, _p = cond_aware_picks(base_action, _n, _cnt, _kl8_conds, _kl8_cond_feats)
-            else:
-                _b, _c, _p = diverse_picks(base_action, _n, _cnt)
+            # 完全按RL自己的球分选号。ML的那些预测已经在状态向量里，
+            # 训练时模型看得见、奖励信号会告诉它有没有用；
+            # 如果在外面再套一层手写规则去筛，等于用"我认为对的"覆盖"模型学到的"，
+            # 而且"符合条件更容易中"这个假设本身从未被验证过。
+            _b, _c, _p = diverse_picks(base_action, _n, _cnt)
             _play_bets[_n], _play_core[_n] = _b, _c
         else:
             _play_bets[_n], _play_core[_n] = [[] for _ in range(_cnt)], []
@@ -1322,7 +1269,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
         if _kl8_conds:
             _cavg = sum(len([1 for k,(v,w) in _kl8_conds.items()
                              if _kl8_cond_feats(b).get(k)==v]) for b in _play_bets[6]) / max(len(_play_bets[6]),1)
-            print(f"  [ML条件校验] 共{len(_kl8_conds)}条预测条件，选六3注平均符合{_cavg:.1f}条")
+            print(f"  [诊断·仅参考] RL自选的选六3注，平均符合{_cavg:.1f}/{len(_kl8_conds)}条ML预测条件"
+                  f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
 
     def group(n, rank=0):
         """取该玩法第 rank+1 注（已由 diverse_picks 保证各注之间有实质差异）"""
@@ -1507,13 +1455,13 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             if _p.get('value') is not None:
                 _ssq_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
 
+        # 完全按RL自己的球分选号（理由同快乐8：ML预测已在状态里，不在外面二次干预）
+        red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
         if _ssq_conds:
-            red_top6, red_core, red_pool = cond_aware_picks(red_scores, 6, 6, _ssq_conds, _ssq_cond_feats)
             _cavg = sum(len([1 for k,(v,w) in _ssq_conds.items()
                              if _ssq_cond_feats(b).get(k)==v]) for b in red_top6) / max(len(red_top6),1)
-            print(f"  [ML条件校验] 共{len(_ssq_conds)}条预测条件，6注平均符合{_cavg:.1f}条")
-        else:
-            red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
+            print(f"  [诊断·仅参考] RL自选的6注，平均符合{_cavg:.1f}/{len(_ssq_conds)}条ML预测条件"
+                  f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
         _ov = [len(set(red_top6[i]) & set(red_top6[j])) for i in range(6) for j in range(i+1,6)]
         _allb = set()
         for c in red_top6: _allb |= set(c)
@@ -1699,11 +1647,11 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                 pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
                 picked.append((c, pr)); seen.add(tuple(c))
             # 后3注：从27种组合里补足，优先选符合ML条件多的（同分再看联合概率）
+            # 按RL自己的联合概率排序（不用ML条件干预，理由同上）
             all27 = sorted(
                 (([b, s, g], pb*ps*pg)
                  for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
-                key=lambda x: (-sum(w for k,(v,w) in _d3_conds.items() if _d3_feats(x[0]).get(k)==v),
-                               -x[1]))
+                key=lambda x: -x[1])
             for c, pr in all27:
                 if len(picked) >= 6: break
                 if tuple(c) not in seen:
@@ -1713,7 +1661,8 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             if _d3_conds:
                 _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
                                  if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
-                print(f"  [ML条件校验] 共{len(_d3_conds)}条预测条件，6注平均符合{_cavg:.1f}条")
+                print(f"  [诊断·仅参考] RL自选的6注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
+                      f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
             top_probs = [pr for _, pr in picked]
 
             # 每位候选明细，供前端展示"模型认为这位可能是哪几个数字"
