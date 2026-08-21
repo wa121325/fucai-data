@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-20 22:51",
+  "updated_at": "2026-08-21 03:30",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8730,
-      "updated_at": "2026-08-20 22:43",
+      "updated_at": "2026-08-21 03:21",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -831,58 +831,58 @@
       "recommendation": {
         "groups": [
           [
-            6,
-            7,
-            7
+            2,
+            8,
+            4
           ],
           [
-            7,
             9,
-            9
+            5,
+            1
           ],
           [
-            1,
-            4,
-            0
+            2,
+            8,
+            1
           ],
           [
-            6,
-            9,
-            7
+            2,
+            5,
+            4
           ],
           [
-            6,
-            4,
-            7
+            2,
+            3,
+            4
           ],
           [
-            7,
-            7,
-            7
+            2,
+            5,
+            1
           ]
         ],
         "pos_candidates": [
           [
-            6,
-            7,
-            1
+            2,
+            9,
+            8
           ],
           [
-            7,
-            9,
-            4
+            8,
+            5,
+            3
           ],
           [
-            7,
-            9,
-            0
+            4,
+            1,
+            8
           ]
         ],
         "sum_pred": "中(10-17)",
         "markov_hint": [
-          "百位→可能6、7、1",
-          "十位→可能7、9、4",
-          "个位→可能7、0、9"
+          "百位→可能2、9、8",
+          "十位→可能8、3、5",
+          "个位→可能1、4、8"
         ],
         "overdue": [
           [
@@ -936,9 +936,9 @@
         "data_count": 8730,
         "latest_date": "2026-08-20",
         "markov_hint": [
-          "百位→可能6、7、1",
-          "十位→可能7、9、4",
-          "个位→可能7、0、9"
+          "百位→可能2、9、8",
+          "十位→可能8、3、5",
+          "个位→可能1、4、8"
         ],
         "overdue": [
           [
@@ -962,41 +962,41 @@
         "sum_pred": "中(10-17)",
         "recommend_groups": [
           [
-            6,
-            7,
-            7
+            2,
+            8,
+            4
           ],
           [
-            7,
             9,
-            9
+            5,
+            1
           ],
           [
-            1,
-            4,
-            0
+            2,
+            8,
+            1
           ],
           [
-            6,
-            9,
-            7
+            2,
+            5,
+            4
           ],
           [
-            6,
-            4,
-            7
+            2,
+            3,
+            4
           ],
           [
-            7,
-            7,
-            7
+            2,
+            5,
+            1
           ]
         ]
       }
     },
     "ssq": {
       "data_count": 3493,
-      "updated_at": "2026-08-20 22:46",
+      "updated_at": "2026-08-21 03:24",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -1832,7 +1832,7 @@
               24,
               32
             ],
-            "blue": 4
+            "blue": 5
           },
           {
             "red": [
@@ -1843,7 +1843,7 @@
               11,
               32
             ],
-            "blue": 5
+            "blue": 3
           },
           {
             "red": [
@@ -1854,7 +1854,7 @@
               19,
               24
             ],
-            "blue": 1
+            "blue": 8
           },
           {
             "red": [
@@ -1865,7 +1865,7 @@
               10,
               24
             ],
-            "blue": 8
+            "blue": 11
           },
           {
             "red": [
@@ -1876,7 +1876,7 @@
               19,
               32
             ],
-            "blue": 3
+            "blue": 4
           },
           {
             "red": [
@@ -1887,15 +1887,15 @@
               24,
               27
             ],
-            "blue": 4
+            "blue": 5
           }
         ],
         "blue_recommend": [
-          4,
           5,
-          1,
+          3,
           8,
-          3
+          11,
+          4
         ],
         "hot_red": [
           24,
@@ -1922,11 +1922,11 @@
         "data_count": 3493,
         "latest_date": "2026-08-20",
         "blue_recommend": [
-          4,
           5,
-          1,
+          3,
           8,
-          3
+          11,
+          4
         ],
         "overdue_red": [],
         "overdue_blue": [],
@@ -1939,7 +1939,7 @@
     },
     "kl8": {
       "data_count": 2043,
-      "updated_at": "2026-08-20 22:49",
+      "updated_at": "2026-08-21 03:27",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -2797,18 +2797,18 @@
                 14
               ],
               [
-                2,
                 4,
-                10,
-                12,
-                14
+                14,
+                16,
+                24,
+                64
               ],
               [
-                2,
                 4,
-                10,
-                12,
-                14
+                14,
+                17,
+                18,
+                29
               ]
             ]
           },
@@ -2843,20 +2843,20 @@
                 64
               ],
               [
-                2,
                 4,
-                10,
-                12,
                 14,
-                64
+                16,
+                17,
+                24,
+                29
               ],
               [
                 2,
                 4,
-                10,
-                12,
+                7,
                 14,
-                64
+                18,
+                19
               ]
             ]
           },
@@ -2879,13 +2879,13 @@
               [
                 2,
                 4,
-                10,
-                12,
+                7,
                 14,
-                16,
-                24,
-                29,
-                64
+                17,
+                18,
+                19,
+                21,
+                74
               ]
             ]
           },
@@ -2979,10 +2979,10 @@
     }
   },
   "backtest": {
-    "date": "2026-08-20",
+    "date": "2026-08-21",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-08-20 14:10",
+        "prediction_generated_at": "2026-08-20 22:43",
         "actual_qihao": "2026222",
         "actual_date": "2026-08-20",
         "actual": [
@@ -2994,7 +2994,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-08-20 14:12",
+        "prediction_generated_at": "2026-08-20 22:46",
         "actual_qihao": "2026096",
         "actual_date": "2026-08-20",
         "actual_red": [
@@ -3008,11 +3008,11 @@
         "actual_blue": 4,
         "group_results": [
           {
-            "red_hit": 1,
+            "red_hit": 0,
             "blue_hit": 1
           },
           {
-            "red_hit": 1,
+            "red_hit": 0,
             "blue_hit": 0
           },
           {
@@ -3028,14 +3028,14 @@
             "blue_hit": 0
           },
           {
-            "red_hit": 1,
+            "red_hit": 0,
             "blue_hit": 1
           }
         ],
         "best_red_hit": 1
       },
       "kl8": {
-        "prediction_generated_at": "2026-08-20 14:15",
+        "prediction_generated_at": "2026-08-20 22:49",
         "actual_qihao": "2026222",
         "actual_date": "2026-08-20",
         "actual": [
@@ -3071,7 +3071,7 @@
                 "won": false
               },
               {
-                "hit": 1,
+                "hit": 0,
                 "balls": 4,
                 "won": false
               },
@@ -3099,26 +3099,26 @@
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 5,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 1
           },
           "xuan5_fu": {
             "name": "选五复式",
             "balls": 5,
             "groups": [
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 5,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 1
           },
           "xuan6": {
             "name": "选六",
@@ -3148,18 +3148,18 @@
             "balls": 9,
             "groups": [
               {
-                "hit": 3,
+                "hit": 1,
                 "balls": 9,
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 9,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 3
+            "best_hit": 1
           },
           "xuan10": {
             "name": "选十",
@@ -3175,7 +3175,7 @@
             "best_hit": 2
           }
         },
-        "best_hit": 3
+        "best_hit": 2
       }
     }
   },
