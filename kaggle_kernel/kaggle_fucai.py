@@ -1330,25 +1330,28 @@ def reckl8(records, ml, om):
         _b, _c, _p = picks_from_scores(kl8_scores, _n, _cnt)
         _kl8_bets[_n], _kl8_core[_n] = _b, _c
 
-    def pick_balanced(n, seed_add=0):
-        """取该玩法第 seed_add+1 注（已按分数选出，各注间由胆码+拖码轮转保证差异）"""
+    def pick_balanced(n, idx=0):
+        """取该玩法第 idx+1 注（已按分数选出，各注间由胆码+拖码轮转保证差异）"""
         bets = _kl8_bets.get(n, [])
-        if seed_add < len(bets): return bets[seed_add]
-        return sorted([x for x, _ in sorted(kl8_scores.items(), key=lambda t: -t[1])][:n])
+        if idx < len(bets): return bets[idx]
+        # 兜底：索引越界时按序错开取号，而不是每次都返回同一批分数最高的球
+        ranked = [x for x, _ in sorted(kl8_scores.items(), key=lambda t: -t[1])]
+        off = idx % max(1, len(ranked) - n)
+        return sorted(ranked[off:off + n])
 
     plays = {
         'xuan4':    {'name':'选四',     'balls':4,  'tip':'4球全中，赔率最高',
                      'groups': [pick_balanced(4, i) for i in range(3)]},
         'xuan5':    {'name':'选五',     'balls':5,  'tip':'5球，赔率与命中率均衡',
-                     'groups': [pick_balanced(5, 100+i) for i in range(3)]},
+                     'groups': [pick_balanced(5, i) for i in range(3)]},
         'xuan5_fu': {'name':'选五复式', 'balls':5,  'tip':f'8球覆盖C(8,5)={comb(8,5)}注',
-                     'groups': [pick_balanced(8, 200)]},
+                     'groups': [pick_balanced(8, 0)]},
         'xuan6':    {'name':'选六',     'balls':6,  'tip':'6球，主流推荐玩法',
-                     'groups': [pick_balanced(6, 300+i) for i in range(3)]},
+                     'groups': [pick_balanced(6, i) for i in range(3)]},
         'xuan9':    {'name':'选九',     'balls':9,  'tip':'9球，高赔率搏奖',
-                     'groups': [pick_balanced(9, 400+i) for i in range(2)]},
+                     'groups': [pick_balanced(9, i) for i in range(2)]},
         'xuan10':   {'name':'选十',     'balls':10, 'tip':'10球，最高赔率',
-                     'groups': [pick_balanced(10, 500)]},
+                     'groups': [pick_balanced(10, 0)]},
     }
 
     return {
