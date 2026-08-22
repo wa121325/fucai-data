@@ -1115,10 +1115,12 @@
           <input type="password" id="gwSecretInput" placeholder="填入你的 Gateway Secret">
         </div>
         <div class="field">
-          <label>模型（留空自动选择）</label>
-          <input type="text" id="gwModelInput" placeholder="auto" value="auto" style="font-family:monospace;font-size:12px;">
+          <label>模型（推荐 openrouter/free 自动路由）</label>
+          <input type="text" id="gwModelInput" placeholder="openrouter/free" value="openrouter/free" style="font-family:monospace;font-size:12px;">
         </div>
-        <div class="status" style="margin-bottom:10px;">Gateway 地址和密钥保存在本地浏览器，不会上传任何服务器。支持所有 OpenAI 兼容模型。</div>
+        <div class="status" style="margin-bottom:10px;">Gateway 地址和密钥保存在本地浏览器，不会上传任何服务器。<br>
+        OpenRouter 的免费模型名单经常无预警轮换（近期已有多个 <code>:free</code> 端点被下架），写死单个模型ID容易突然失效；
+        填 <code>openrouter/free</code> 会自动路由到当前可用的免费模型，不用手动跟进名单变化。</div>
         <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
         <div class="status" id="aiStatus" style="margin-top:8px;"></div>
 
@@ -1712,7 +1714,7 @@ function saveGwConfig(){
     localStorage.setItem(GW_CACHE_KEY, JSON.stringify({
       url:    document.getElementById('gwUrlInput').value.trim(),
       secret: document.getElementById('gwSecretInput').value.trim(),
-      model:  document.getElementById('gwModelInput').value.trim() || 'auto',
+      model:  document.getElementById('gwModelInput').value.trim() || 'openrouter/free',
     }));
   } catch(e){}
 }
@@ -1721,7 +1723,13 @@ function loadGwConfig(){
     const c = JSON.parse(localStorage.getItem(GW_CACHE_KEY)||'{}');
     if(c.url)    document.getElementById('gwUrlInput').value    = c.url;
     if(c.secret) document.getElementById('gwSecretInput').value = c.secret;
-    if(c.model)  document.getElementById('gwModelInput').value  = c.model;
+    // 旧配置里存的是 'auto'，但 OpenRouter 并没有这个模型ID，会直接报错。
+    // 这里自动迁移到 openrouter/free（官方的免费模型自动路由）。
+    if(c.model && c.model !== 'auto'){
+      document.getElementById('gwModelInput').value = c.model;
+    } else if(c.model === 'auto'){
+      document.getElementById('gwModelInput').value = 'openrouter/free';
+    }
   } catch(e){}
 }
 // 任意输入变化时自动保存
@@ -1948,6 +1956,31 @@ function getMlContext(type){
 }
 
 // 把AI返回的纯文本渲染成带格式的HTML
+/* 把 Gateway/OpenRouter 的 HTTP 错误翻译成能看懂的原因，
+   免费模型最常见的两种失败是"当天额度用完"和"模型被下架"，
+   笼统报个状态码没法判断该等一等还是该换模型。 */
+function explainGwError(status, body){
+  const b = (body || '').toLowerCase();
+  if(status === 429){
+    return '请求过于频繁或今日额度已用完。OpenRouter 免费额度为每分钟20次、'
+         + '每天50次（终身充值满$10后升到1000次/天）。等几分钟再试，或明天再用。';
+  }
+  if(status === 404 || b.includes('not found') || b.includes('no endpoints')){
+    return '模型不存在或已被下架。OpenRouter 的免费模型名单经常无预警轮换，'
+         + '建议把模型填成 openrouter/free 让它自动路由到当前可用的免费模型。';
+  }
+  if(status === 402 || b.includes('insufficient') || b.includes('credit')){
+    return '账户额度不足。若余额为负，连免费模型也会被拒绝，需要充值使余额回正。';
+  }
+  if(status === 401 || status === 403){
+    return '密钥无效或没有权限，请检查 Gateway Secret 是否填对、是否已过期。';
+  }
+  if(status >= 500){
+    return '上游服务暂时不可用（免费模型在高峰期容易超时或排队），稍后重试即可。';
+  }
+  return (body || '').slice(0, 150);
+}
+
 function renderAIText(text){
   return text
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -1963,7 +1996,7 @@ async function generateAIReading(){
 
   const gwUrl    = document.getElementById('gwUrlInput').value.trim();
   const gwSecret = document.getElementById('gwSecretInput').value.trim();
-  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'auto';
+  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'openrouter/free';
 
   if(!gwUrl){
     statusEl.className='status err';
@@ -2013,7 +2046,7 @@ async function generateAIReading(){
 
     if(!resp.ok){
       const err = await resp.text().catch(()=>'');
-      throw new Error(`Gateway 返回 HTTP ${resp.status}：${err.slice(0,150)}`);
+      throw new Error(`HTTP ${resp.status} — ${explainGwError(resp.status, err)}`);
     }
     const data = await resp.json();
     const text = data.choices?.[0]?.message?.content || '';
@@ -3750,7 +3783,7 @@ async function sendChatMessage(){
 
   const gwUrl    = document.getElementById('gwUrlInput').value.trim();
   const gwSecret = document.getElementById('gwSecretInput').value.trim();
-  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'auto';
+  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'openrouter/free';
 
   if(!gwUrl || !gwSecret){
     statusEl.className = 'status err';
@@ -3798,7 +3831,7 @@ async function sendChatMessage(){
 
     if(!resp.ok){
       const err = await resp.text().catch(()=>'');
-      throw new Error(`Gateway 返回 HTTP ${resp.status}：${err.slice(0,150)}`);
+      throw new Error(`HTTP ${resp.status} — ${explainGwError(resp.status, err)}`);
     }
     const data = await resp.json();
     const replyText = data.choices?.[0]?.message?.content || '';
