@@ -1107,20 +1107,21 @@
       <div class="panel" id="aiPanel" style="margin-top:18px;display:none;">
         <h2>🤖 AI 专家解读</h2>
         <div class="field">
-          <label>Gateway 地址</label>
-          <input type="text" id="gwUrlInput" placeholder="https://你的tunnel地址.trycloudflare.com" style="font-family:monospace;font-size:12px;">
+          <label>API 地址（直连 OpenRouter，也可填自建 Gateway）</label>
+          <input type="text" id="gwUrlInput" placeholder="https://openrouter.ai/api" value="https://openrouter.ai/api" style="font-family:monospace;font-size:12px;">
         </div>
         <div class="field">
-          <label>密钥（Secret）</label>
-          <input type="password" id="gwSecretInput" placeholder="填入你的 Gateway Secret">
+          <label>OpenRouter API Key</label>
+          <input type="password" id="gwSecretInput" placeholder="sk-or-v1-...">
         </div>
         <div class="field">
           <label>模型（推荐 openrouter/free 自动路由）</label>
           <input type="text" id="gwModelInput" placeholder="openrouter/free" value="openrouter/free" style="font-family:monospace;font-size:12px;">
         </div>
-        <div class="status" style="margin-bottom:10px;">Gateway 地址和密钥保存在本地浏览器，不会上传任何服务器。<br>
-        OpenRouter 的免费模型名单经常无预警轮换（近期已有多个 <code>:free</code> 端点被下架），写死单个模型ID容易突然失效；
-        填 <code>openrouter/free</code> 会自动路由到当前可用的免费模型，不用手动跟进名单变化。</div>
+        <div class="status" style="margin-bottom:10px;">
+        密钥只保存在本机浏览器，不会上传任何服务器。到 <b>openrouter.ai/keys</b> 免费注册即可获取（无需信用卡）。<br>
+        免费模型名单经常无预警轮换，写死单个模型ID容易突然失效；填 <code>openrouter/free</code> 会自动路由到当前可用的免费模型。<br>
+        免费额度：每分钟20次、每天50次（一次性充值满$10后升到1000次/天，额度永久有效）。</div>
         <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
         <div class="status" id="aiStatus" style="margin-top:8px;"></div>
 
@@ -1200,7 +1201,7 @@
       <div class="card">
         <div class="cardTitle">⚙️ AI通道设置</div>
         <div class="status" style="margin-bottom:10px;" id="chatGwHint">
-          与走势图AI解读共用同一个 Gateway 配置，若尚未填写请先在「走势图」页签设置一次。
+          与走势图AI解读共用同一份 API 配置，若尚未填写请先在「走势图」页签设置一次。
         </div>
       </div>
 
@@ -1707,7 +1708,7 @@ function renderPoster(){
 /* ═══════════════════════════════════════════════════
    AI 专家解读
 ═══════════════════════════════════════════════════ */
-// ── AI Gateway 配置 ──────────────────────────────────
+// ── AI API 配置（直连 OpenRouter 或自建 Gateway）────────
 const GW_CACHE_KEY = 'fucaiGatewayConfig';
 function saveGwConfig(){
   try{
@@ -1721,6 +1722,8 @@ function saveGwConfig(){
 function loadGwConfig(){
   try{
     const c = JSON.parse(localStorage.getItem(GW_CACHE_KEY)||'{}');
+    // 只有存过非空地址才覆盖默认值，避免把预填的 OpenRouter 地址清成空白。
+    // 用户若自建了 Gateway，填进去照样能用（本程序走的是标准 OpenAI 兼容格式）。
     if(c.url)    document.getElementById('gwUrlInput').value    = c.url;
     if(c.secret) document.getElementById('gwSecretInput').value = c.secret;
     // 旧配置里存的是 'auto'，但 OpenRouter 并没有这个模型ID，会直接报错。
@@ -2000,12 +2003,12 @@ async function generateAIReading(){
 
   if(!gwUrl){
     statusEl.className='status err';
-    statusEl.textContent='请先填入 Gateway 地址';
+    statusEl.textContent='请先填入 API 地址（直连 OpenRouter 填 https://openrouter.ai/api）';
     return;
   }
   if(!gwSecret){
     statusEl.className='status err';
-    statusEl.textContent='请先填入 Gateway 密钥（Secret）';
+    statusEl.textContent='请先填入 API Key（到 openrouter.ai/keys 免费获取）';
     return;
   }
   if(!window._trendRecords || window._trendRecords.length===0){
@@ -2015,7 +2018,7 @@ async function generateAIReading(){
   }
 
   btn.disabled=true; btn.textContent='AI 分析中…';
-  statusEl.className='status'; statusEl.textContent='正在连接 Gateway，请稍候…';
+  statusEl.className='status'; statusEl.textContent='正在请求 AI，请稍候…';
   document.getElementById('aiResult').style.display='none';
 
   try{
@@ -2035,6 +2038,10 @@ async function generateAIReading(){
       headers: {
         'Content-Type':  'application/json',
         'Authorization': 'Bearer ' + gwSecret,
+        // OpenRouter 建议带上来源标识，便于在其后台区分调用来源；
+        // 自建 Gateway 会忽略这两个头，不影响兼容性
+        'HTTP-Referer':  location.origin || 'https://github.io',
+        'X-Title':       'Fucai Analyzer',
       },
       body: JSON.stringify({
         model:       gwModel,
@@ -2403,10 +2410,10 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
         const gwSecret = document.getElementById('gwSecretInput').value.trim();
         if(gwUrl && gwSecret){
           hint.className = 'status ok';
-          hint.textContent = '✓ 已复用走势图页签的 Gateway 配置，可以直接开始对话。';
+          hint.textContent = '✓ 已复用走势图页签的 API 配置，可以直接开始对话。';
         } else {
           hint.className = 'status err';
-          hint.textContent = '⚠️ 尚未配置 Gateway，请先到「走势图」页签填写 Gateway 地址和密钥并保存。';
+          hint.textContent = '⚠️ 尚未配置 API，请先到「走势图」页签填写 OpenRouter 地址和 API Key 并保存。';
         }
       }
       if(which==='scan' && typeof loadScanFromGithub==='function') loadScanFromGithub();
@@ -3787,7 +3794,7 @@ async function sendChatMessage(){
 
   if(!gwUrl || !gwSecret){
     statusEl.className = 'status err';
-    statusEl.textContent = '请先在「走势图」页签配置好 Gateway 地址和密钥，再回来使用。';
+    statusEl.textContent = '请先在「走势图」页签配置好 API 地址和 API Key，再回来使用。';
     return;
   }
 
@@ -3820,6 +3827,10 @@ async function sendChatMessage(){
       headers: {
         'Content-Type':  'application/json',
         'Authorization': 'Bearer ' + gwSecret,
+        // OpenRouter 建议带上来源标识，便于在其后台区分调用来源；
+        // 自建 Gateway 会忽略这两个头，不影响兼容性
+        'HTTP-Referer':  location.origin || 'https://github.io',
+        'X-Title':       'Fucai Analyzer',
       },
       body: JSON.stringify({
         model:       gwModel,
