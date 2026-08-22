@@ -715,11 +715,19 @@ def save_last_trained_n(game, n):
     except Exception as e:
         print(f"  ! 记录{game}训练期数失败: {e}")
 
-def carry_over_result(game, prev_result, cur_n, last_n, reason):
-    """无新数据时，沿用上次的完整结果（字段结构保持一致，前端渲染无需感知变化）"""
-    print(f"  {game} 无新开奖数据（当前{cur_n}期，上次训练时已是{last_n}期），"
+def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason):
+    """
+    无新数据时，沿用上次的完整结果（字段结构保持一致，前端渲染无需感知变化）。
+
+    注意 game_key 与 display_name 必须分开：
+    game_key 用于拼文件名（'3d'/'ssq'/'kl8'），display_name 只用于日志展示（中文）。
+    之前两者混用，把中文名传进 save_last_trained_n，生成了带中文的文件名，
+    挂载后变成乱码（日志里看到的 '_last_trained_n.json'），
+    导致双色球的"已训练期数"永远读不回来，开奖日检测形同虚设。
+    """
+    print(f"  {display_name} 无新开奖数据（当前{cur_n}期，上次训练时已是{last_n}期），"
           f"跳过训练避免重复数据过拟合")
-    save_last_trained_n(game, cur_n)
+    save_last_trained_n(game_key, cur_n)
     if prev_result:
         carried = dict(prev_result)
         carried['skipped'] = True
@@ -988,19 +996,29 @@ def load_ppo(game):
         except Exception as e:
             print(f"  ! 加载PPO失败: {e}，将重新训练")
         return None
-    # 之前这里是静默返回None，导致日志里只看到"首次训练"却不知道为什么，
-    # 排查时会误以为是维度不匹配。现在把挂载目录的真实内容打出来。
+
+    # ── 关键兼容：Kaggle 上传 Dataset 时会自动把 .zip 解压成同名目录 ──
+    # SB3 存的是 3d_ppo.zip，挂载后变成 3d_ppo/ 目录（里面是 policy.pth 等文件），
+    # 于是 os.path.exists('3d_ppo.zip') 永远为 False，模型明明在却读不到，
+    # 每天都静默退回"首次训练"，微调机制形同虚设。
+    # 这里把解压出来的目录重新打包成 zip 再交给 SB3 加载。
+    dir_path = f'{RL_MOUNTED}/{game}_ppo'
+    if os.path.isdir(dir_path):
+        try:
+            tmp_base = f'/kaggle/working/_restore_{game}_ppo'
+            zip_path = shutil.make_archive(tmp_base, 'zip', dir_path)
+            model = PPO.load(zip_path, device='cpu')
+            print(f"  ✓ 加载已有PPO模型（从被Kaggle解压的目录 {dir_path} 重新打包恢复）")
+            return model
+        except Exception as e:
+            print(f"  ! 从解压目录恢复PPO失败: {e}，将重新训练")
+            return None
+
     print(f"  ! 未找到PPO模型文件: {path}")
     if os.path.isdir(RL_MOUNTED):
         try:
             entries = sorted(os.listdir(RL_MOUNTED))
             print(f"    挂载目录 {RL_MOUNTED} 实际内容({len(entries)}项): {entries[:20]}")
-            # 若被打包成 tar/zip，说明推送时的 --dir-mode 参数把文件归档了，路径自然对不上
-            arch = [e for e in entries if e.endswith(('.tar', '.tar.gz', '.zip')) and not e.endswith('_ppo.zip')]
-            if arch:
-                print(f"    ⚠️ 发现归档文件{arch}，模型可能被打包在里面而非以独立文件存在，"
-                      f"这会导致每次都读不到、退回首次训练")
-            # 递归找一层子目录，排除文件被放进子目录的可能
             for e in entries:
                 sub = os.path.join(RL_MOUNTED, e)
                 if os.path.isdir(sub):
@@ -1054,7 +1072,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
     # 反复训练会让模型对同一批数据过拟合，这里直接跳过
     last_trained_n = get_last_trained_n('kl8')
     if len(records) <= last_trained_n:
-        return carry_over_result('快乐8', prev_result, len(records), last_trained_n,
+        return carry_over_result('kl8', '快乐8', prev_result, len(records), last_trained_n,
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
@@ -1349,7 +1367,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     # 手动重复触发时也会命中这个检查，避免同一批数据被反复训练导致过拟合
     last_trained_n = get_last_trained_n('ssq')
     if len(records) <= last_trained_n:
-        return carry_over_result('双色球', prev_result, len(records), last_trained_n,
+        return carry_over_result('ssq', '双色球', prev_result, len(records), last_trained_n,
                                  '双色球周二/四/日开奖，本次运行无新开奖数据')
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
@@ -1559,7 +1577,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
     last_trained_n = get_last_trained_n('3d')
     if len(records) <= last_trained_n:
-        return carry_over_result('福彩3D', prev_result, len(records), last_trained_n,
+        return carry_over_result('3d', '福彩3D', prev_result, len(records), last_trained_n,
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
     ml_vec = extract_ml_prob_vec(ml_pred, '3d')
