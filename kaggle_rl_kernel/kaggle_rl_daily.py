@@ -504,7 +504,10 @@ def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=2
     if model is None:
         return None, {}
     X, idxs = [], []
-    for idx in range(seq_len, len(records)):
+    # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
+    # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
+    # 被迫回退成零向量，白白丢掉LSTM/TFM的信息。
+    for idx in range(seq_len, len(records)+1):
         seq = []; valid = True
         for j in range(idx-seq_len, idx):
             feat = feat_fn(records, j)
@@ -1174,7 +1177,12 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
     # 训练过程中神经网络自己学会了怎么综合这些信息，不再用人工权重公式二次加工跟它的判断"打架"。
     # 多组推荐用同一份RL排序做滑动窗口切分（保持100%由RL主导，不引入外部信号重新排序）；
     # 遗漏/频率/ML预测只作为"参考信息"附加展示，帮助理解RL为什么这么选，不参与决策计算。
-    idx = len(records)-1
+    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
+    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
+    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
+    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
+    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    idx = len(records)
     state = build_state(idx)
     rl_order = []
     ref_info = {}   # 参考信息：遗漏/频率/ML预测，仅用于展示说明，不影响排序
@@ -1446,7 +1454,12 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
 
     # 今日推荐：以RL自己的判断为主，红球排序滑动窗口切分成6注，遗漏/ML预测仅作参考展示
-    idx = len(records)-1
+    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
+    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
+    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
+    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
+    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    idx = len(records)
     state = build_state(idx)
     groups=[]
     ref_info = {}
@@ -1647,7 +1660,12 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
     avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
 
-    idx=len(records)-1; state=build_state(idx)
+    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
+    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
+    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
+    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
+    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    idx=len(records); state=build_state(idx)
     groups=[]; pos_candidates=[]
     if state is not None:
         # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
