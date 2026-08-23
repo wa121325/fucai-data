@@ -1146,7 +1146,9 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
     net_by_size = {n: 0.0 for n in play_sizes}
     hit_by_size = {n: 0.0 for n in play_sizes}
     games=0
-    for idx in range(start, len(records)-1):
+    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
+    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    for idx in range(start, len(records)):
         state = build_state(idx)
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
@@ -1434,7 +1436,9 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
     total=0; blue_correct=0; red_hit_dist={0:0,1:0,2:0,3:0,4:0,5:0,6:0}
-    for idx in range(start, len(records)-1):
+    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
+    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    for idx in range(start, len(records)):
         state = build_state(idx)
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
@@ -1649,7 +1653,9 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     # 回测最近30期：统计位命中数分布 + 全中次数
     start=max(SEQ_LEN+5, len(records)-30); total=0
     match_dist={0:0,1:0,2:0,3:0}
-    for idx in range(start, len(records)-1):
+    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
+    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    for idx in range(start, len(records)):
         state = build_state(idx)
         if state is None: continue
         action,_ = model.predict(state, deterministic=True)
