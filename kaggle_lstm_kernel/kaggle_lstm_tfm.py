@@ -494,9 +494,30 @@ class TransformerEncoder(nn.Module):
         logits = self.head(pooled)
         return (logits,pooled) if return_hidden else logits
 
+def build_predict_seq(records, feat_fn, seq_len=SEQ_LEN):
+    """
+    构造"预测下一期"用的输入序列：取最新的 seq_len 期特征。
+
+    ── 为什么需要单独构造 ──
+    build_seq_dataset 的最后一条样本 X[-1]，特征取的是 records[N-1-seq_len : N-1]，
+    对应的答案是 records[N-1]——也就是【最后一期，已经开出来了】。
+    如果直接拿 X[-1] 去预测，模型输出的是对已知结果的"预测"，
+    表现为推荐号码与最新开奖高度重合，看起来很准，实际毫无预测价值。
+    这里改成取 records[N-seq_len : N]（含最新一期），
+    模型输出的才是对下一期（尚未开奖）的预测。
+    """
+    if len(records) < seq_len: return None
+    seq = []
+    for j in range(len(records)-seq_len, len(records)):
+        feat = feat_fn(records, j)
+        if feat is None: return None
+        seq.append(list(feat.values()))
+    return np.array([seq], dtype=np.float32)
+
+
 def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n=50,
                    warm_start_path=None, warm_start_epochs=10, warm_start_lr=1e-4,
-                   warm_start_window=250):
+                   warm_start_window=250, predict_X=None):
     """
     分两阶段训练，避免"用训练数据本身当回测题"造成虚假高准确率：
     （神经网络训练60轮后几乎能背下训练集，若直接拿训练集本身算准确率，
@@ -578,7 +599,13 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
             hidden_states.append(h.cpu().numpy())
     hidden_states=np.vstack(hidden_states)
     with torch.no_grad():
-        logits,last_h=prod_model(Xt_full[-1:],return_hidden=True)
+        # 用专门构造的"含最新一期"的序列做预测，而不是 Xt_full[-1]。
+        # 后者对应的答案是最后一期（已开奖），拿它预测等于复述已知结果。
+        if predict_X is not None:
+            _px = torch.FloatTensor(predict_X).to(DEVICE)
+            logits, last_h = prod_model(_px, return_hidden=True)
+        else:
+            logits, last_h = prod_model(Xt_full[-1:], return_hidden=True)
         probs=torch.softmax(logits,dim=1)[0].cpu().numpy()
 
     return prod_model, hidden_states, last_h.cpu().numpy()[0], probs, acc, baseline_acc, is_warm_start
@@ -692,37 +719,55 @@ for game, (feat_fn, targets) in configs.items():
         X,y = build_seq_dataset(records, feat_fn, tgt_fn)
         if X is None or len(X)<40: continue
         nc=len(set(y.tolist())); fd=X.shape[2]
+        # 预测下一期专用序列（含最新一期），避免用 X[-1] 去"预测"已开出的最后一期
+        predict_X = build_predict_seq(records, feat_fn)
 
-        # 只有第一个目标（也是会被保存供RL使用的那份权重）需要检查热启动，
-        # 其余目标模型不做持久化，本来就每次训练一次，无需微调逻辑
-        is_primary_target = (lstm_hidden_all is None)
+        # 每个目标都检查自己的权重能否热启动（之前只有第一个目标能，其余永远从零训练）
         lstm_warm_path = tfm_warm_path = None
-        if is_primary_target:
-            prev_meta_path = f'{MOUNTED_DIR}/{game}_meta.json'
-            if os.path.exists(prev_meta_path):
-                try:
-                    with open(prev_meta_path) as f: prev_meta = json.load(f)
-                    if prev_meta.get('feat_dim') == fd and prev_meta.get('n_classes') == nc:
-                        lstm_warm_path = f'{MOUNTED_DIR}/{game}_lstm.pt'
-                        tfm_warm_path  = f'{MOUNTED_DIR}/{game}_tfm.pt'
-                    else:
-                        print(f"    ! 上次权重维度({prev_meta.get('feat_dim')},{prev_meta.get('n_classes')})与当前({fd},{nc})不一致，改为全量训练")
-                except Exception as e:
-                    print(f"    ! 读取上次meta失败({e})，改为全量训练")
+        prev_meta_path = f'{MOUNTED_DIR}/{game}_{tname}_meta.json'
+        if os.path.exists(prev_meta_path):
+            try:
+                with open(prev_meta_path) as f: prev_meta = json.load(f)
+                if prev_meta.get('feat_dim') == fd and prev_meta.get('n_classes') == nc:
+                    lstm_warm_path = f'{MOUNTED_DIR}/{game}_{tname}_lstm.pt'
+                    tfm_warm_path  = f'{MOUNTED_DIR}/{game}_{tname}_tfm.pt'
+                else:
+                    print(f"    ! 上次权重维度({prev_meta.get('feat_dim')},{prev_meta.get('n_classes')})与当前({fd},{nc})不一致，改为全量训练")
+            except Exception as e:
+                print(f"    ! 读取上次meta失败({e})，改为全量训练")
+        elif os.path.exists(f'{MOUNTED_DIR}/{game}_meta.json') and lstm_hidden_all is None:
+            # 兼容旧版本：旧Dataset只有 {game}_meta.json（第一个目标的），
+            # 首次升级时让第一个目标仍能热启动，不至于全部从零开始
+            try:
+                with open(f'{MOUNTED_DIR}/{game}_meta.json') as f: prev_meta = json.load(f)
+                if prev_meta.get('feat_dim') == fd and prev_meta.get('n_classes') == nc:
+                    lstm_warm_path = f'{MOUNTED_DIR}/{game}_lstm.pt'
+                    tfm_warm_path  = f'{MOUNTED_DIR}/{game}_tfm.pt'
+                    print(f"    (沿用旧版权重文件名热启动)")
+            except Exception: pass
 
         lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline, lstm_warm = train_encoder(
-            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20,
+            lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20, predict_X=predict_X,
             warm_start_path=lstm_warm_path)
         print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
 
         tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
-            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20,
+            lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20, predict_X=predict_X,
             warm_start_path=tfm_warm_path)
         print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
 
+        # 每个目标的权重都保存，供下次热启动微调。
+        # 之前只存第一个目标（if lstm_hidden_all is None 那个判断），
+        # 另外6个训练完就丢，下周从零再来，等于6/7的算力白烧、永远学不到东西。
+        torch.save(lstm_m.state_dict(), f'{LOCAL_DIR}/{game}_{tname}_lstm.pt')
+        torch.save(tfm_m.state_dict(),  f'{LOCAL_DIR}/{game}_{tname}_tfm.pt')
+        with open(f'{LOCAL_DIR}/{game}_{tname}_meta.json','w') as f:
+            json.dump({'feat_dim':fd,'n_classes':nc,'hidden_dim':64,'d_model':32,'seq_len':SEQ_LEN}, f)
+
         if lstm_hidden_all is None:
             lstm_hidden_all = lstm_h; tfm_hidden_all = tfm_h
-            # 保存权重（供每日RL加载，也供下次本脚本运行时热启动微调）
+            # 第一个目标额外存一份固定名字的副本：RL每天要读它的隐层状态，
+            # 用固定文件名RL才找得到（不必关心第一个目标叫什么）
             torch.save(lstm_m.state_dict(), f'{LOCAL_DIR}/{game}_lstm.pt')
             torch.save(tfm_m.state_dict(),  f'{LOCAL_DIR}/{game}_tfm.pt')
             np.save(f'{LOCAL_DIR}/{game}_lstm_hidden.npy', lstm_h)
