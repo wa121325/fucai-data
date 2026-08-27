@@ -463,48 +463,86 @@ class TransformerEncoder(nn.Module):
 
 
 def load_lstm_tfm(game, current_feat_dim=None):
-    """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重"""
+    """
+    从挂载的 Dataset 加载本周训练好的LSTM/TFM权重。
+
+    返回 (lstm_list, tfm_list, meta)：
+    ── 之前只加载 {game}_lstm.pt（每个游戏第一个训练目标的模型），
+       另外6个目标训练出来的模型RL完全接触不到，等于DL 6/7的成果被浪费。
+       现在把7个目标的模型全部加载，各自的隐层表征都会进入RL状态。
+    """
     meta_path = f'{DL_MOUNTED}/{game}_meta.json'
     if not os.path.exists(meta_path):
         print(f"  ! 找不到 {game} 的LSTM/TFM权重（先运行 kaggle_lstm_tfm.py 并挂载 {DL_DATASET_SLUG}）")
-        return None, None, None
+        return [], [], None
     with open(meta_path) as f: meta = json.load(f)
-    # 特征维度校验：若当前特征函数产出维度与保存时不一致（特征工程改了），
-    # 直接跳过旧权重，避免运行到forward()时矩阵形状不匹配而崩溃
     if current_feat_dim is not None and meta.get('feat_dim') != current_feat_dim:
         print(f"  ! {game} 的LSTM/TFM权重特征维度({meta.get('feat_dim')})与当前特征工程({current_feat_dim})不一致")
         print(f"    请先重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
-        return None, None, None
-    lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
-    lstm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu'))
-    lstm.eval()
-    tfm = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
-    tfm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu'))
-    tfm.eval()
-    return lstm, tfm, meta
+        return [], [], None
 
-def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
-    """计算指定期数idx对应的隐层状态（单次调用，仅用于最后一期推荐）"""
-    seq = []
-    for j in range(idx-seq_len, idx):
-        feat = feat_fn(records, j)
-        if feat is None: return None
-        seq.append(list(feat.values()))
-    x = torch.FloatTensor([seq])
-    with torch.no_grad():
-        _, h = model(x, return_hidden=True)
-    return h.numpy()[0]
+    # 该游戏的全部训练目标（顺序需与 kaggle_lstm_tfm.py 的 configs 一致）
+    TARGETS = {
+        '3d':  ['sum_grp','group_type','odd','big','span_grp','road_dom','arith'],
+        'ssq': ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec'],
+        'kl8': ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp'],
+    }.get(game, [])
+
+    lstm_list, tfm_list, loaded, skipped = [], [], [], []
+    for tname in TARGETS:
+        tmeta_path = f'{DL_MOUNTED}/{game}_{tname}_meta.json'
+        lpath = f'{DL_MOUNTED}/{game}_{tname}_lstm.pt'
+        tpath = f'{DL_MOUNTED}/{game}_{tname}_tfm.pt'
+        if not (os.path.exists(tmeta_path) and os.path.exists(lpath) and os.path.exists(tpath)):
+            skipped.append(tname); continue
+        try:
+            with open(tmeta_path) as f: tm = json.load(f)
+            if current_feat_dim is not None and tm.get('feat_dim') != current_feat_dim:
+                skipped.append(tname); continue
+            l = LSTMEncoder(tm['feat_dim'], hidden_dim=tm['hidden_dim'], output_dim=tm['n_classes'])
+            l.load_state_dict(torch.load(lpath, map_location='cpu')); l.eval()
+            t = TransformerEncoder(tm['feat_dim'], d_model=tm['d_model'], output_dim=tm['n_classes'])
+            t.load_state_dict(torch.load(tpath, map_location='cpu')); t.eval()
+            lstm_list.append(l); tfm_list.append(t); loaded.append(tname)
+        except Exception as e:
+            print(f"    ! 加载 {game}_{tname} 失败: {e}")
+            skipped.append(tname)
+
+    # 兼容旧版Dataset：若按目标命名的文件一个都没有，回退到只加载第一个目标的固定名文件
+    if not lstm_list:
+        try:
+            l = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
+            l.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu')); l.eval()
+            t = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
+            t.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu')); t.eval()
+            lstm_list, tfm_list = [l], [t]
+            print(f"    (旧版Dataset：仅加载到第一个目标的模型，重新运行DL脚本后可加载全部7个)")
+        except Exception as e:
+            print(f"    ! 回退加载也失败: {e}")
+            return [], [], None
+    else:
+        print(f"    ✓ 已加载 {len(loaded)}/{len(TARGETS)} 个目标的LSTM+TFM模型: {loaded}"
+              + (f"（跳过: {skipped}）" if skipped else ""))
+    return lstm_list, tfm_list, meta
 
 
-def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256):
+def precompute_hidden_multi(records, feat_fn, models, seq_len=SEQ_LEN, batch_size=256):
     """
-    批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
-    返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
+    批量计算多个模型的隐层状态，序列只构造一次供所有模型共用。
+
+    ── 为什么必须共用序列 ──
+    构造序列要对每一期调用一次特征函数，是整个流程最慢的一步（实测占500秒以上）。
+    现在要加载7个目标的模型，若每个模型各构造一遍序列，耗时会翻7倍。
+    这里改成：序列构造一次，7个模型依次前向推理（推理很快），
+    最后把各模型的隐层横向拼接成一个大向量。
+
+    返回 (hidden_array, idx_to_row)：hidden_array 每行是所有模型隐层的拼接
     """
-    if model is None:
+    models = [m for m in (models or []) if m is not None]
+    if not models:
         return None, {}
     X, idxs = [], []
-    # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
+    # 上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
     # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
     # 被迫回退成零向量，白白丢掉LSTM/TFM的信息。
     for idx in range(seq_len, len(records)+1):
@@ -518,16 +556,20 @@ def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=2
     if not X:
         return None, {}
     X = np.array(X, dtype=np.float32)
-    model.eval()
-    hs = []
-    with torch.no_grad():
-        for i in range(0, len(X), batch_size):
-            xb = torch.FloatTensor(X[i:i+batch_size])
-            _, h = model(xb, return_hidden=True)
-            hs.append(h.numpy())
-    hs = np.vstack(hs)
+
+    per_model = []
+    for model in models:
+        model.eval()
+        hs = []
+        with torch.no_grad():
+            for i in range(0, len(X), batch_size):
+                xb = torch.FloatTensor(X[i:i+batch_size])
+                _, h = model(xb, return_hidden=True)
+                hs.append(h.numpy())
+        per_model.append(np.vstack(hs))
+    hidden = np.concatenate(per_model, axis=1)   # 横向拼接所有模型的隐层
     idx_to_row = {idx:i for i,idx in enumerate(idxs)}
-    return hs, idx_to_row
+    return hidden, idx_to_row
 
 
 def precompute_omission_kl8(records):
@@ -640,6 +682,38 @@ def extract_ml_prob_vec(ml_pred, game, verbose=True):
             print(f"    ⚠️ [传统ML状态注入验证] 以下目标概率全为0，未生效={missing}（请确认 kaggle_fucai.py 已用最新目标重新跑过）")
     return np.array(vec, dtype=np.float32)
 
+def extract_dl_prob_vec(dl_pred, game, verbose=True):
+    """
+    提取深度学习(LSTM+Transformer集成)对各目标的预测概率，注入RL状态。
+
+    ── 为什么要补这个 ──
+    之前 RL 读了传统ML全部7个目标的概率，却一条深度学习的预测都没读——
+    DL 训练出的7组预测写在 dl_lstm_tfm.json 里，RL 脚本对它零引用。
+    RL 能接触到 DL 的唯一渠道是"第一个训练目标的隐层状态"，
+    另外6个目标学到的东西完全浪费。这里把 DL 的预测概率也接进来。
+
+    结构与 extract_ml_prob_vec 对称：同样7个目标，同样按概率展开成向量。
+    """
+    vec = []
+    game_data = (dl_pred or {}).get(game, {})
+    if game=='3d': tk=['sum_grp','odd','group_type','big','span_grp','road_dom','arith']; nc=[3,4,3,4,3,3,2]
+    elif game=='ssq': tk=['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']; nc=[7,3,3,3,3,7,6]
+    else: tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']; nc=[3,4,3,3,5,3,3]
+    found, missing = [], []
+    for tkey, n in zip(tk, nc):
+        probs = (game_data.get(tkey, {}) or {}).get('probs', {})
+        seg = [float(probs.get(str(i), 0.0))/100.0 for i in range(n)]
+        vec.extend(seg)
+        (found if any(v > 0 for v in seg) else missing).append(tkey)
+    if verbose:
+        if found:
+            print(f"    [深度学习状态注入验证] {game}: 成功读到概率的目标={found}")
+        if missing:
+            print(f"    ⚠️ [深度学习状态注入验证] 以下目标概率全为0，未生效={missing}"
+                  f"（若全部未生效，通常是 dl_lstm_tfm.json 尚未生成或该游戏未训练）")
+    return np.array(vec, dtype=np.float32)
+
+
 # （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
 
 # ══════════════════════════════════════════════════════
@@ -708,6 +782,76 @@ def get_last_trained_n(game):
                 with open(path) as f: return json.load(f).get('n', 0)
             except Exception: pass
     return 0
+
+def get_fixed_eval_range(game, records, size=50):
+    """
+    固定评测集：锁定一批期数作为长期不变的"考题"。
+
+    ── 为什么需要 ──
+    原来的回测窗口是 len(records)-30，每天新增1期就整体后移1期，
+    于是"模型权重"和"考题"两个变量同时在变——
+    今天净收益-1.72、明天-1.38，你根本分不清是模型进步了，
+    还是今天这30期恰好比昨天好猜。这样就永远无法验证微调有没有用。
+
+    固定评测集把考题锁死：首次运行时记录一个区间，之后一直用它。
+    这样分数变化只可能来自模型本身，跨天可比。
+    （注意：随着训练数据增长，这批期数会逐渐变成"训练集内的数据"，
+     所以它衡量的是"拟合能力是否提升"，不能当作纯样本外泛化指标——
+     真正的样本外表现仍看每日滚动回测。两者结合看才完整。）
+    """
+    path_mount = f'{RL_MOUNTED}/{game}_eval_range.json'
+    path_local = f'{RL_LOCAL_DIR}/{game}_eval_range.json'
+    rng = None
+    for p in (path_mount, path_local):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: rng = json.load(f)
+                break
+            except Exception: pass
+    if not rng or 'start' not in rng or 'end' not in rng:
+        end = len(records) - 1
+        start = max(SEQ_LEN + 30, end - size)
+        rng = {'start': start, 'end': end, 'locked_at': str(date.today()), 'locked_n': len(records)}
+        print(f"  [固定评测集] 首次锁定: 第{start}~{end}期（共{end-start}期），"
+              f"之后每天用同一批考题评测，分数变化才可比")
+    if rng['end'] > len(records) - 1:   # 数据被回滚等异常情况的保护
+        return None
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path_local, 'w') as f: json.dump(rng, f)
+    except Exception: pass
+    return rng
+
+
+def append_eval_history(game, score_dict):
+    """把每天在固定评测集上的成绩追加到历史曲线，便于观察长期是否进步"""
+    path_mount = f'{RL_MOUNTED}/{game}_eval_history.json'
+    path_local = f'{RL_LOCAL_DIR}/{game}_eval_history.json'
+    hist = []
+    for p in (path_mount, path_local):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: hist = json.load(f)
+                break
+            except Exception: pass
+    if not isinstance(hist, list): hist = []
+    hist.append({'date': str(date.today()), **score_dict})
+    hist = hist[-200:]   # 只留最近200条，避免文件无限膨胀
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path_local, 'w') as f: json.dump(hist, f, ensure_ascii=False)
+    except Exception: pass
+    # 打印近期趋势，让"有没有进步"一眼可见
+    if len(hist) >= 2:
+        key = [k for k in score_dict if k != 'date']
+        if key:
+            k = key[0]
+            vals = [h.get(k) for h in hist[-10:] if h.get(k) is not None]
+            if len(vals) >= 2:
+                trend = "↑ 上升" if vals[-1] > vals[0] else ("↓ 下降" if vals[-1] < vals[0] else "→ 持平")
+                print(f"  [固定评测集·历史] 近{len(vals)}次 {k}: {vals[0]} → {vals[-1]}  {trend}")
+    return hist
+
 
 def save_last_trained_n(game, n):
     """记录本次训练用到的数据期数，随RL_LOCAL_DIR一起推送到Dataset持久化"""
@@ -1068,7 +1212,7 @@ def push_rl_dataset():
 # ══════════════════════════════════════════════════════
 #  主流程：kl8 增量微调
 # ══════════════════════════════════════════════════════
-def run_kl8_daily(records, ml_pred, prev_result=None):
+def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
 
     # 新数据检测：快乐8虽然每天开奖，但手动重复触发时数据是完全相同的，
@@ -1079,13 +1223,16 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
+    dl_vec = extract_dl_prob_vec(dl_pred, 'kl8')
+    # 传统ML概率 + 深度学习概率 拼成统一的外部模型信号向量
+    ml_vec = np.concatenate([ml_vec, dl_vec]).astype(np.float32)
     _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
+    lstm_hidden, lstm_idx2row = precompute_hidden_multi(records, fkl8, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_multi(records, fkl8, tfm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -1098,7 +1245,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
     freq_arr = precompute_freq_kl8(records, window=30)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [频率向量] ✓已加载（80维，第二个逐球差异化信号）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
 
     def make_env():
         return IntegratedKL8Env(records, fkl8, ml_vec,
@@ -1167,6 +1314,27 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
         avg_net = round(net_by_size[n]/games,2) if games else 0
         avg_hit = round(hit_by_size[n]/games,2) if games else 0
         backtest_by_play[n] = {'avg_net_per_game':avg_net,'avg_hit':avg_hit}
+
+    # ── 固定评测集：考题锁死，只有模型在变，跨天成绩才可比 ──
+    fixed_eval = None
+    _rng = get_fixed_eval_range('kl8', records)
+    if _rng:
+        _net = 0.0; _hit = 0; _ft = 0
+        for idx in range(_rng['start'], _rng['end']+1):
+            st = build_state(idx)
+            if st is None: continue
+            act,_ = model.predict(st, deterministic=True)
+            order = np.argsort(act)[::-1]
+            sel = set(int(i)+1 for i in order[:KL8_TRAIN_N])
+            h = len(set(records[idx]['numbers']) & sel)
+            _net += calc_payout(KL8_TRAIN_N, h); _hit += h; _ft += 1
+        if _ft:
+            f_net = round(_net/_ft, 2); f_hit = round(_hit/_ft, 3)
+            print(f"  [固定评测集] 第{_rng['start']}~{_rng['end']}期({_ft}期，选六标准): "
+                  f"平均净收益{f_net}元/期  平均命中{f_hit}个")
+            append_eval_history('kl8', {'avg_net': f_net, 'avg_hit': f_hit, 'n': _ft})
+            fixed_eval = {'range': [_rng['start'], _rng['end']], 'n': _ft,
+                          'avg_net': f_net, 'avg_hit': f_hit}
 
     # 找出净收益回测表现最好的玩法（仅供参考，彩票本质随机，历史回测不代表未来）
     best_play_n = max(play_sizes, key=lambda n: backtest_by_play[n]['avg_net_per_game'])
@@ -1363,6 +1531,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             'ppo_selected':picks_by_n[6],   # 兼容旧字段
             'picks_by_n':picks_by_n,        # 兼容旧字段
             'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
+            'fixed_eval':fixed_eval,           # 固定评测集成绩（考题不变，跨天可比）
             'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
             'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
             'ref_info':ref_info,            # 参考信息：遗漏/频率/ML预测，仅供理解RL判断依据，不影响排序
@@ -1370,7 +1539,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'}
 
 
-def run_ssq_daily(records, ml_pred, prev_result=None):
+def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
 
     # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据；
@@ -1381,13 +1550,16 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
                                  '双色球周二/四/日开奖，本次运行无新开奖数据')
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
+    dl_vec = extract_dl_prob_vec(dl_pred, 'ssq')
+    # 传统ML概率 + 深度学习概率 拼成统一的外部模型信号向量
+    ml_vec = np.concatenate([ml_vec, dl_vec]).astype(np.float32)
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
+    lstm_hidden, lstm_idx2row = precompute_hidden_multi(records, fssq, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_multi(records, fssq, tfm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -1395,7 +1567,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     omit_arr = precompute_omission_ssq(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏49维")
 
     def make_env():
         return IntegratedSSQEnv(records, fssq, ml_vec,
@@ -1455,6 +1627,27 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
 
     blue_acc = round(blue_correct/total*100,1) if total else 0
     avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
+
+    # ── 固定评测集：考题锁死，只有模型在变，跨天成绩才可比 ──
+    fixed_eval = None
+    _rng = get_fixed_eval_range('ssq', records)
+    if _rng:
+        _rh = 0; _bh = 0; _ft = 0
+        for idx in range(_rng['start'], _rng['end']+1):
+            st = build_state(idx)
+            if st is None: continue
+            act,_ = model.predict(st, deterministic=True)
+            rs = act[:33]; bs = act[33:]
+            sel = set(int(i)+1 for i in np.argsort(rs)[-SSQ_RED_PICK_N:])
+            _rh += len(set(records[idx]['red']) & sel)
+            _bh += int(int(np.argmax(bs))+1 == records[idx]['blue']); _ft += 1
+        if _ft:
+            f_rh = round(_rh/_ft, 3); f_ba = round(_bh/_ft*100, 1)
+            print(f"  [固定评测集] 第{_rng['start']}~{_rng['end']}期({_ft}期): "
+                  f"红球平均命中{f_rh}个  蓝球准确率{f_ba}%")
+            append_eval_history('ssq', {'avg_red_hit': f_rh, 'blue_acc': f_ba, 'n': _ft})
+            fixed_eval = {'range': [_rng['start'], _rng['end']], 'n': _ft,
+                          'avg_red_hit': f_rh, 'blue_acc': f_ba}
     print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
 
     # 今日推荐：以RL自己的判断为主，红球排序滑动窗口切分成6注，遗漏/ML预测仅作参考展示
@@ -1582,13 +1775,13 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
             'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
-            'ppo_groups':groups,'ref_info':ref_info,
+            'ppo_groups':groups,'ref_info':ref_info,'fixed_eval':fixed_eval,
             'red_core':red_core_info,'red_pool':red_pool_info,
             'is_first_train':is_new,
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
 
 
-def run_3d_daily(records, ml_pred, prev_result=None):
+def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
 
     # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
@@ -1598,13 +1791,16 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
     ml_vec = extract_ml_prob_vec(ml_pred, '3d')
+    dl_vec = extract_dl_prob_vec(dl_pred, '3d')
+    # 传统ML概率 + 深度学习概率 拼成统一的外部模型信号向量
+    ml_vec = np.concatenate([ml_vec, dl_vec]).astype(np.float32)
     _cur_feat_dim = len(f3d(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm)
+    lstm_hidden, lstm_idx2row = precompute_hidden_multi(records, f3d, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_multi(records, f3d, tfm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -1612,7 +1808,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     omit_arr = precompute_omission_3d(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏30维")
 
     def make_env():
         return Integrated3DEnv(records, f3d, ml_vec,
@@ -1665,6 +1861,26 @@ def run_3d_daily(records, ml_pred, prev_result=None):
         match_dist[m]+=1; total+=1
     exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
     avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
+
+    # ── 固定评测集：考题锁死，只有模型在变，跨天成绩才可比 ──
+    fixed_eval = None
+    _rng = get_fixed_eval_range('3d', records)
+    if _rng:
+        _fm = {0:0,1:0,2:0,3:0}; _ft = 0
+        for idx in range(_rng['start'], _rng['end']+1):
+            st = build_state(idx)
+            if st is None: continue
+            act,_ = model.predict(st, deterministic=True)
+            p=[int(act[0]),int(act[1]),int(act[2])]; a=records[idx]['digits']
+            _fm[sum(1 for i in range(3) if p[i]==a[i])] += 1; _ft += 1
+        if _ft:
+            f_avg = round(sum(k*v for k,v in _fm.items())/_ft, 3)
+            f_exact = round(_fm[3]/_ft*100, 2)
+            print(f"  [固定评测集] 第{_rng['start']}~{_rng['end']}期({_ft}期): "
+                  f"平均命中{f_avg}位  全中率{f_exact}%")
+            append_eval_history('3d', {'avg_match': f_avg, 'exact_rate': f_exact, 'n': _ft})
+            fixed_eval = {'range': [_rng['start'], _rng['end']], 'n': _ft,
+                          'avg_match': f_avg, 'exact_rate': f_exact}
 
     # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
     # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
@@ -1775,6 +1991,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'ppo_pred':pred,'ppo_groups':groups,
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
+            'fixed_eval':fixed_eval,           # 固定评测集成绩（考题不变，跨天可比）
             'is_first_train':is_new,
             'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
 
@@ -1794,6 +2011,21 @@ if raw_ml:
     try: ml_preds = json.loads(raw_ml).get('predictions', {})
     except Exception: pass
 
+# 读取深度学习的预测结果（LSTM+TFM集成），与传统ML概率一起注入RL状态。
+# 之前RL对这份数据零引用，DL训练出的7组预测完全没被用上。
+raw_dl = gh_raw('dl_lstm_tfm.json')
+dl_preds = {}
+if raw_dl:
+    try:
+        _dlj = json.loads(raw_dl)
+        dl_preds = _dlj.get('results', _dlj) or {}
+        print(f"✓ 已读取深度学习预测 dl_lstm_tfm.json（覆盖游戏: {list(dl_preds.keys())}）")
+    except Exception as e:
+        print(f"! 解析 dl_lstm_tfm.json 失败: {e}，本次RL状态将不含DL预测")
+else:
+    print("! 未读取到 dl_lstm_tfm.json，本次RL状态将不含DL预测"
+          "（首次运行或DL周训练尚未产出时属正常）")
+
 # 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
 # （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
 raw_prev_rl = gh_raw('dl_rl.json')
@@ -1812,7 +2044,7 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
     ml_pred = ml_preds.get(game, {})
     try:
         # 三个游戏统一传入上次结果，无新数据时沿用，避免重复训练造成过拟合
-        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game))
+        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game), dl_preds)
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"{game} 失败: {e}")
@@ -1825,7 +2057,7 @@ push_rl_dataset()
 out = {
     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     'method': 'PPO强化学习（每日增量微调）',
-    'state_composition': '原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量',
+    'state_composition': '原始特征 + 传统ML概率 + 深度学习概率 + LSTM隐层 + Transformer特征 + 遗漏向量',
     'results': rl_results,
 }
 out_json = json.dumps(out, ensure_ascii=False, indent=2)
