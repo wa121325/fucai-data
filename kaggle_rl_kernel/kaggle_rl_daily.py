@@ -737,6 +737,65 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 HOLDOUT_N = 30
 
 
+def segment_ablation(eval_with_mask, segments, base_score, label):
+    """
+    消融诊断：逐段把输入清零，看holdout评分掉多少。掉得越多说明这段越重要。
+
+    ── 为什么需要 ──
+    现在状态向量有800~980维，其中隐层占70~80%，但这个配比是人为定的、没有验证依据。
+    参数量已是训练样本的6倍，很可能大部分维度只是在制造过拟合。
+    与其靠猜，不如直接测：把某段清零，模型表现掉多少，就是这段的真实贡献。
+
+    eval_with_mask: 接受 (start, end) 元组，把该区间清零后评估，返回分数
+    segments: [(名称, 起点, 终点), ...]
+    """
+    print(f"    [{label} 消融诊断] 基准分 {base_score:.4f}，逐段清零后的变化：")
+    results = []
+    for name, s, e in segments:
+        if e <= s: continue
+        try:
+            score = eval_with_mask((s, e))
+        except Exception as ex:
+            print(f"      {name}: 评估失败({ex})"); continue
+        drop = base_score - score
+        results.append({'segment': name, 'dims': e-s, 'score_without': round(score,4),
+                        'contribution': round(drop,4)})
+        if drop > 0.02:   mark = "★ 重要"
+        elif drop > 0.005: mark = "· 有一点作用"
+        elif drop > -0.005: mark = "  几乎无影响"
+        else:              mark = "⚠ 去掉反而更好"
+        print(f"      {name:12}({e-s:4}维)  清零后{score:.4f}  贡献{drop:+.4f}  {mark}")
+    return results
+
+
+def append_history(game, record):
+    """
+    把每日成绩追加到历史文件，随RL_LOCAL_DIR一起持久化到Dataset。
+    单日数字波动大说明不了问题，长期曲线才能看出模型是在进步、退步还是原地打转。
+    """
+    path = f'{RL_LOCAL_DIR}/{game}_history.json'
+    hist = []
+    for p in (f'{RL_MOUNTED}/{game}_history.json', path):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: hist = json.load(f)
+                break
+            except Exception: pass
+    hist.append(record)
+    hist = hist[-400:]   # 只保留最近400条，避免文件无限膨胀
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False, indent=1)
+        if len(hist) >= 3:
+            recent = [h.get('holdout_score') for h in hist[-10:] if h.get('holdout_score') is not None]
+            if len(recent) >= 3:
+                trend = "上升" if recent[-1] > sum(recent[:-1])/len(recent[:-1]) else "下降/持平"
+                print(f"    [历史] 已积累{len(hist)}天记录，近{len(recent)}天holdout评分: "
+                      f"{[round(r,3) for r in recent]}  趋势: {trend}")
+    except Exception as e:
+        print(f"    ! 写入历史失败: {e}")
+
+
 def train_with_early_stop(model, total_steps, eval_fn, label,
                           n_chunks=8, patience=3, reset_timesteps=True):
     """
@@ -1347,12 +1406,14 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return np.clip(state, -5, 5)
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
-    def _eval_holdout():
-        """在holdout上评分：选六标准的平均命中球数"""
+    def _eval_holdout(mask=None):
+        """在holdout上评分：选六标准的平均命中球数。mask=(s,e)时清零该区间用于消融诊断。"""
         tot, n = 0, 0
         for i in range(_hold_start, len(records)):
             st = build_state(i)
             if st is None: continue
+            if mask is not None:
+                st = st.copy(); st[mask[0]:mask[1]] = 0.0
             a,_ = model.predict(st, deterministic=True)
             sel = set(int(x)+1 for x in np.argsort(a)[-6:])
             tot += len(set(records[i]['numbers']) & sel); n += 1
@@ -1367,6 +1428,16 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 20000, _eval_holdout, '快乐8微调', n_chunks=5, patience=2, reset_timesteps=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
+
+    _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+    _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
+    _p = 0; _segs = []
+    for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
+                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 80), ('频率', 80)]:
+        _segs.append((_nm, _p, _p+_d)); _p += _d
+    _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8')
+    append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
     save_ppo(model, 'kl8')
 
@@ -1682,12 +1753,14 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
-    def _eval_holdout():
-        """在holdout上评分：红球平均命中数 + 蓝球命中率加权（蓝球权重0.5注）"""
+    def _eval_holdout(mask=None):
+        """在holdout上评分：红球平均命中数 + 蓝球命中率加权。mask=(s,e)时清零该区间。"""
         tot, n = 0.0, 0
         for i in range(_hold_start, len(records)):
             st = build_state(i)
             if st is None: continue
+            if mask is not None:
+                st = st.copy(); st[mask[0]:mask[1]] = 0.0
             a,_ = model.predict(st, deterministic=True)
             rsel = set(int(x)+1 for x in np.argsort(a[:33])[-SSQ_RED_PICK_N:])
             bpred = int(np.argmax(a[33:]))+1
@@ -1704,6 +1777,16 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 15000, _eval_holdout, '双色球微调', n_chunks=5, patience=2, reset_timesteps=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
+
+    _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+    _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
+    _p = 0; _segs = []
+    for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
+                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 49)]:
+        _segs.append((_nm, _p, _p+_d)); _p += _d
+    _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球')
+    append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
     save_ppo(model, 'ssq')
 
@@ -1943,12 +2026,15 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
-    def _eval_holdout():
-        """在holdout（模型未训练过的最近30期）上评分：平均命中位数"""
+    def _eval_holdout(mask=None):
+        """在holdout（模型未训练过的最近30期）上评分：平均命中位数。
+           mask=(start,end) 时把状态向量该区间清零，用于消融诊断。"""
         tot, n = 0, 0
         for i in range(_hold_start, len(records)):
             st = build_state(i)
             if st is None: continue
+            if mask is not None:
+                st = st.copy(); st[mask[0]:mask[1]] = 0.0
             a,_ = model.predict(st, deterministic=True)
             act = records[i]['digits']
             tot += sum(1 for k in range(3) if int(a[k])==act[k]); n += 1
@@ -1964,6 +2050,17 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型未训练过，样本外）")
+
+    # ── 消融诊断：测量状态向量各段的真实贡献 ──
+    _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+    _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
+    _p = 0; _segs = []
+    for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
+                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 30)]:
+        _segs.append((_nm, _p, _p+_d)); _p += _d
+    _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D')
+    append_history('3d', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                          'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
     save_ppo(model, '3d')
 
