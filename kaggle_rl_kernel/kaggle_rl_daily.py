@@ -14,7 +14,7 @@ kaggle_rl_daily.py
 Kaggle Secrets: GH_TOKEN, GH_REPO, KAGGLE_TOKEN
 Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
 """
-import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy
+import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy, math
 from datetime import datetime, date
 from collections import Counter, defaultdict
 from itertools import combinations
@@ -824,6 +824,84 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 # ══════════════════════════════════════════════════════
 HOLDOUT_N = 30
 
+# ══════════════════════════════════════════════════════
+#  熵系数（entropy coefficient）
+#  PPO的损失里有一项 -ent_coef × entropy，也就是"分布越均匀奖励越高"。
+#  这个值当初调高是为了防止策略过早收敛到单一偏好（比如快乐8"全是大号"那次），
+#  但副作用是：3D在 ent_coef=0.03 下，保持均匀分布能白拿 0.03×ln(10)=0.069 的奖励，
+#  而做出判断的期望收益只有 0.1 分且方差极大 —— 模型算下来发现"不判断"更划算，
+#  于是熵稳定在 2.303（=ln10，完全均匀），输出各候选都是 10.0~10.1%，毫无区分度。
+#
+#  现在大幅调低，让模型有动力去做判断。注意这是把双刃剑：
+#  如果数据里真没规律，降低熵只会让模型"自信地瞎猜"——
+#  所以必须靠 holdout 评分来验证，而不是看分布拉开了就以为变好了。
+# ══════════════════════════════════════════════════════
+ENT_COEF = {
+    '3d':  0.005,   # 原 0.03
+    'ssq': 0.005,   # 原 0.02
+    'kl8': 0.010,   # 原 0.05（快乐8要从80球选6个，保留稍多探索）
+}
+
+
+def report_entropy(model, state, game, n_out=None):
+    """
+    打印策略输出的熵，用来判断模型到底有没有在做判断。
+    熵接近理论最大值 = 完全均匀 = 什么都没学到。
+    """
+    try:
+        obs_t, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+        with torch.no_grad():
+            dist = model.policy.get_distribution(obs_t)
+        dl = getattr(dist, 'distribution', None)
+        if isinstance(dl, (list, tuple)):     # MultiDiscrete：每位一个分布
+            ents, maxent = [], math.log(10)
+            for d in dl:
+                p = d.probs.detach().cpu().numpy()[0]
+                ents.append(float(-(p*np.log(p+1e-12)).sum()))
+            print(f"    [熵监控] {game} 各位熵: {[round(e,3) for e in ents]}  "
+                  f"（均匀={maxent:.3f}，越低说明模型越有主见）")
+            return ents
+        else:                                  # Box：高斯策略，看动作标准差
+            std = float(np.mean(np.exp(model.policy.log_std.detach().cpu().numpy())))
+            print(f"    [熵监控] {game} 动作分布平均标准差: {std:.4f}（越小说明模型越确定）")
+            return [std]
+    except Exception as e:
+        print(f"    [熵监控] 读取失败: {e}")
+        return []
+
+# ══════════════════════════════════════════════════════
+#  状态向量分段开关：改这里就能开关任意一类信号，不用动其它代码。
+#  False = 该段清零（维度保留，不触发模型重训，随时可切回来）
+#
+#  ⚠️ 判断依据要看历史积累，别只看单日消融数字：
+#     holdout只有30期×3位=90次预测，随机波动的标准差就有3次命中，
+#     单日消融里 ±0.1 的"贡献"只有约1个标准差，属于纯噪声，
+#     明天再跑很可能正负号就翻转了。
+#     应该看 {game}_history.json 里连续多天的 ablation 记录，
+#     某段连续一两周都是负贡献，关掉才有依据。
+# ══════════════════════════════════════════════════════
+SEGMENT_ENABLE = {
+    '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+            '遗漏':False,   # ← 按消融结果关闭（单日数据，若后续证明是噪声可改回True）
+            '马尔可夫':True, '贝叶斯':True},
+    'ssq': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+            '遗漏':True, '马尔可夫':True, '贝叶斯':True},
+    'kl8': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+            '遗漏':True, '频率':True, '马尔可夫':True, '贝叶斯':True},
+}
+
+
+def apply_segment_switches(state, segs, game):
+    """按 SEGMENT_ENABLE 把关闭的段清零。维度不变，所以切换开关不会触发模型重训。"""
+    sw = SEGMENT_ENABLE.get(game, {})
+    if all(sw.get(n, True) for n, _, _ in segs):
+        return state
+    state = state.copy()
+    for name, s, e in segs:
+        if not sw.get(name, True):
+            state[s:e] = 0.0
+    return state
+
 
 def segment_ablation(eval_with_mask, segments, base_score, label):
     """
@@ -1179,10 +1257,24 @@ class IntegratedKL8Env(gym.Env):
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
         state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr,mk,by)
+        state = apply_segment_switches(state, self._segs(), 'kl8')
         # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
         state = state.copy()
         state[-160:] *= self.PERBALL_WEIGHT
         return np.clip(state, -5, 5)
+
+    def _segs(self):
+        lh = self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0
+        th = self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0
+        mk = self.mk_arr.shape[1] if self.mk_arr is not None else 0
+        by = self.by_arr.shape[1] if self.by_arr is not None else 0
+        base = self.state_dim-len(self.ml_vec)-lh-th-160-mk-by
+        dims = [('走势特征', base), ('ML+DL概率', len(self.ml_vec)),
+                ('LSTM隐层', lh), ('TFM隐层', th), ('遗漏', 80), ('频率', 80),
+                ('马尔可夫', mk), ('贝叶斯', by)]
+        out, p = [], 0
+        for n, d in dims: out.append((n, p, p+d)); p += d
+        return out
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1257,7 +1349,21 @@ class IntegratedSSQEnv(gym.Env):
 
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
+        return apply_segment_switches(st, self._segs(), 'ssq')
+
+    def _segs(self):
+        lh = self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0
+        th = self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0
+        mk = self.mk_arr.shape[1] if self.mk_arr is not None else 0
+        by = self.by_arr.shape[1] if self.by_arr is not None else 0
+        base = self.state_dim-len(self.ml_vec)-lh-th-49-mk-by
+        dims = [('走势特征', base), ('ML+DL概率', len(self.ml_vec)),
+                ('LSTM隐层', lh), ('TFM隐层', th), ('遗漏', 49),
+                ('马尔可夫', mk), ('贝叶斯', by)]
+        out, p = [], 0
+        for n, d in dims: out.append((n, p, p+d)); p += d
+        return out
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1340,7 +1446,21 @@ class Integrated3DEnv(gym.Env):
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
+        return apply_segment_switches(st, self._segs(), '3d')
+
+    def _segs(self):
+        """状态向量各段的起止下标，供开关和消融诊断共用"""
+        lh = self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0
+        th = self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0
+        mk = self.mk_arr.shape[1] if self.mk_arr is not None else 0
+        by = self.by_arr.shape[1] if self.by_arr is not None else 0
+        dims = [('走势特征', self.state_dim-len(self.ml_vec)-lh-th-30-mk-by),
+                ('ML+DL概率', len(self.ml_vec)), ('LSTM隐层', lh), ('TFM隐层', th),
+                ('遗漏', 30), ('马尔可夫', mk), ('贝叶斯', by)]
+        out, p = [], 0
+        for n, d in dims: out.append((n, p, p+d)); p += d
+        return out
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1493,13 +1613,17 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     if not is_new:
         try:
             model.set_env(vec_env)
+            # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
+            # 否则改了 ENT_COEF 对已有模型完全不生效，还以为调了参
+            model.ent_coef = ENT_COEF['kl8']
+            print(f"    熵系数已设为 {model.ent_coef}")
         except Exception as e:
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
     if is_new:
         print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=ENT_COEF['kl8'],
                     verbose=0, device='cpu')
 
     def build_state(idx):
@@ -1539,6 +1663,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 20000, _eval_holdout, '快乐8微调', n_chunks=5, patience=2, reset_timesteps=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
+    _st_probe = build_state(len(records))
+    if _st_probe is not None: report_entropy(model, _st_probe, '快乐8')
 
     _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
@@ -1549,6 +1675,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         _segs.append((_nm, _p, _p+_d)); _p += _d
     _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8')
     append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                          'ent_coef': ENT_COEF['kl8'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
     save_ppo(model, 'kl8')
@@ -1853,13 +1980,17 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     if not is_new:
         try:
             model.set_env(vec_env)
+            # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
+            # 否则改了 ENT_COEF 对已有模型完全不生效，还以为调了参
+            model.ent_coef = ENT_COEF['ssq']
+            print(f"    熵系数已设为 {model.ent_coef}")
         except Exception as e:
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
     if is_new:
         print("  首次训练（15万步，红球33全量打分+蓝球联合优化）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=ENT_COEF['ssq'],
                     verbose=0, device='cpu')
 
     def build_state(idx):
@@ -1870,7 +2001,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
+        return apply_segment_switches(st, _segs_3d, '3d')
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
     def _eval_holdout(mask=None):
@@ -1897,6 +2029,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 15000, _eval_holdout, '双色球微调', n_chunks=5, patience=2, reset_timesteps=False)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
+    _st_probe = build_state(len(records))
+    if _st_probe is not None: report_entropy(model, _st_probe, '双色球')
 
     _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
@@ -1907,6 +2041,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         _segs.append((_nm, _p, _p+_d)); _p += _d
     _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球')
     append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                          'ent_coef': ENT_COEF['ssq'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
     save_ppo(model, 'ssq')
@@ -2135,14 +2270,29 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     if not is_new:
         try:
             model.set_env(vec_env)
+            # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
+            # 否则改了 ENT_COEF 对已有模型完全不生效，还以为调了参
+            model.ent_coef = ENT_COEF['3d']
+            print(f"    熵系数已设为 {model.ent_coef}")
         except Exception as e:
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
     if is_new:
         print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
-                    n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
+                    n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=ENT_COEF['3d'],
                     verbose=0, device='cpu')
+
+    # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
+    _lh_d = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+    _th_d = tfm_hidden.shape[1] if tfm_hidden is not None else 0
+    _segs_3d, _pp = [], 0
+    for _n, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
+                   ('LSTM隐层', _lh_d), ('TFM隐层', _th_d), ('遗漏', 30),
+                   ('马尔可夫', mk_arr.shape[1]), ('贝叶斯', by_arr.shape[1])]:
+        _segs_3d.append((_n, _pp, _pp+_d)); _pp += _d
+    _off = [n for n,_,_ in _segs_3d if not SEGMENT_ENABLE.get('3d',{}).get(n, True)]
+    if _off: print(f"  [分段开关] 3D 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
     # build_state 提前定义：早停要在每段训练后用它在holdout上评分
     def build_state(idx):
@@ -2182,15 +2332,10 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
           f"回测第{_hold_start}~{len(records)-1}期（模型未训练过，样本外）")
 
     # ── 消融诊断：测量状态向量各段的真实贡献 ──
-    _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-    _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
-    _p = 0; _segs = []
-    for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 30),
-                    ('马尔可夫', 30), ('贝叶斯', 20)]:
-        _segs.append((_nm, _p, _p+_d)); _p += _d
+    _segs = _segs_3d; _p = _segs[-1][2]
     _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D')
     append_history('3d', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                          'ent_coef': ENT_COEF['3d'],
                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
     save_ppo(model, '3d')
@@ -2319,6 +2464,10 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
             ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
             print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
+            _emax = math.log(10)
+            _gap = _emax - float(np.mean(ent))
+            print(f"    → 平均熵比均匀低 {_gap:.4f}（ent_coef={ENT_COEF['3d']}）："
+                  + ("模型开始做判断了 ✓" if _gap > 0.05 else "仍接近均匀，模型没有形成偏好 ⚠"))
         except Exception as e:
             print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
             action,_ = model.predict(state, deterministic=True)
