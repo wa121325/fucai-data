@@ -14,7 +14,7 @@ kaggle_rl_daily.py
 Kaggle Secrets: GH_TOKEN, GH_REPO, KAGGLE_TOKEN
 Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
 """
-import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess
+import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy
 from datetime import datetime, date
 from collections import Counter, defaultdict
 from itertools import combinations
@@ -726,6 +726,66 @@ KL8_PAYOUT = {(1,1):2,(2,2):10,(3,3):30,(4,4):100,(4,3):3,(4,2):1,(5,5):200,(5,4
 TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 
+# ══════════════════════════════════════════════════════
+#  回测隔离：训练时必须留出最后 HOLDOUT_N 期不参与训练，专门用于回测。
+#  之前训练覆盖全部历史（第25期~最后一期），而回测取的是最近30期——
+#  也就是说回测数据本身就在训练集里，考的是"背没背下来"而不是"会不会做新题"。
+#  修好模型持久化后，训练量逐日累积，模型开始记住这30期，
+#  回测平均命中从0.28位(=随机)涨到0.57位，这不是学会了，是背下来了。
+#  留出holdout后，回测才是真正的样本外评估。
+# ══════════════════════════════════════════════════════
+HOLDOUT_N = 30
+
+
+def train_with_early_stop(model, total_steps, eval_fn, label,
+                          n_chunks=8, patience=3, reset_timesteps=True):
+    """
+    分段训练 + 早停 + 保留最佳模型。
+
+    ── 解决的问题 ──
+    原来是"练满N步 → 无条件保存 → 覆盖昨天的模型"，
+    哪怕今天练完变差了也照样覆盖，而且旧版本被覆盖后不可恢复。
+    强化学习训练不稳定是常态，很容易越练越差。
+
+    ── 现在的做法 ──
+    把训练预算切成 n_chunks 段，每段结束后在 holdout（模型未训练过的最近30期）
+    上评估一次，记录最佳分数和当时的权重快照。
+    连续 patience 段没有提升就提前停止，最后把权重恢复到最佳状态再返回。
+
+    eval_fn: 无参函数，返回一个分数（越大越好）
+    返回 (model, best_score, history)
+    """
+    chunk = max(1, total_steps // n_chunks)
+    best_score = eval_fn()
+    best_params = copy.deepcopy(model.get_parameters())
+    history = [round(best_score, 4)]
+    no_improve = 0
+    print(f"    [{label}] 训练前基准分: {best_score:.4f}")
+
+    for i in range(n_chunks):
+        model.learn(total_timesteps=chunk,
+                    reset_num_timesteps=(reset_timesteps and i == 0),
+                    progress_bar=False)
+        score = eval_fn()
+        history.append(round(score, 4))
+        if score > best_score:
+            best_score = score
+            best_params = copy.deepcopy(model.get_parameters())
+            no_improve = 0
+            flag = "✓ 新最佳"
+        else:
+            no_improve += 1
+            flag = f"（无提升 {no_improve}/{patience}）"
+        print(f"    [{label}] 第{i+1}/{n_chunks}段({chunk}步) 评分 {score:.4f}  {flag}")
+        if no_improve >= patience:
+            print(f"    [{label}] 连续{patience}段无提升，提前停止（省下{(n_chunks-i-1)*chunk}步）")
+            break
+
+    # 恢复到最佳状态，而不是用最后一段训练完的（可能更差的）权重
+    model.set_parameters(best_params)
+    print(f"    [{label}] 已恢复到最佳权重，最终评分 {best_score:.4f}  评分轨迹: {history}")
+    return model, best_score, history
+
 
 
 def diverse_picks(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
@@ -935,6 +995,8 @@ class IntegratedKL8Env(gym.Env):
                  tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
+        # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
+        self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.freq_arr=freq_arr
@@ -987,7 +1049,7 @@ class IntegratedKL8Env(gym.Env):
         shaping = (hit / n_sel) * 0.3
         reward = net/(TICKET_PRICE*100) + shaping
         self.idx+=1
-        terminated=(self.idx>=len(self.records)-1)
+        terminated=(self.idx >= self.train_end)
         obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
         return obs, reward, terminated, False, {'hit':hit,'n_sel':n_sel,'net':net}
 
@@ -1008,6 +1070,8 @@ class IntegratedSSQEnv(gym.Env):
                  tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
+        # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
+        self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr
@@ -1069,7 +1133,7 @@ class IntegratedSSQEnv(gym.Env):
         reward += (red_hit / 6.0) * 0.5
 
         self.idx+=1
-        terminated=(self.idx>=len(self.records)-1)
+        terminated=(self.idx >= self.train_end)
         obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
         return obs, reward, terminated, False, {'red_hit':red_hit,'blue_hit':blue_hit,
                                                   'red_selected':red_selected,'blue_pred':blue_pred}
@@ -1087,6 +1151,8 @@ class Integrated3DEnv(gym.Env):
                  tfm_hidden, tfm_idx2row, omit_arr):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
+        # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
+        self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr
@@ -1126,7 +1192,7 @@ class Integrated3DEnv(gym.Env):
         if matches == 3:
             reward += 20.0   # 三位全中（直选）额外大奖励
         self.idx+=1
-        terminated=(self.idx>=len(self.records)-1)
+        terminated=(self.idx >= self.train_end)
         obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
         return obs, reward, terminated, False, {'pred':pred,'actual':actual,'matches':matches}
 
@@ -1266,13 +1332,6 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                     n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
                     verbose=0, device='cpu')
-        model.learn(total_timesteps=200000, progress_bar=False)
-    else:
-        print("  增量微调（2万步，基于最新数据）…")
-        model.learn(total_timesteps=20000, reset_num_timesteps=False, progress_bar=False)
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-
-    save_ppo(model, 'kl8')
 
     def build_state(idx):
         feat = fkl8(records, idx)
@@ -1286,6 +1345,30 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         state = state.copy()
         state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
         return np.clip(state, -5, 5)
+
+    _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
+    def _eval_holdout():
+        """在holdout上评分：选六标准的平均命中球数"""
+        tot, n = 0, 0
+        for i in range(_hold_start, len(records)):
+            st = build_state(i)
+            if st is None: continue
+            a,_ = model.predict(st, deterministic=True)
+            sel = set(int(x)+1 for x in np.argsort(a)[-6:])
+            tot += len(set(records[i]['numbers']) & sel); n += 1
+        return tot/n if n else 0.0
+
+    if is_new:
+        model, _best, _hist = train_with_early_stop(
+            model, 200000, _eval_holdout, '快乐8首训', n_chunks=8, patience=3, reset_timesteps=True)
+    else:
+        print("  增量微调（2万步，带早停）…")
+        model, _best, _hist = train_with_early_stop(
+            model, 20000, _eval_holdout, '快乐8微调', n_chunks=5, patience=2, reset_timesteps=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
+
+    save_ppo(model, 'kl8')
 
     # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
     start = max(SEQ_LEN+30, len(records)-30)
@@ -1588,13 +1671,6 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                     n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
                     verbose=0, device='cpu')
-        model.learn(total_timesteps=150000, progress_bar=False)
-    else:
-        print("  增量微调（1.5万步）…")
-        model.learn(total_timesteps=15000, reset_num_timesteps=False, progress_bar=False)
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-
-    save_ppo(model, 'ssq')
 
     def build_state(idx):
         feat = fssq(records, idx)
@@ -1604,6 +1680,32 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         return normalize_state_segments(raw,ml_vec,lh,th,om)
+
+    _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
+    def _eval_holdout():
+        """在holdout上评分：红球平均命中数 + 蓝球命中率加权（蓝球权重0.5注）"""
+        tot, n = 0.0, 0
+        for i in range(_hold_start, len(records)):
+            st = build_state(i)
+            if st is None: continue
+            a,_ = model.predict(st, deterministic=True)
+            rsel = set(int(x)+1 for x in np.argsort(a[:33])[-SSQ_RED_PICK_N:])
+            bpred = int(np.argmax(a[33:]))+1
+            tot += len(set(records[i]['red']) & rsel) + 0.5*int(bpred==records[i]['blue'])
+            n += 1
+        return tot/n if n else 0.0
+
+    if is_new:
+        model, _best, _hist = train_with_early_stop(
+            model, 150000, _eval_holdout, '双色球首训', n_chunks=8, patience=3, reset_timesteps=True)
+    else:
+        print("  增量微调（1.5万步，带早停）…")
+        model, _best, _hist = train_with_early_stop(
+            model, 15000, _eval_holdout, '双色球微调', n_chunks=5, patience=2, reset_timesteps=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
+
+    save_ppo(model, 'ssq')
 
     # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
@@ -1829,14 +1931,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
                     n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
                     verbose=0, device='cpu')
-        model.learn(total_timesteps=100000, progress_bar=False)
-    else:
-        print("  增量微调（1万步）…")
-        model.learn(total_timesteps=10000, reset_num_timesteps=False, progress_bar=False)
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
 
-    save_ppo(model, '3d')
-
+    # build_state 提前定义：早停要在每段训练后用它在holdout上评分
     def build_state(idx):
         feat = f3d(records, idx)
         if feat is None: return None
@@ -1845,6 +1941,31 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         return normalize_state_segments(raw,ml_vec,lh,th,om)
+
+    _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
+    def _eval_holdout():
+        """在holdout（模型未训练过的最近30期）上评分：平均命中位数"""
+        tot, n = 0, 0
+        for i in range(_hold_start, len(records)):
+            st = build_state(i)
+            if st is None: continue
+            a,_ = model.predict(st, deterministic=True)
+            act = records[i]['digits']
+            tot += sum(1 for k in range(3) if int(a[k])==act[k]); n += 1
+        return tot/n if n else 0.0
+
+    if is_new:
+        model, _best, _hist = train_with_early_stop(
+            model, 100000, _eval_holdout, '3D首训', n_chunks=8, patience=3, reset_timesteps=True)
+    else:
+        print("  增量微调（1万步，带早停）…")
+        model, _best, _hist = train_with_early_stop(
+            model, 10000, _eval_holdout, '3D微调', n_chunks=5, patience=2, reset_timesteps=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
+          f"回测第{_hold_start}~{len(records)-1}期（模型未训练过，样本外）")
+
+    save_ppo(model, '3d')
 
     # 回测最近30期：统计位命中数分布 + 全中次数
     start=max(SEQ_LEN+5, len(records)-30); total=0
