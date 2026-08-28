@@ -642,6 +642,94 @@ def precompute_omission_ssq(records):
     return omit_arr
 
 
+# ══════════════════════════════════════════════════════
+#  马尔可夫转移 + 贝叶斯后验不确定性
+#  这两类信号在RL现有状态里都没有对应物：
+#  · 马尔可夫建模的是 P(下期=Y | 上期=X) 这种【跨期条件转移】，
+#    而走势特征是窗口聚合量、遗漏是"多久没出"，都不是转移关系。
+#  · 贝叶斯给的是【不确定性】——现有所有信号都只说"是什么"，
+#    没有一个告诉模型"这个判断有多可信"。样本少时后验方差大，
+#    模型可以据此少依赖该信号，这是点估计给不了的信息。
+# ══════════════════════════════════════════════════════
+MARKOV_WINDOW_RL = 200          # 转移统计只看最近N期，太长会让概率长期不变
+BAYES_PRIOR = 1.0               # Beta先验的伪计数（拉普拉斯平滑）
+
+
+def precompute_markov_3d(records, window=MARKOV_WINDOW_RL):
+    """
+    3D马尔可夫：对每一位，给出"上期该位是X时，下期各数字的转移概率"。
+    返回 arr[idx] = 30维（百/十/个位各10个数字的转移概率）
+    """
+    N = len(records)
+    arr = np.zeros((N+1, 30), dtype=np.float32)
+    for idx in range(1, N+1):
+        w = records[max(0, idx-window):idx]
+        if len(w) < 2:
+            arr[idx] = 0.1; continue
+        last = records[idx-1]['digits']
+        for p in range(3):
+            cnt = np.full(10, BAYES_PRIOR, dtype=np.float32)   # 拉普拉斯平滑，避免零概率
+            for i in range(1, len(w)):
+                if w[i-1]['digits'][p] == last[p]:
+                    cnt[w[i]['digits'][p]] += 1.0
+            arr[idx, p*10:(p+1)*10] = cnt / cnt.sum()
+    return arr
+
+
+def precompute_markov_balls(records, pool_max, get_nums, window=MARKOV_WINDOW_RL):
+    """
+    号码型玩法的马尔可夫：给出"上期开出的那批号码之后，各号码出现的条件概率"。
+    对每个号码 n，统计"上期出现过X且本期出现n"的比例（X遍历上期号码）。
+    返回 arr[idx] = pool_max 维
+    """
+    N = len(records)
+    arr = np.zeros((N+1, pool_max), dtype=np.float32)
+    for idx in range(1, N+1):
+        w = records[max(0, idx-window):idx]
+        if len(w) < 2:
+            arr[idx] = 1.0/pool_max; continue
+        prev_set = set(get_nums(records[idx-1]))
+        cnt = np.full(pool_max, BAYES_PRIOR, dtype=np.float32)
+        base = BAYES_PRIOR * pool_max
+        for i in range(1, len(w)):
+            # 上一期与"当前上期"有重叠时，本期的号码作为转移证据（重叠越多权重越高）
+            overlap = len(set(get_nums(w[i-1])) & prev_set)
+            if overlap == 0: continue
+            wt = overlap / max(len(prev_set), 1)
+            for n in get_nums(w[i]):
+                cnt[n-1] += wt
+            base += wt * len(get_nums(w[i]))
+        arr[idx] = cnt / max(base, 1e-6)
+    return arr
+
+
+def precompute_bayes(records, pool_max, get_nums, window=MARKOV_WINDOW_RL):
+    """
+    贝叶斯后验：对每个号码用 Beta-Binomial 估计出现率，同时给出【不确定性】。
+    返回 arr[idx] = pool_max*2 维（前半是后验均值，后半是后验标准差）
+
+    后验标准差是关键：观测样本少时它大，模型可以学会"这个估计不可信，别太依赖"。
+    现有的频率/遗漏都是点估计，给不了这个信息。
+    """
+    N = len(records)
+    arr = np.zeros((N+1, pool_max*2), dtype=np.float32)
+    for idx in range(1, N+1):
+        w = records[max(0, idx-window):idx]
+        n_draw = len(w)
+        if n_draw < 2:
+            arr[idx, :pool_max] = 0.5; arr[idx, pool_max:] = 0.5; continue
+        hits = np.full(pool_max, 0.0, dtype=np.float32)
+        for r in w:
+            for n in get_nums(r): hits[n-1] += 1.0
+        a = hits + BAYES_PRIOR                       # Beta后验的alpha
+        b = (n_draw - hits) + BAYES_PRIOR            # Beta后验的beta
+        mean = a / (a + b)
+        var = (a * b) / (((a + b) ** 2) * (a + b + 1.0))
+        arr[idx, :pool_max] = mean
+        arr[idx, pool_max:] = np.sqrt(var)
+    return arr
+
+
 def precompute_omission_3d(records):
     """福彩3D：百十个位各10个数字，共30维遗漏向量"""
     N = len(records)
@@ -1051,7 +1139,8 @@ class IntegratedKL8Env(gym.Env):
     PERBALL_WEIGHT = 2.0   # 逐球信号（遗漏+频率）额外加权，突出其重要性
 
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N):
+                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N,
+                 mk_arr=None, by_arr=None):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
@@ -1059,13 +1148,16 @@ class IntegratedKL8Env(gym.Env):
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.freq_arr=freq_arr
+        self.mk_arr=mk_arr; self.by_arr=by_arr
         self.train_n=train_n
         self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 80; freq_dim = 80
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim
+        mk_dim = mk_arr.shape[1] if mk_arr is not None else 0
+        by_dim = by_arr.shape[1] if by_arr is not None else 0
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim+mk_dim+by_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
 
@@ -1084,7 +1176,9 @@ class IntegratedKL8Env(gym.Env):
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
         fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(80,dtype=np.float32)
 
-        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr)
+        mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
+        by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
+        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr,mk,by)
         # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
         state = state.copy()
         state[-160:] *= self.PERBALL_WEIGHT
@@ -1126,21 +1220,24 @@ class IntegratedSSQEnv(gym.Env):
     """
     metadata={'render_modes':[]}
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N):
+                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N,
+                 mk_arr=None, by_arr=None):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
         self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr
+        self.omit_arr=omit_arr; self.mk_arr=mk_arr; self.by_arr=by_arr
         self.red_pick_n=red_pick_n
         self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 49   # 33红球+16蓝球遗漏值，已含每个号码的差异化信息
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
+        mk_dim = mk_arr.shape[1] if mk_arr is not None else 0
+        by_dim = by_arr.shape[1] if by_arr is not None else 0
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+mk_dim+by_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(33+16,),dtype=np.float32)
 
@@ -1158,7 +1255,9 @@ class IntegratedSSQEnv(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
 
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
+        mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
+        by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1207,20 +1306,22 @@ class Integrated3DEnv(gym.Env):
     """
     metadata={'render_modes':[]}
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr):
+                 tfm_hidden, tfm_idx2row, omit_arr, mk_arr=None, by_arr=None):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
         self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr
+        self.omit_arr=omit_arr; self.mk_arr=mk_arr; self.by_arr=by_arr
         self.start=SEQ_LEN+5; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 30
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
+        mk_dim = mk_arr.shape[1] if mk_arr is not None else 0
+        by_dim = by_arr.shape[1] if by_arr is not None else 0
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+mk_dim+by_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.MultiDiscrete([10,10,10])
 
@@ -1237,7 +1338,9 @@ class Integrated3DEnv(gym.Env):
         else:
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
+        mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
+        by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1370,11 +1473,18 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     freq_arr = precompute_freq_kl8(records, window=30)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [频率向量] ✓已加载（80维，第二个逐球差异化信号）")
 
+    print("  批量预计算马尔可夫转移 + 贝叶斯后验…")
+    t0 = time.time()
+    mk_arr = precompute_markov_balls(records, 80, lambda r: r['numbers'])   # 80维
+    by_arr = precompute_bayes(records, 80, lambda r: r['numbers'])          # 160维
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [马尔可夫] 80维  [贝叶斯均值+不确定性] 160维")
+
     print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
 
     def make_env():
         return IntegratedKL8Env(records, fkl8, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr,
+                                mk_arr=mk_arr, by_arr=by_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('kl8')
@@ -1400,7 +1510,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         fr = freq_arr[idx]
-        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr)
+        mk = mk_arr[idx]; by = by_arr[idx]
+        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr,mk,by)
         state = state.copy()
         state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
         return np.clip(state, -5, 5)
@@ -1433,7 +1544,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
     _p = 0; _segs = []
     for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 80), ('频率', 80)]:
+                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 80), ('频率', 80),
+                    ('马尔可夫', 80), ('贝叶斯', 160)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
     _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8')
     append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
@@ -1721,11 +1833,18 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     omit_arr = precompute_omission_ssq(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
 
+    print("  批量预计算马尔可夫转移 + 贝叶斯后验…")
+    t0 = time.time()
+    mk_arr = precompute_markov_balls(records, 33, lambda r: r['red'])   # 33维
+    by_arr = precompute_bayes(records, 33, lambda r: r['red'])          # 66维
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [马尔可夫] 33维  [贝叶斯均值+不确定性] 66维")
+
     print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏49维")
 
     def make_env():
         return IntegratedSSQEnv(records, fssq, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                mk_arr=mk_arr, by_arr=by_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('ssq')
@@ -1750,7 +1869,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
+        mk = mk_arr[idx]; by = by_arr[idx]
+        return normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
     def _eval_holdout(mask=None):
@@ -1782,7 +1902,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
     _p = 0; _segs = []
     for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 49)]:
+                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 49),
+                    ('马尔可夫', 33), ('贝叶斯', 66)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
     _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球')
     append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
@@ -1993,11 +2114,19 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     omit_arr = precompute_omission_3d(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏30维")
+    print("  批量预计算马尔可夫转移 + 贝叶斯后验…")
+    t0 = time.time()
+    mk_arr = precompute_markov_3d(records)                                    # 30维
+    by_arr = precompute_bayes(records, 10, lambda r: [d+1 for d in r['digits']])  # 20维
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [马尔可夫] 30维  [贝叶斯均值+不确定性] 20维")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习)"
+          f" + LSTM隐层 + TFM隐层 + 遗漏30维 + 马尔可夫30维 + 贝叶斯20维")
 
     def make_env():
         return Integrated3DEnv(records, f3d, ml_vec,
-                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                               mk_arr, by_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('3d')
@@ -2023,7 +2152,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
+        mk = mk_arr[idx]; by = by_arr[idx]
+        return normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
     def _eval_holdout(mask=None):
@@ -2056,7 +2186,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
     _p = 0; _segs = []
     for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 30)]:
+                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 30),
+                    ('马尔可夫', 30), ('贝叶斯', 20)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
     _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D')
     append_history('3d', {'date': str(date.today()), 'holdout_score': round(_best,4),
