@@ -1056,7 +1056,7 @@ def append_history(game, record):
 
 
 def train_with_early_stop(model, total_steps, eval_fn, label,
-                          n_chunks=8, patience=3, reset_timesteps=True):
+                          n_chunks=8, patience=3, reset_timesteps=True, warmup_chunks=0):
     """
     分段训练 + 早停 + 保留最佳模型。
 
@@ -1069,6 +1069,11 @@ def train_with_early_stop(model, total_steps, eval_fn, label,
     把训练预算切成 n_chunks 段，每段结束后在 holdout（模型未训练过的最近30期）
     上评估一次，记录最佳分数和当时的权重快照。
     连续 patience 段没有提升就提前停止，最后把权重恢复到最佳状态再返回。
+
+    warmup_chunks: 前N段不触发早停。RL训练前期策略震荡是正常现象，
+    刚开始几段分数掉下去很常见，这时候判死刑会让模型永远停在随机初始状态
+    （实测3D连续三次运行都因为前3段下滑而回滚到未训练权重）。
+    热身期内照常记录最佳分，但不累计"无提升"计数。
 
     eval_fn: 无参函数，返回一个分数（越大越好）
     返回 (model, best_score, history)
@@ -1091,11 +1096,13 @@ def train_with_early_stop(model, total_steps, eval_fn, label,
             best_params = copy.deepcopy(model.get_parameters())
             no_improve = 0
             flag = "✓ 新最佳"
+        elif i < warmup_chunks:
+            flag = f"（热身期第{i+1}/{warmup_chunks}段，不计入早停）"
         else:
             no_improve += 1
             flag = f"（无提升 {no_improve}/{patience}）"
         print(f"    [{label}] 第{i+1}/{n_chunks}段({chunk}步) 评分 {score:.4f}  {flag}")
-        if no_improve >= patience:
+        if i >= warmup_chunks and no_improve >= patience:
             print(f"    [{label}] 连续{patience}段无提升，提前停止（省下{(n_chunks-i-1)*chunk}步）")
             break
 
@@ -1767,11 +1774,13 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     if is_new:
         model, _best, _hist = train_with_early_stop(
-            model, 200000, _eval_holdout, '快乐8首训', n_chunks=8, patience=3, reset_timesteps=True)
+            model, 200000, _eval_holdout, '快乐8首训', n_chunks=16, patience=6,
+            reset_timesteps=True, warmup_chunks=5)
     else:
         print("  增量微调（2万步，带早停）…")
         model, _best, _hist = train_with_early_stop(
-            model, 20000, _eval_holdout, '快乐8微调', n_chunks=5, patience=2, reset_timesteps=False)
+            model, 20000, _eval_holdout, '快乐8微调', n_chunks=8, patience=4,
+            reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
     _st_probe = build_state(len(records))
@@ -2145,11 +2154,13 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     if is_new:
         model, _best, _hist = train_with_early_stop(
-            model, 150000, _eval_holdout, '双色球首训', n_chunks=8, patience=3, reset_timesteps=True)
+            model, 150000, _eval_holdout, '双色球首训', n_chunks=16, patience=6,
+            reset_timesteps=True, warmup_chunks=5)
     else:
         print("  增量微调（1.5万步，带早停）…")
         model, _best, _hist = train_with_early_stop(
-            model, 15000, _eval_holdout, '双色球微调', n_chunks=5, patience=2, reset_timesteps=False)
+            model, 15000, _eval_holdout, '双色球微调', n_chunks=8, patience=4,
+            reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
     _st_probe = build_state(len(records))
@@ -2447,11 +2458,13 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     if is_new:
         model, _best, _hist = train_with_early_stop(
-            model, 100000, _eval_holdout, '3D首训', n_chunks=8, patience=3, reset_timesteps=True)
+            model, 100000, _eval_holdout, '3D首训', n_chunks=16, patience=6,
+            reset_timesteps=True, warmup_chunks=5)
     else:
         print("  增量微调（1万步，带早停）…")
         model, _best, _hist = train_with_early_stop(
-            model, 10000, _eval_holdout, '3D微调', n_chunks=5, patience=2, reset_timesteps=False)
+            model, 10000, _eval_holdout, '3D微调', n_chunks=8, patience=4,
+            reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型未训练过，样本外）")
