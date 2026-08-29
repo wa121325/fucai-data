@@ -612,23 +612,63 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
     holdout_n = min(holdout_n, max(5, n//5))   # 数据量小时按比例缩减holdout，避免训练集过小
     split = max(1, n - holdout_n)
 
-    def _train_one(m, Xtr, ytr, ep, learning_rate=lr):
+    def _train_one(m, Xtr, ytr, ep, learning_rate=lr, Xval=None, yval=None,
+                   patience=8, warmup=5, tag=''):
+        """
+        训练单个模型，带验证集早停 + 保留最佳权重。
+
+        ── 为什么必须加 ──
+        原来是"闷头跑满N轮就返回"，中途不看验证集、没有早停、不保留最佳权重。
+        而这里参数量是样本量的29~150倍（双色球274,634参数 vs 1,836条样本），
+        神经网络完全有能力把训练集背下来——跑满60轮几乎必然过拟合，
+        返回的是"背得最熟"的那个权重，不是泛化最好的那个。
+
+        现在每轮结束在验证集上评一次，记录最佳权重，连续patience轮无提升就停，
+        最后恢复到最佳状态。warmup轮内不触发早停（前期震荡属正常）。
+        """
         m = m.to(DEVICE)
         Xt = torch.FloatTensor(Xtr).to(DEVICE); yt = torch.LongTensor(ytr).to(DEVICE)
         loader = DataLoader(TensorDataset(Xt,yt), batch_size, shuffle=True)
         opt = optim.AdamW(m.parameters(), lr=learning_rate, weight_decay=1e-4)
         sch = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(ep,1))
         crit = nn.CrossEntropyLoss()
-        m.train()
+
+        has_val = Xval is not None and len(Xval) > 0
+        if has_val:
+            Xv = torch.FloatTensor(Xval).to(DEVICE); yv = torch.LongTensor(yval).to(DEVICE)
+        best_acc, best_state, no_imp, stopped = -1.0, None, 0, ep
+
         for e in range(ep):
+            m.train()
             for xb,yb in loader:
                 opt.zero_grad(); loss=crit(m(xb),yb); loss.backward()
                 nn.utils.clip_grad_norm_(m.parameters(),1.0); opt.step()
             sch.step()
+            if not has_val: continue
+            m.eval()
+            with torch.no_grad():
+                acc = float((m(Xv).argmax(dim=1) == yv).float().mean().item())
+            if acc > best_acc:
+                best_acc = acc
+                best_state = {k: v.detach().clone() for k, v in m.state_dict().items()}
+                no_imp = 0
+            elif e >= warmup:
+                no_imp += 1
+                if no_imp >= patience:
+                    stopped = e+1; break
+        if has_val and best_state is not None:
+            m.load_state_dict(best_state)   # 恢复到验证集最佳，而不是最后一轮
+            if tag:
+                print(f"      [{tag}] 早停于第{stopped}/{ep}轮，验证集最佳准确率 {best_acc*100:.1f}%")
         return m
 
     # ── 1) 回测模型：必须从头训练，不能加载旧权重（避免评估时偷看未来数据）──
-    bt_model = _train_one(model_ctor(), X[:split], y[:split], epochs)
+    # 早停用的验证集必须从【训练集内部】再切一块，不能用holdout——
+    # 否则holdout参与了模型选择，它给出的准确率就不再是干净的样本外评估，会虚高。
+    inner = max(1, int(split * 0.15))
+    bt_tr_end = max(1, split - inner)
+    bt_model = _train_one(model_ctor(), X[:bt_tr_end], y[:bt_tr_end], epochs,
+                          Xval=X[bt_tr_end:split], yval=y[bt_tr_end:split], tag='回测模型')
     bt_model.eval()
     with torch.no_grad():
         Xte = torch.FloatTensor(X[split:]).to(DEVICE)
@@ -656,11 +696,19 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
             print(f"      ✓ 加载上次训练权重，滑动窗口热启动微调（近{win}期，{warm_start_epochs}轮，lr={warm_start_lr}）")
         except Exception as e:
             print(f"      ! 加载旧权重失败（{e}），改为全量训练")
+    # 生产模型同样需要早停保护：它用全部数据训练，参数量远超样本量，
+    # 跑满轮数几乎必然把训练集背下来。从末尾切15%作验证集来决定何时停。
     if is_warm_start:
         win = min(warm_start_window, n)
-        prod_model = _train_one(prod_new, X[-win:], y[-win:], warm_start_epochs, learning_rate=warm_start_lr)
+        Xw, yw = X[-win:], y[-win:]
+        v = max(1, int(len(Xw) * 0.15)); tr = max(1, len(Xw) - v)
+        prod_model = _train_one(prod_new, Xw[:tr], yw[:tr], warm_start_epochs,
+                                learning_rate=warm_start_lr,
+                                Xval=Xw[tr:], yval=yw[tr:], patience=4, warmup=2, tag='生产模型(微调)')
     else:
-        prod_model = _train_one(prod_new, X, y, epochs)
+        v = max(1, int(n * 0.15)); tr = max(1, n - v)
+        prod_model = _train_one(prod_new, X[:tr], y[:tr], epochs,
+                                Xval=X[tr:], yval=y[tr:], tag='生产模型')
     prod_model.eval()
     hidden_states=[]
     with torch.no_grad():
@@ -821,6 +869,17 @@ for game, (feat_fn, targets) in configs.items():
             lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20, predict_X=predict_X,
             warm_start_path=lstm_warm_path)
         print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
+        # 过拟合监控：训练集准确率远高于holdout = 在背答案而非学规律
+        try:
+            _sp = max(1, len(X) - min(50, max(5, len(X)//5)))   # 与train_encoder内部的split口径一致
+            lstm_m.eval()
+            with torch.no_grad():
+                _tr_acc = float((lstm_m(torch.FloatTensor(X[:_sp]).to(DEVICE)).argmax(dim=1)
+                                 == torch.LongTensor(y[:_sp]).to(DEVICE)).float().mean().item())*100
+            _gap = _tr_acc - lstm_acc
+            _flag = "⚠ 过拟合明显" if _gap > 15 else ("· 轻度过拟合" if _gap > 7 else "✓ 泛化正常")
+            print(f"      过拟合监控: 训练集{_tr_acc:.1f}% vs 样本外{lstm_acc}%  差距{_gap:+.1f}%  {_flag}")
+        except Exception as _e: pass
 
         tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
             lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20, predict_X=predict_X,
