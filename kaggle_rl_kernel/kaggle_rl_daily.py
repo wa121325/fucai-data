@@ -899,6 +899,10 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 # 提到150期后标准误降到约0.042，早停才开始有判断力。
 HOLDOUT_N = 150
 
+# 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
+# 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
+D3_N_BETS = 12
+
 def holdout_size(n_records):
     """按数据量自适应：至少80期保证测量精度，最多不超过总数的8%避免过度损失训练数据"""
     return max(80, min(HOLDOUT_N, int(n_records * 0.08)))
@@ -2524,7 +2528,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     groups=[]; pos_candidates=[]
     if state is not None:
         # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
-        # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
+        # 用联合概率排序生成多注真正的次优组合，能说清楚"这是第几优的组合"
         try:
             obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
             with torch.no_grad():
@@ -2569,14 +2573,14 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                 c = [top3[0][i][0], top3[1][i][0], top3[2][i][0]]
                 pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
                 picked.append((c, pr)); seen.add(tuple(c))
-            # 后3注：从27种组合里补足，优先选符合ML条件多的（同分再看联合概率）
+            # 其余注数：从27种组合里按联合概率补足
             # 按RL自己的联合概率排序（不用ML条件干预，理由同上）
             all27 = sorted(
                 (([b, s, g], pb*ps*pg)
                  for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
                 key=lambda x: -x[1])
             for c, pr in all27:
-                if len(picked) >= 6: break
+                if len(picked) >= D3_N_BETS: break
                 if tuple(c) not in seen:
                     picked.append((c, pr)); seen.add(tuple(c))
             picked.sort(key=lambda x: -x[1])
@@ -2584,7 +2588,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             if _d3_conds:
                 _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
                                  if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
-                print(f"  [诊断·仅参考] RL自选的6注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
+                print(f"  [诊断·仅参考] RL自选的{len(groups)}注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
                       f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
             top_probs = [pr for _, pr in picked]
 
@@ -2612,13 +2616,25 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             action,_ = model.predict(state, deterministic=True)
             groups = [[int(action[0]),int(action[1]),int(action[2])]]
 
-        # 不足6注时（比如候选池不够8种或提取失败），用确定性预测补齐
-        while len(groups)<6:
-            if not groups:
-                action,_ = model.predict(state, deterministic=True)
-                groups.append([int(action[0]),int(action[1]),int(action[2])])
-            else:
-                groups.append(groups[-1])
+        # 不足时补齐。原来是把最后一注反复复制，12注会出现大量重复，很难看；
+        # 改成从各位Top3之外按概率顺延取候选，凑不满就少给几注，绝不重复填充。
+        if not groups:
+            action,_ = model.predict(state, deterministic=True)
+            groups.append([int(action[0]),int(action[1]),int(action[2])])
+        if len(groups) < D3_N_BETS:
+            try:
+                _seen2 = {tuple(g) for g in groups}
+                _wide = [np.argsort(p)[::-1][:5] for p in pos_probs]   # 放宽到每位Top5
+                _cand = sorted(
+                    (([int(b),int(s),int(g)], float(pos_probs[0][b]*pos_probs[1][s]*pos_probs[2][g]))
+                     for b in _wide[0] for s in _wide[1] for g in _wide[2]),
+                    key=lambda x: -x[1])
+                for c, _ in _cand:
+                    if len(groups) >= D3_N_BETS: break
+                    if tuple(c) not in _seen2:
+                        _seen2.add(tuple(c)); groups.append(c)
+            except Exception:
+                pass
     pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注（联合概率最高的组合）
 
     # 记录本次训练时的期数，供下次运行判断是否有新数据
@@ -2630,7 +2646,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'fixed_eval':fixed_eval,           # 固定评测集成绩（考题不变，跨天可比）
             'is_first_train':is_new,
-            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
+            'note':f'PPO给出百/十/个位各3个候选，{len(groups)}注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
