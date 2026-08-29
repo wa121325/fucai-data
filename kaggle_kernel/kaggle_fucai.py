@@ -337,9 +337,6 @@ def _repeat_neighbor(cur, prev):
     nb = sum(1 for n in cur if (n-1 in ps or n+1 in ps) and n not in ps)
     return rep, nb
 
-def _feat_window(w):
-    return w
-
 
 def f3d(records, idx):
     w=records[max(0,idx-WINDOW):idx]
@@ -559,6 +556,77 @@ def fkl8(records, idx):
     prev = w[-1]['numbers'] if w else []
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
+
+    # ══════════════════════════════════════════════════════
+    #  快乐8专属新增特征（仅本游戏，3D/双色球不加）
+    # ══════════════════════════════════════════════════════
+
+    # ── ① 冷热变化率：这是维度上的真正空白 ──
+    # 现有信号（频率、遗漏）回答的都是"现在怎样"，没有一个回答"正在往哪变"。
+    # 一个球从冷转热、和一直是热的，含义完全不同，但之前的特征区分不出来。
+    _f10 = Counter(n for r in w[-10:] for n in r['numbers'])
+    _f50 = Counter(n for r in w[-50:] for n in r['numbers'])
+    _n10, _n50 = max(len(w[-10:]),1), max(len(w[-50:]),1)
+    _rates = [ _f10.get(n,0)/_n10 - _f50.get(n,0)/_n50 for n in range(1,81) ]
+    _rates = np.array(_rates, dtype=np.float32)
+    f['heat_rate_mean'] = float(_rates.mean())          # 整体升温还是降温
+    f['heat_rate_std']  = float(_rates.std())           # 冷热分化程度
+    f['heat_rising_cnt']  = float((_rates > 0.05).sum())  # 明显转热的球数
+    f['heat_falling_cnt'] = float((_rates < -0.05).sum()) # 明显转冷的球数
+    # 上期开出的号码，此前是在升温还是降温（判断"追热"还是"追冷"更奏效）
+    _prev_nums = w[-1]['numbers'] if w else []
+    f['prev_heat_rate'] = float(np.mean([_rates[n-1] for n in _prev_nums])) if _prev_nums else 0.0
+
+    # ── ② 尾数分布：80球按尾数正好分10组各8个，是干净的统计维度 ──
+    _tail_cnt = [0]*10
+    for n in _prev_nums: _tail_cnt[n % 10] += 1
+    for t in range(10): f[f'tail{t}'] = float(_tail_cnt[t])
+    f['tail_std']  = float(np.std(_tail_cnt))            # 尾数分布均匀还是集中
+    f['tail_zero'] = float(sum(1 for c in _tail_cnt if c == 0))  # 有几个尾数完全没出
+
+    # ── ③ 间隔分布：之前只有"连续号组数"，丢了间隔的整体形态 ──
+    _gaps_all = []
+    for x in w[-20:]:
+        s = sorted(x['numbers'])
+        _gaps_all.append([s[i+1]-s[i] for i in range(len(s)-1)])
+    if _gaps_all:
+        _flat = [g for gs in _gaps_all for g in gs]
+        f['gap_mean20'] = float(np.mean(_flat))
+        f['gap_std20']  = float(np.std(_flat))
+        f['gap_max20']  = float(np.mean([max(gs) for gs in _gaps_all if gs]))
+    else:
+        f['gap_mean20'] = f['gap_std20'] = f['gap_max20'] = 0.0
+
+    # ── ④ AC值：两两差值的离散度，双色球有、快乐8之前没有 ──
+    if _prev_nums and len(_prev_nums) > 1:
+        _d = set()
+        _ps = sorted(_prev_nums)
+        for i in range(len(_ps)):
+            for j in range(i+1, len(_ps)): _d.add(_ps[j]-_ps[i])
+        f['ac_value'] = float(len(_d) - (len(_ps)-1))
+    else:
+        f['ac_value'] = 0.0
+
+    # ── ⑤ 同尾号对数：彩民常看的形态维度 ──
+    f['same_tail_pairs'] = float(sum(c*(c-1)//2 for c in _tail_cnt))
+
+    # ── ⑥ 区间转移：号码在四个区之间的流动方向 ──
+    # 比"各区多少个"多一层信息：是从哪个区流向哪个区
+    if len(w) >= 2:
+        _pz = [sum(1 for n in w[-2]['numbers'] if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        _cz = [sum(1 for n in _prev_nums          if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        for zi in range(4): f[f'zone_delta{zi}'] = float(_cz[zi] - _pz[zi])
+    else:
+        for zi in range(4): f[f'zone_delta{zi}'] = 0.0
+
+    # ── ⑦ 重号的区间分布：比"重了几个"更细 ──
+    if len(w) >= 2:
+        _rep = set(w[-1]['numbers']) & set(w[-2]['numbers'])
+        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+            f[f'repeat_z{zi}'] = float(sum(1 for n in _rep if lo<=n<=hi))
+    else:
+        for zi in range(4): f[f'repeat_z{zi}'] = 0.0
+
 
     return f
 
@@ -1421,30 +1489,6 @@ def cond_filtered_picks(scores, n_pick, n_bets, conds, feat_fn, pool_mult=2.6, o
         if tuple(c) not in used: used.add(tuple(c)); bets.append(c)
     return bets, scored[:len(bets)]
 
-
-def picks_from_scores(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
-    """
-    按分数选号：胆码 + 拖码轮转（与强化学习脚本同一套思路）。
-    分数最高的少数球作为胆码进每一注，其余候选轮转填充，
-    既保证号码有依据（全部按分数排序而来），又让各注之间有实质差异。
-    """
-    order = [n for n, _ in sorted(scores.items(), key=lambda x: -x[1])]
-    pool_size = min(len(order), max(n_pick + 2, int(round(n_pick * pool_mult))))
-    pool = order[:pool_size]
-    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
-    core, rest = pool[:core_n], pool[core_n:]
-    bets, ri = [], 0
-    for _ in range(n_bets):
-        sel = list(core); guard = 0
-        while len(sel) < n_pick and rest and guard < len(rest) * 3:
-            c = rest[ri % len(rest)]; ri += 1; guard += 1
-            if c not in sel: sel.append(c)
-        oi = 0
-        while len(sel) < n_pick and oi < len(order):
-            if order[oi] not in sel: sel.append(order[oi])
-            oi += 1
-        bets.append(sorted(sel))
-    return bets, sorted(core), sorted(pool)
 
 
 def reckl8(records, ml, om):
