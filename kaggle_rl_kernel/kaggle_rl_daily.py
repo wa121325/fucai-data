@@ -1257,10 +1257,12 @@ class IntegratedKL8Env(gym.Env):
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
         state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr,mk,by)
-        state = apply_segment_switches(state, self._segs(), 'kl8')
-        # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
+        _sg = self._segs()
+        state = apply_segment_switches(state, _sg, 'kl8')
+        # 逐球信号（遗漏+频率）加权。用精确段边界定位，
+        # 不能再写 state[-160:] —— 马尔可夫/贝叶斯加进来后末尾160维已不是遗漏+频率了。
         state = state.copy()
-        state[-160:] *= self.PERBALL_WEIGHT
+        state[_sg[4][1]:_sg[5][2]] *= self.PERBALL_WEIGHT
         return np.clip(state, -5, 5)
 
     def _segs(self):
@@ -1636,9 +1638,25 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         fr = freq_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
         state = normalize_state_segments(raw,ml_vec,lh,th,om,fr,mk,by)
+        state = apply_segment_switches(state, _segs_kl8, 'kl8')
+        # 逐球信号（遗漏+频率）加权。必须用精确段边界定位：
+        # 之前写 state[-160:]，在马尔可夫/贝叶斯加进来之后，末尾160维已经变成它们了，
+        # 加权加错了对象（训练和推理都错、方向一致所以没报错，但含义已偏）。
         state = state.copy()
-        state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
+        _s0 = _segs_kl8[4][1]; _s1 = _segs_kl8[5][2]   # 遗漏起点 ~ 频率终点
+        state[_s0:_s1] *= IntegratedKL8Env.PERBALL_WEIGHT
         return np.clip(state, -5, 5)
+
+    # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
+    _lh_d = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+    _th_d = tfm_hidden.shape[1] if tfm_hidden is not None else 0
+    _segs_kl8, _pp = [], 0
+    for _n, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
+                   ('LSTM隐层', _lh_d), ('TFM隐层', _th_d), ('遗漏', 80), ('频率', 80),
+                   ('马尔可夫', mk_arr.shape[1]), ('贝叶斯', by_arr.shape[1])]:
+        _segs_kl8.append((_n, _pp, _pp+_d)); _pp += _d
+    _off = [n for n,_,_ in _segs_kl8 if not SEGMENT_ENABLE.get('kl8',{}).get(n, True)]
+    if _off: print(f"  [分段开关] 快乐8 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
     def _eval_holdout(mask=None):
@@ -2002,7 +2020,18 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         om = omit_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
         st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
-        return apply_segment_switches(st, _segs_3d, '3d')
+        return apply_segment_switches(st, _segs_ssq, 'ssq')
+
+    # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
+    _lh_d = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+    _th_d = tfm_hidden.shape[1] if tfm_hidden is not None else 0
+    _segs_ssq, _pp = [], 0
+    for _n, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
+                   ('LSTM隐层', _lh_d), ('TFM隐层', _th_d), ('遗漏', 49),
+                   ('马尔可夫', mk_arr.shape[1]), ('贝叶斯', by_arr.shape[1])]:
+        _segs_ssq.append((_n, _pp, _pp+_d)); _pp += _d
+    _off = [n for n,_,_ in _segs_ssq if not SEGMENT_ENABLE.get('ssq',{}).get(n, True)]
+    if _off: print(f"  [分段开关] 双色球 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
     def _eval_holdout(mask=None):
@@ -2303,7 +2332,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
+        return apply_segment_switches(st, _segs_3d, '3d')
 
     _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
     def _eval_holdout(mask=None):
