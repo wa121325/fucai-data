@@ -433,6 +433,77 @@ def fkl8(records, idx):
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
 
+    # ══════════════════════════════════════════════════════
+    #  快乐8专属新增特征（仅本游戏，3D/双色球不加）
+    # ══════════════════════════════════════════════════════
+
+    # ── ① 冷热变化率：这是维度上的真正空白 ──
+    # 现有信号（频率、遗漏）回答的都是"现在怎样"，没有一个回答"正在往哪变"。
+    # 一个球从冷转热、和一直是热的，含义完全不同，但之前的特征区分不出来。
+    _f10 = Counter(n for r in w[-10:] for n in r['numbers'])
+    _f50 = Counter(n for r in w[-50:] for n in r['numbers'])
+    _n10, _n50 = max(len(w[-10:]),1), max(len(w[-50:]),1)
+    _rates = [ _f10.get(n,0)/_n10 - _f50.get(n,0)/_n50 for n in range(1,81) ]
+    _rates = np.array(_rates, dtype=np.float32)
+    f['heat_rate_mean'] = float(_rates.mean())          # 整体升温还是降温
+    f['heat_rate_std']  = float(_rates.std())           # 冷热分化程度
+    f['heat_rising_cnt']  = float((_rates > 0.05).sum())  # 明显转热的球数
+    f['heat_falling_cnt'] = float((_rates < -0.05).sum()) # 明显转冷的球数
+    # 上期开出的号码，此前是在升温还是降温（判断"追热"还是"追冷"更奏效）
+    _prev_nums = w[-1]['numbers'] if w else []
+    f['prev_heat_rate'] = float(np.mean([_rates[n-1] for n in _prev_nums])) if _prev_nums else 0.0
+
+    # ── ② 尾数分布：80球按尾数正好分10组各8个，是干净的统计维度 ──
+    _tail_cnt = [0]*10
+    for n in _prev_nums: _tail_cnt[n % 10] += 1
+    for t in range(10): f[f'tail{t}'] = float(_tail_cnt[t])
+    f['tail_std']  = float(np.std(_tail_cnt))            # 尾数分布均匀还是集中
+    f['tail_zero'] = float(sum(1 for c in _tail_cnt if c == 0))  # 有几个尾数完全没出
+
+    # ── ③ 间隔分布：之前只有"连续号组数"，丢了间隔的整体形态 ──
+    _gaps_all = []
+    for x in w[-20:]:
+        s = sorted(x['numbers'])
+        _gaps_all.append([s[i+1]-s[i] for i in range(len(s)-1)])
+    if _gaps_all:
+        _flat = [g for gs in _gaps_all for g in gs]
+        f['gap_mean20'] = float(np.mean(_flat))
+        f['gap_std20']  = float(np.std(_flat))
+        f['gap_max20']  = float(np.mean([max(gs) for gs in _gaps_all if gs]))
+    else:
+        f['gap_mean20'] = f['gap_std20'] = f['gap_max20'] = 0.0
+
+    # ── ④ AC值：两两差值的离散度，双色球有、快乐8之前没有 ──
+    if _prev_nums and len(_prev_nums) > 1:
+        _d = set()
+        _ps = sorted(_prev_nums)
+        for i in range(len(_ps)):
+            for j in range(i+1, len(_ps)): _d.add(_ps[j]-_ps[i])
+        f['ac_value'] = float(len(_d) - (len(_ps)-1))
+    else:
+        f['ac_value'] = 0.0
+
+    # ── ⑤ 同尾号对数：彩民常看的形态维度 ──
+    f['same_tail_pairs'] = float(sum(c*(c-1)//2 for c in _tail_cnt))
+
+    # ── ⑥ 区间转移：号码在四个区之间的流动方向 ──
+    # 比"各区多少个"多一层信息：是从哪个区流向哪个区
+    if len(w) >= 2:
+        _pz = [sum(1 for n in w[-2]['numbers'] if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        _cz = [sum(1 for n in _prev_nums          if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        for zi in range(4): f[f'zone_delta{zi}'] = float(_cz[zi] - _pz[zi])
+    else:
+        for zi in range(4): f[f'zone_delta{zi}'] = 0.0
+
+    # ── ⑦ 重号的区间分布：比"重了几个"更细 ──
+    if len(w) >= 2:
+        _rep = set(w[-1]['numbers']) & set(w[-2]['numbers'])
+        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+            f[f'repeat_z{zi}'] = float(sum(1 for n in _rep if lo<=n<=hi))
+    else:
+        for zi in range(4): f[f'repeat_z{zi}'] = 0.0
+
+
     return f
 
 
@@ -822,7 +893,15 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 #  回测平均命中从0.28位(=随机)涨到0.57位，这不是学会了，是背下来了。
 #  留出holdout后，回测才是真正的样本外评估。
 # ══════════════════════════════════════════════════════
-HOLDOUT_N = 30
+# holdout期数。30期时标准误约0.095，能分辨的最小差异要0.19——
+# 比3D随机基准0.30的一半还大，早停在这个精度下等于抛硬币，
+# 它每次保留"训练前的随机权重"只是因为那次运气好，不代表模型更优。
+# 提到150期后标准误降到约0.042，早停才开始有判断力。
+HOLDOUT_N = 150
+
+def holdout_size(n_records):
+    """按数据量自适应：至少80期保证测量精度，最多不超过总数的8%避免过度损失训练数据"""
+    return max(80, min(HOLDOUT_N, int(n_records * 0.08)))
 
 # ══════════════════════════════════════════════════════
 #  熵系数（entropy coefficient）
@@ -903,7 +982,7 @@ def apply_segment_switches(state, segs, game):
     return state
 
 
-def segment_ablation(eval_with_mask, segments, base_score, label):
+def segment_ablation(eval_with_mask, segments, base_score, label, game=None, se=0.05):
     """
     消融诊断：逐段把输入清零，看holdout评分掉多少。掉得越多说明这段越重要。
 
@@ -915,10 +994,19 @@ def segment_ablation(eval_with_mask, segments, base_score, label):
     eval_with_mask: 接受 (start, end) 元组，把该区间清零后评估，返回分数
     segments: [(名称, 起点, 终点), ...]
     """
-    print(f"    [{label} 消融诊断] 基准分 {base_score:.4f}，逐段清零后的变化：")
+    _se = se
+    print(f"    [{label} 消融诊断] 基准分 {base_score:.4f}，逐段清零后的变化"
+          f"（噪声水平±{2*_se:.3f}，差异小于此值不可信）：")
     results = []
+    _sw = SEGMENT_ENABLE.get(game, {}) if game else {}
     for name, s, e in segments:
         if e <= s: continue
+        if not _sw.get(name, True):
+            # 该段已被开关关闭（值已全为0），再清零一次当然毫无变化，
+            # 测出来的"贡献0.0000/几乎无影响"是假象，会误导判断，直接跳过
+            print(f"      {name:12}({e-s:4}维)  已通过开关关闭，本次不参与消融测量")
+            results.append({'segment': name, 'dims': e-s, 'disabled': True})
+            continue
         try:
             score = eval_with_mask((s, e))
         except Exception as ex:
@@ -926,10 +1014,15 @@ def segment_ablation(eval_with_mask, segments, base_score, label):
         drop = base_score - score
         results.append({'segment': name, 'dims': e-s, 'score_without': round(score,4),
                         'contribution': round(drop,4)})
-        if drop > 0.02:   mark = "★ 重要"
-        elif drop > 0.005: mark = "· 有一点作用"
-        elif drop > -0.005: mark = "  几乎无影响"
-        else:              mark = "⚠ 去掉反而更好"
+        # 用测量噪声水平作为判断门槛，而不是拍脑袋定的固定值。
+        # 差异小于2倍标准误时无法与随机波动区分，标成"不可分辨"而非"无影响"，
+        # 避免把噪声当成结论去删特征。
+        if abs(drop) < 2 * _se:
+            mark = f"— 不可分辨（噪声±{2*_se:.3f}）"
+        elif drop > 0:
+            mark = "★ 重要"
+        else:
+            mark = "⚠ 去掉反而更好"
         print(f"      {name:12}({e-s:4}维)  清零后{score:.4f}  贡献{drop:+.4f}  {mark}")
     return results
 
@@ -1222,7 +1315,7 @@ class IntegratedKL8Env(gym.Env):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
-        self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
+        self.train_end = max(SEQ_LEN + 40, len(records) - holdout_size(len(records)))
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.freq_arr=freq_arr
@@ -1319,7 +1412,7 @@ class IntegratedSSQEnv(gym.Env):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
-        self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
+        self.train_end = max(SEQ_LEN + 40, len(records) - holdout_size(len(records)))
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.mk_arr=mk_arr; self.by_arr=by_arr
@@ -1418,7 +1511,7 @@ class Integrated3DEnv(gym.Env):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
         # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
-        self.train_end = max(SEQ_LEN + 40, len(records) - HOLDOUT_N)
+        self.train_end = max(SEQ_LEN + 40, len(records) - holdout_size(len(records)))
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.mk_arr=mk_arr; self.by_arr=by_arr
@@ -1658,7 +1751,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _off = [n for n,_,_ in _segs_kl8 if not SEGMENT_ENABLE.get('kl8',{}).get(n, True)]
     if _off: print(f"  [分段开关] 快乐8 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
-    _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
+    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
     def _eval_holdout(mask=None):
         """在holdout上评分：选六标准的平均命中球数。mask=(s,e)时清零该区间用于消融诊断。"""
         tot, n = 0, 0
@@ -1691,7 +1784,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
                     ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 80), ('频率', 80),
                     ('马尔可夫', 80), ('贝叶斯', 160)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
-    _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8')
+    _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8', 'kl8',
+                                 se=math.sqrt(6*0.25*0.75)/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
                           'ent_coef': ENT_COEF['kl8'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
@@ -2033,7 +2127,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _off = [n for n,_,_ in _segs_ssq if not SEGMENT_ENABLE.get('ssq',{}).get(n, True)]
     if _off: print(f"  [分段开关] 双色球 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
-    _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
+    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
     def _eval_holdout(mask=None):
         """在holdout上评分：红球平均命中数 + 蓝球命中率加权。mask=(s,e)时清零该区间。"""
         tot, n = 0.0, 0
@@ -2068,7 +2162,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
                     ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 49),
                     ('马尔可夫', 33), ('贝叶斯', 66)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
-    _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球')
+    _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球', 'ssq',
+                                 se=math.sqrt(6*(6/33)*(27/33))/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
                           'ent_coef': ENT_COEF['ssq'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
@@ -2335,7 +2430,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
         return apply_segment_switches(st, _segs_3d, '3d')
 
-    _hold_start = max(SEQ_LEN+40, len(records)-HOLDOUT_N)
+    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
     def _eval_holdout(mask=None):
         """在holdout（模型未训练过的最近30期）上评分：平均命中位数。
            mask=(start,end) 时把状态向量该区间清零，用于消融诊断。"""
@@ -2363,7 +2458,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     # ── 消融诊断：测量状态向量各段的真实贡献 ──
     _segs = _segs_3d; _p = _segs[-1][2]
-    _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D')
+    _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D', '3d',
+                                 se=math.sqrt(3*0.1*0.9)/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('3d', {'date': str(date.today()), 'holdout_score': round(_best,4),
                           'ent_coef': ENT_COEF['3d'],
                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
