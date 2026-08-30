@@ -965,7 +965,7 @@ def report_entropy(model, state, game, n_out=None):
 # ══════════════════════════════════════════════════════
 SEGMENT_ENABLE = {
     '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
-            '遗漏':True,   # ← 按消融结果关闭（单日数据，若后续证明是噪声可改回True）
+            '遗漏':False,   # ← 按消融结果关闭（单日数据，若后续证明是噪声可改回True）
             '马尔可夫':True, '贝叶斯':True},
     'ssq': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
             '遗漏':True, '马尔可夫':True, '贝叶斯':True},
