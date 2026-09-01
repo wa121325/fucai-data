@@ -123,6 +123,54 @@ DATASET_SLUG = 'fucai-dl-cache'
 DATASET_ID   = f'megskfdbbskeb/{DATASET_SLUG}'
 LOCAL_DIR    = '/kaggle/working/dl_cache'
 MOUNTED_DIR  = f'/kaggle/input/{DATASET_SLUG}'
+
+# ══════════════════════════════════════════════════════
+#  定期重训：攒够足够新数据才做一次全量训练
+#
+#  跟RL是同一个问题：每周只新增3~7期，占总数0.08%~0.34%，
+#  这时做10轮热启动微调，梯度绝大部分还是在重复已学过的内容——
+#  学不到新东西，反而每周扰动一次权重，让输出不稳定。
+#
+#  平时保持已有权重直接出预测（稳定、无过拟合），
+#  攒够 RETRAIN_AFTER_N_NEW 期才全量重训一次，那时新数据占比才有意义。
+# ══════════════════════════════════════════════════════
+RETRAIN_AFTER_N_NEW = {
+    '3d':  180,   # 每周7期 → 约半年一次
+    'ssq':  40,   # 每周3期 → 约3个月一次
+    'kl8':  40,   # 每周7期 → 约1个半月一次
+}
+
+
+def get_last_trained_n(game):
+    """读取上次全量训练时的数据期数"""
+    for p in (f'{MOUNTED_DIR}/{game}_dl_trained_n.json', f'{LOCAL_DIR}/{game}_dl_trained_n.json'):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: return int(json.load(f).get('n', 0))
+            except Exception: pass
+    return 0
+
+
+def save_last_trained_n(game, n):
+    os.makedirs(LOCAL_DIR, exist_ok=True)
+    try:
+        with open(f'{LOCAL_DIR}/{game}_dl_trained_n.json', 'w') as f:
+            json.dump({'n': int(n)}, f)
+    except Exception as e:
+        print(f"  ! 记录{game}训练期数失败: {e}")
+
+
+def should_retrain_dl(game, cur_n):
+    """是否到了该全量重训的时候。返回 (是否重训, 说明)"""
+    last = get_last_trained_n(game)
+    if last <= 0:
+        return True, "首次运行，需要完整训练"
+    grew = cur_n - last
+    need = RETRAIN_AFTER_N_NEW.get(game, 100)
+    if grew >= need:
+        return True, f"距上次训练已新增{grew}期（阈值{need}期），触发定期重训"
+    return False, f"距上次训练新增{grew}/{need}期，数据量不足以支撑有效学习，沿用已有权重"
+
 WINDOW = 50; SEQ_LEN = 20
 
 # ══════════════════════════════════════════════════════
@@ -588,7 +636,7 @@ def build_predict_seq(records, feat_fn, seq_len=SEQ_LEN):
 
 def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n=50,
                    warm_start_path=None, warm_start_epochs=10, warm_start_lr=1e-4,
-                   warm_start_window=250, predict_X=None):
+                   warm_start_window=250, predict_X=None, skip_training=False):
     """
     分两阶段训练，避免"用训练数据本身当回测题"造成虚假高准确率：
     （神经网络训练60轮后几乎能背下训练集，若直接拿训练集本身算准确率，
@@ -667,8 +715,19 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
     # 否则holdout参与了模型选择，它给出的准确率就不再是干净的样本外评估，会虚高。
     inner = max(1, int(split * 0.15))
     bt_tr_end = max(1, split - inner)
-    bt_model = _train_one(model_ctor(), X[:bt_tr_end], y[:bt_tr_end], epochs,
-                          Xval=X[bt_tr_end:split], yval=y[bt_tr_end:split], tag='回测模型')
+    if skip_training and warm_start_path and os.path.exists(warm_start_path):
+        # 冻结时回测模型也不必重训：它只用来报准确率，
+        # 权重没变结论就不会变，重训纯属浪费时间
+        bt_model = model_ctor()
+        try:
+            bt_model.load_state_dict(torch.load(warm_start_path, map_location='cpu'))
+        except Exception:
+            bt_model = _train_one(model_ctor(), X[:bt_tr_end], y[:bt_tr_end], epochs,
+                                  Xval=X[bt_tr_end:split], yval=y[bt_tr_end:split], tag='回测模型')
+        bt_model = bt_model.to(DEVICE)
+    else:
+        bt_model = _train_one(model_ctor(), X[:bt_tr_end], y[:bt_tr_end], epochs,
+                              Xval=X[bt_tr_end:split], yval=y[bt_tr_end:split], tag='回测模型')
     bt_model.eval()
     with torch.no_grad():
         Xte = torch.FloatTensor(X[split:]).to(DEVICE)
@@ -696,9 +755,14 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
             print(f"      ✓ 加载上次训练权重，滑动窗口热启动微调（近{win}期，{warm_start_epochs}轮，lr={warm_start_lr}）")
         except Exception as e:
             print(f"      ! 加载旧权重失败（{e}），改为全量训练")
+    # 冻结路径：攒够新数据前不训练，直接用已有权重做前向推理出预测。
+    # 不训练 = 无过拟合来源，权重固定 = 每次输出稳定。
+    if skip_training and is_warm_start:
+        prod_model = prod_new
+        print(f"      [冻结] 沿用已有权重直接出预测，本次不训练")
     # 生产模型同样需要早停保护：它用全部数据训练，参数量远超样本量，
     # 跑满轮数几乎必然把训练集背下来。从末尾切15%作验证集来决定何时停。
-    if is_warm_start:
+    elif is_warm_start:
         win = min(warm_start_window, n)
         Xw, yw = X[-win:], y[-win:]
         v = max(1, int(len(Xw) * 0.15)); tr = max(1, len(Xw) - v)
@@ -830,6 +894,11 @@ for game, (feat_fn, targets) in configs.items():
         print(f"\n{game}: 数据不足，跳过"); continue
     print(f"\n{'='*50}\n{game}（{len(records)}期）\n{'='*50}")
 
+    # 定期重训判断：不到阈值就沿用已有权重（epochs=0，只做前向推理出预测），
+    # 避免每周拿0.08%~0.34%的新数据反复扰动权重
+    _do_retrain, _why = should_retrain_dl(game, len(records))
+    print(f"  [定期进化] {_why}")
+
     game_results = {}
     lstm_hidden_all=None; tfm_hidden_all=None
 
@@ -867,7 +936,7 @@ for game, (feat_fn, targets) in configs.items():
 
         lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline, lstm_warm = train_encoder(
             lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20, predict_X=predict_X,
-            warm_start_path=lstm_warm_path)
+            warm_start_path=lstm_warm_path, skip_training=not _do_retrain)
         print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
         # 过拟合监控：训练集准确率远高于holdout = 在背答案而非学规律
         try:
@@ -883,7 +952,7 @@ for game, (feat_fn, targets) in configs.items():
 
         tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
             lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20, predict_X=predict_X,
-            warm_start_path=tfm_warm_path)
+            warm_start_path=tfm_warm_path, skip_training=not _do_retrain)
         print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
 
         # 每个目标的权重都保存，供下次热启动微调。
@@ -918,6 +987,10 @@ for game, (feat_fn, targets) in configs.items():
             'confidence': round(float(max(ens))*100,1),
             'probs': {str(int(c)+offset):round(float(p)*100,1) for c,p in zip(classes,ens)},
         }
+
+    # 只有真正重训过才更新期数记录，否则下次会一直判定为"该重训"
+    if _do_retrain:
+        save_last_trained_n(game, len(records))
 
     dl_results[game] = game_results
 
