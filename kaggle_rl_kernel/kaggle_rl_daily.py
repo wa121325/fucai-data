@@ -1080,36 +1080,71 @@ def append_history(game, record):
 TRAIN_MODE = 'frozen'
 
 # ══════════════════════════════════════════════════════
-#  定期进化：攒够足够多的新数据才重训一次
+#  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
 #
-#  为什么不每天训：每天只新增1期，占总数万分之一（3D是0.011%），
-#  梯度更新99.99%在重复已学过的内容——学不到新东西，
-#  反而每天扰动权重，导致输出忽有偏好忽而均匀。
+#  ── 为什么不是"冻结半年" ──
+#  之前设成180期才重训一次，隐含假设是"首训就是最好的"，但这没有依据：
+#  RL训练带随机性，一次首训完全可能落在很差的局部最优，
+#  冻结半年等于把一个可能很烂的模型锁死半年。
 #
-#  攒够 RETRAIN_AFTER_N_NEW 期新数据再全量重训一次，
-#  这时新数据占比才有意义，模型才真的在"进化"而不是空转。
-#  平时保持冻结，输出稳定。
+#  ── 现在的做法 ──
+#  每 CHALLENGE_EVERY 期就重训一个【全新随机初始化】的挑战者，
+#  在【从未参与训练、也从未参与早停选择】的干净holdout上跟现任比。
+#  只有赢过现任且幅度超过噪声水平(2倍标准误)，挑战者才上位。
+#
+#  三个效果同时成立：
+#    进化   —— 每次挑战都是一次找到更好模型的机会，不用等半年
+#    不过拟合 —— 上位门槛是干净数据上的真实提升，靠运气赢不了
+#    稳定   —— 挑战失败就完全不动，权重和输出保持不变
 # ══════════════════════════════════════════════════════
-RETRAIN_AFTER_N_NEW = {
-    '3d':  180,   # 每天1期 → 约半年一次
-    'ssq':  40,   # 每周3期 → 约3个月一次
-    'kl8':  40,   # 每天1期 → 约1个半月一次
+CHALLENGE_EVERY = {
+    '3d':  20,   # 每天1期 → 约20天一次挑战
+    'ssq': 12,   # 每周3期 → 约4周一次
+    'kl8': 20,   # 每天1期 → 约20天一次
 }
 
 
-def should_retrain(game, cur_n):
+def run_challenge(cur_model, make_fresh_model, train_fn, eval_clean, se, label):
     """
-    判断是否到了该重训的时候：距上次训练时的期数，是否已积累够新数据。
-    返回 (是否重训, 说明文字)
+    挑战流程：训练一个全新模型，在干净holdout上与现任比较，赢了才替换。
+
+    cur_model:        现任模型（可能为None，即首次运行）
+    make_fresh_model: 无参函数，返回一个全新随机初始化的模型
+    train_fn:         接受模型，训练后返回 (model, best_score, history)
+    eval_clean:       接受模型，在【干净holdout】上评分（该数据从未参与训练和早停选择）
+    se:               该评分的标准误，用来定"赢多少才算真赢"
+
+    返回 (最终采用的模型, 是否换人, 说明文字)
     """
+    if cur_model is None:
+        m, _b, _h = train_fn(make_fresh_model())
+        return m, True, "首次训练，直接采用"
+
+    cur_score = eval_clean(cur_model)
+    print(f"    [挑战赛] 现任模型干净评分: {cur_score:.4f}")
+    print(f"    [挑战赛] 训练挑战者（全新随机初始化）…")
+    challenger, _b, _h = train_fn(make_fresh_model())
+    new_score = eval_clean(challenger)
+
+    margin = new_score - cur_score
+    need = 2 * se     # 必须超过噪声水平才算真赢，否则只是运气
+    print(f"    [挑战赛] 挑战者干净评分: {new_score:.4f}  差距 {margin:+.4f}"
+          f"（需超过 {need:.4f} 才算真提升）")
+    if margin > need:
+        return challenger, True, f"✓ 挑战成功，新模型上位（提升 {margin:+.4f}）"
+    return cur_model, False, f"✗ 挑战失败，保留现任（差距 {margin:+.4f} 未超过噪声 {need:.4f}）"
+
+
+def should_challenge(game, cur_n):
+    """是否到了发起挑战的时候。返回 (是否挑战, 说明)"""
     last = get_last_trained_n(game)
     if last <= 0:
         return True, "首次运行，需要完整训练"
     grew = cur_n - last
-    need = RETRAIN_AFTER_N_NEW.get(game, 100)
+    need = CHALLENGE_EVERY.get(game, 20)
     if grew >= need:
-        return True, f"距上次训练已新增{grew}期（阈值{need}期），触发定期重训"
-    return False, f"距上次训练新增{grew}/{need}期，数据量不足以支撑有效学习，保持冻结"
+        return True, f"距上次挑战已新增{grew}期（周期{need}期），发起新挑战"
+    return False, f"距下次挑战还差{need-grew}期（已积累{grew}/{need}），保持现任模型"
 
 
 
@@ -1860,15 +1895,19 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     if _off: print(f"  [分段开关] 快乐8 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
     _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
-    def _eval_holdout(mask=None):
-        """在holdout上评分：选六标准的平均命中球数。mask=(s,e)时清零该区间用于消融诊断。"""
+    _hold_mid = (_hold_start + len(records)) // 2   # 前半选权重，后半只报分
+    def _eval_holdout(mask=None, half='select', use_model=None):
+        """在holdout上评分：选六标准的平均命中球数。mask=(s,e)时清零该区间用于消融诊断。
+           half='select'用前一半(早停选权重)，half='report'用后一半(从不参与选择，评分干净)"""
         tot, n = 0, 0
-        for i in range(_hold_start, len(records)):
+        _rng = range(_hold_start, _hold_mid) if half=='select' else range(_hold_mid, len(records))
+        for i in _rng:
             st = build_state(i)
             if st is None: continue
             if mask is not None:
                 st = st.copy(); st[mask[0]:mask[1]] = 0.0
-            a,_ = model.predict(st, deterministic=True)
+            _m = use_model if use_model is not None else model
+            a,_ = _m.predict(st, deterministic=True)
             sel = set(int(x)+1 for x in np.argsort(a)[-6:])
             tot += len(set(records[i]['numbers']) & sel); n += 1
         return tot/n if n else 0.0
@@ -1882,16 +1921,30 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # 冻结模式：平时不训练（输出稳定、无过拟合），
             # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
             # 而不是每天拿万分之一的新数据空转。
-            _do, _why = should_retrain('kl8', len(records))
-            print(f"  [定期进化] {_why}")
+            _do, _why = should_challenge('kl8', len(records))
+            print(f"  [挑战周期] {_why}")
             if _do:
-                print("  触发全量重训（20万步，带早停）…")
-                model, _best, _hist = train_with_early_stop(
-                    model, 200000, _eval_holdout, '快乐8定期重训', n_chunks=16, patience=6,
-                reset_timesteps=True, warmup_chunks=5)
+                _n_clean = max(len(records) - _hold_mid, 1)
+                _se_clean = math.sqrt(6*0.25*0.75) / math.sqrt(_n_clean)
+                def _mk():
+                    m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                            n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
+                            ent_coef=ENT_COEF['kl8'], verbose=0, device='cpu')
+                    return m
+                def _tr(m):
+                    return train_with_early_stop(m, 200000, _eval_holdout, '快乐8挑战者',
+                                                 n_chunks=16, patience=6,
+                                                 reset_timesteps=True, warmup_chunks=5)
+                def _ev(m):
+                    return _eval_holdout(half='report', use_model=m)
+                model, _swapped, _msg = run_challenge(
+                    model, _mk, _tr, _ev, _se_clean, '快乐8')
+                print(f"  [挑战结果] {_msg}")
+                _do = _swapped   # 只有换人了才需要保存
+                _best = _eval_holdout(); _hist = [round(_best,4)]
             else:
                 _best = _eval_holdout(); _hist = [round(_best,4)]
-                print(f"  [冻结] 沿用已有权重出预测，当前holdout评分 {_best:.4f}")
+                print(f"  [现任模型] 沿用已有权重出预测，holdout评分 {_best:.4f}")
         else:
             print("  增量微调（2万步，带早停）…")
             model, _best, _hist = train_with_early_stop(
@@ -2264,15 +2317,19 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     if _off: print(f"  [分段开关] 双色球 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
 
     _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
-    def _eval_holdout(mask=None):
-        """在holdout上评分：红球平均命中数 + 蓝球命中率加权。mask=(s,e)时清零该区间。"""
+    _hold_mid = (_hold_start + len(records)) // 2   # 前半选权重，后半只报分
+    def _eval_holdout(mask=None, half='select', use_model=None):
+        """在holdout上评分：红球平均命中数 + 蓝球命中率加权。mask=(s,e)时清零该区间。
+           half='select'用前一半(早停选权重)，half='report'用后一半(从不参与选择，评分干净)"""
         tot, n = 0.0, 0
-        for i in range(_hold_start, len(records)):
+        _rng = range(_hold_start, _hold_mid) if half=='select' else range(_hold_mid, len(records))
+        for i in _rng:
             st = build_state(i)
             if st is None: continue
             if mask is not None:
                 st = st.copy(); st[mask[0]:mask[1]] = 0.0
-            a,_ = model.predict(st, deterministic=True)
+            _m = use_model if use_model is not None else model
+            a,_ = _m.predict(st, deterministic=True)
             rsel = set(int(x)+1 for x in np.argsort(a[:33])[-SSQ_RED_PICK_N:])
             bpred = int(np.argmax(a[33:]))+1
             tot += len(set(records[i]['red']) & rsel) + 0.5*int(bpred==records[i]['blue'])
@@ -2288,16 +2345,30 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # 冻结模式：平时不训练（输出稳定、无过拟合），
             # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
             # 而不是每天拿万分之一的新数据空转。
-            _do, _why = should_retrain('ssq', len(records))
-            print(f"  [定期进化] {_why}")
+            _do, _why = should_challenge('ssq', len(records))
+            print(f"  [挑战周期] {_why}")
             if _do:
-                print("  触发全量重训（15万步，带早停）…")
-                model, _best, _hist = train_with_early_stop(
-                    model, 150000, _eval_holdout, '双色球定期重训', n_chunks=16, patience=6,
-                reset_timesteps=True, warmup_chunks=5)
+                _n_clean = max(len(records) - _hold_mid, 1)
+                _se_clean = math.sqrt(6*(6/33)*(27/33)) / math.sqrt(_n_clean)
+                def _mk():
+                    m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                            n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
+                            ent_coef=ENT_COEF['ssq'], verbose=0, device='cpu')
+                    return m
+                def _tr(m):
+                    return train_with_early_stop(m, 150000, _eval_holdout, '双色球挑战者',
+                                                 n_chunks=16, patience=6,
+                                                 reset_timesteps=True, warmup_chunks=5)
+                def _ev(m):
+                    return _eval_holdout(half='report', use_model=m)
+                model, _swapped, _msg = run_challenge(
+                    model, _mk, _tr, _ev, _se_clean, '双色球')
+                print(f"  [挑战结果] {_msg}")
+                _do = _swapped   # 只有换人了才需要保存
+                _best = _eval_holdout(); _hist = [round(_best,4)]
             else:
                 _best = _eval_holdout(); _hist = [round(_best,4)]
-                print(f"  [冻结] 沿用已有权重出预测，当前holdout评分 {_best:.4f}")
+                print(f"  [现任模型] 沿用已有权重出预测，holdout评分 {_best:.4f}")
         else:
             print("  增量微调（1.5万步，带早停）…")
             model, _best, _hist = train_with_early_stop(
@@ -2599,7 +2670,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
     _hold_mid = (_hold_start + len(records)) // 2
-    def _eval_holdout(mask=None, half='select'):
+    def _eval_holdout(mask=None, half='select', use_model=None):
         """
         holdout评分。关键：分成两半用途不同——
         · half='select'：前一半，用于早停挑权重
@@ -2617,7 +2688,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             if st is None: continue
             if mask is not None:
                 st = st.copy(); st[mask[0]:mask[1]] = 0.0
-            a,_ = model.predict(st, deterministic=True)
+            _m = use_model if use_model is not None else model
+            a,_ = _m.predict(st, deterministic=True)
             act = records[i]['digits']
             tot += sum(1 for k in range(3) if int(a[k])==act[k]); n += 1
         return tot/n if n else 0.0
@@ -2631,16 +2703,30 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # 冻结模式：平时不训练（输出稳定、无过拟合），
             # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
             # 而不是每天拿万分之一的新数据空转。
-            _do, _why = should_retrain('3d', len(records))
-            print(f"  [定期进化] {_why}")
+            _do, _why = should_challenge('3d', len(records))
+            print(f"  [挑战周期] {_why}")
             if _do:
-                print("  触发全量重训（10万步，带早停）…")
-                model, _best, _hist = train_with_early_stop(
-                    model, 100000, _eval_holdout, '3D定期重训', n_chunks=16, patience=6,
-                reset_timesteps=True, warmup_chunks=5)
+                _n_clean = max(len(records) - _hold_mid, 1)
+                _se_clean = math.sqrt(3*0.1*0.9) / math.sqrt(_n_clean)
+                def _mk():
+                    m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                            n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
+                            ent_coef=ENT_COEF['3d'], verbose=0, device='cpu')
+                    return m
+                def _tr(m):
+                    return train_with_early_stop(m, 100000, _eval_holdout, '3D挑战者',
+                                                 n_chunks=16, patience=6,
+                                                 reset_timesteps=True, warmup_chunks=5)
+                def _ev(m):
+                    return _eval_holdout(half='report', use_model=m)
+                model, _swapped, _msg = run_challenge(
+                    model, _mk, _tr, _ev, _se_clean, '3D')
+                print(f"  [挑战结果] {_msg}")
+                _do = _swapped   # 只有换人了才需要保存
+                _best = _eval_holdout(); _hist = [round(_best,4)]
             else:
                 _best = _eval_holdout(); _hist = [round(_best,4)]
-                print(f"  [冻结] 沿用已有权重出预测，当前holdout评分 {_best:.4f}")
+                print(f"  [现任模型] 沿用已有权重出预测，holdout评分 {_best:.4f}")
         else:
             print("  增量微调（1万步，带早停）…")
             model, _best, _hist = train_with_early_stop(
