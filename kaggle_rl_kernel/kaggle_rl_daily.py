@@ -1050,13 +1050,67 @@ def append_history(game, record):
     try:
         with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False, indent=1)
         if len(hist) >= 3:
-            recent = [h.get('holdout_score') for h in hist[-10:] if h.get('holdout_score') is not None]
-            if len(recent) >= 3:
-                trend = "上升" if recent[-1] > sum(recent[:-1])/len(recent[:-1]) else "下降/持平"
-                print(f"    [历史] 已积累{len(hist)}天记录，近{len(recent)}天holdout评分: "
-                      f"{[round(r,3) for r in recent]}  趋势: {trend}")
+            sel = [h.get('holdout_score') for h in hist[-10:] if h.get('holdout_score') is not None]
+            cln = [h.get('clean_score')   for h in hist[-10:] if h.get('clean_score')   is not None]
+            if len(sel) >= 3:
+                print(f"    [历史] 已积累{len(hist)}天记录")
+                print(f"      选择分(会虚高): {[round(r,3) for r in sel]}")
+                if len(cln) >= 3:
+                    print(f"      干净分(可信)  : {[round(r,3) for r in cln]}")
+                    # 两条曲线背离 = 涨的是筛选假象，不是真本事
+                    d_sel = sel[-1] - sum(sel[:-1])/len(sel[:-1])
+                    d_cln = cln[-1] - sum(cln[:-1])/len(cln[:-1])
+                    if d_sel > 0.02 and d_cln <= 0:
+                        print(f"      ⚠ 选择分在涨({d_sel:+.3f})但干净分没涨({d_cln:+.3f})"
+                              f" —— 涨的是对holdout的过拟合，不是真实能力")
+                    elif d_cln > 0.02:
+                        print(f"      ✓ 干净分也在涨({d_cln:+.3f})，是真实提升")
     except Exception as e:
         print(f"    ! 写入历史失败: {e}")
+
+
+# ══════════════════════════════════════════════════════
+#  训练模式
+#  'frozen'      首训一次得到权重后冻结，之后每天只加载权重 + 喂新数据 + 出预测，
+#                不再训练。这样既不会过拟合（根本没训练），输出也稳定
+#                （权重固定，结果只随新数据变，不会今天有偏好明天变均匀）。
+#  'incremental' 每天在旧权重上微调（实测第2天六段全部低于基准、零提升）
+#  'fresh'       每天从零全量训练
+# ══════════════════════════════════════════════════════
+TRAIN_MODE = 'frozen'
+
+# ══════════════════════════════════════════════════════
+#  定期进化：攒够足够多的新数据才重训一次
+#
+#  为什么不每天训：每天只新增1期，占总数万分之一（3D是0.011%），
+#  梯度更新99.99%在重复已学过的内容——学不到新东西，
+#  反而每天扰动权重，导致输出忽有偏好忽而均匀。
+#
+#  攒够 RETRAIN_AFTER_N_NEW 期新数据再全量重训一次，
+#  这时新数据占比才有意义，模型才真的在"进化"而不是空转。
+#  平时保持冻结，输出稳定。
+# ══════════════════════════════════════════════════════
+RETRAIN_AFTER_N_NEW = {
+    '3d':  180,   # 每天1期 → 约半年一次
+    'ssq':  40,   # 每周3期 → 约3个月一次
+    'kl8':  40,   # 每天1期 → 约1个半月一次
+}
+
+
+def should_retrain(game, cur_n):
+    """
+    判断是否到了该重训的时候：距上次训练时的期数，是否已积累够新数据。
+    返回 (是否重训, 说明文字)
+    """
+    last = get_last_trained_n(game)
+    if last <= 0:
+        return True, "首次运行，需要完整训练"
+    grew = cur_n - last
+    need = RETRAIN_AFTER_N_NEW.get(game, 100)
+    if grew >= need:
+        return True, f"距上次训练已新增{grew}期（阈值{need}期），触发定期重训"
+    return False, f"距上次训练新增{grew}/{need}期，数据量不足以支撑有效学习，保持冻结"
+
 
 
 def train_with_early_stop(model, total_steps, eval_fn, label,
@@ -1756,6 +1810,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('kl8')
+    _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
     is_new = model is None
     t0 = time.time()
     if not is_new:
@@ -1823,10 +1878,25 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 200000, _eval_holdout, '快乐8首训', n_chunks=16, patience=6,
             reset_timesteps=True, warmup_chunks=5)
     else:
-        print("  增量微调（2万步，带早停）…")
-        model, _best, _hist = train_with_early_stop(
-            model, 20000, _eval_holdout, '快乐8微调', n_chunks=8, patience=4,
-            reset_timesteps=False, warmup_chunks=2)
+        if TRAIN_MODE == 'frozen':
+            # 冻结模式：平时不训练（输出稳定、无过拟合），
+            # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
+            # 而不是每天拿万分之一的新数据空转。
+            _do, _why = should_retrain('kl8', len(records))
+            print(f"  [定期进化] {_why}")
+            if _do:
+                print("  触发全量重训（20万步，带早停）…")
+                model, _best, _hist = train_with_early_stop(
+                    model, 200000, _eval_holdout, '快乐8定期重训', n_chunks=16, patience=6,
+                reset_timesteps=True, warmup_chunks=5)
+            else:
+                _best = _eval_holdout(); _hist = [round(_best,4)]
+                print(f"  [冻结] 沿用已有权重出预测，当前holdout评分 {_best:.4f}")
+        else:
+            print("  增量微调（2万步，带早停）…")
+            model, _best, _hist = train_with_early_stop(
+                model, 20000, _eval_holdout, '快乐8微调', n_chunks=8, patience=4,
+                reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
     _st_probe = build_state(len(records))
@@ -1839,13 +1909,23 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
                     ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 80), ('频率', 80),
                     ('马尔可夫', 80), ('贝叶斯', 160)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
-    _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8', 'kl8',
-                                 se=math.sqrt(6*0.25*0.75)/math.sqrt(max(len(records)-_hold_start,1)))
+    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
+    _ablation = []
+    if TRAIN_MODE != 'frozen':
+        _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8', 'kl8',
+                                     se=math.sqrt(6*0.25*0.75)/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
                           'ent_coef': ENT_COEF['kl8'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
-    save_ppo(model, 'kl8')
+    # 只有真正训练过才保存：冻结且未触发重训时权重没变，
+    # 重复推送没意义，还可能意外覆坏已有权重
+    _trained = (TRAIN_MODE != 'frozen') or is_new or _do
+    if _trained:
+        save_ppo(model, 'kl8')
+        save_last_trained_n('kl8', len(records))   # 记录本次训练时的期数，供下次判断
+    else:
+        print("  [冻结] 权重未改动，跳过保存")
 
     # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
     start = max(SEQ_LEN+30, len(records)-30)
@@ -2142,6 +2222,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     vec_env = make_vec_env(make_env, n_envs=4)
 
     model = load_ppo('ssq')
+    _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
     is_new = model is None
     t0 = time.time()
     if not is_new:
@@ -2203,10 +2284,25 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 150000, _eval_holdout, '双色球首训', n_chunks=16, patience=6,
             reset_timesteps=True, warmup_chunks=5)
     else:
-        print("  增量微调（1.5万步，带早停）…")
-        model, _best, _hist = train_with_early_stop(
-            model, 15000, _eval_holdout, '双色球微调', n_chunks=8, patience=4,
-            reset_timesteps=False, warmup_chunks=2)
+        if TRAIN_MODE == 'frozen':
+            # 冻结模式：平时不训练（输出稳定、无过拟合），
+            # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
+            # 而不是每天拿万分之一的新数据空转。
+            _do, _why = should_retrain('ssq', len(records))
+            print(f"  [定期进化] {_why}")
+            if _do:
+                print("  触发全量重训（15万步，带早停）…")
+                model, _best, _hist = train_with_early_stop(
+                    model, 150000, _eval_holdout, '双色球定期重训', n_chunks=16, patience=6,
+                reset_timesteps=True, warmup_chunks=5)
+            else:
+                _best = _eval_holdout(); _hist = [round(_best,4)]
+                print(f"  [冻结] 沿用已有权重出预测，当前holdout评分 {_best:.4f}")
+        else:
+            print("  增量微调（1.5万步，带早停）…")
+            model, _best, _hist = train_with_early_stop(
+                model, 15000, _eval_holdout, '双色球微调', n_chunks=8, patience=4,
+                reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
     _st_probe = build_state(len(records))
@@ -2219,13 +2315,23 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
                     ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 49),
                     ('马尔可夫', 33), ('贝叶斯', 66)]:
         _segs.append((_nm, _p, _p+_d)); _p += _d
-    _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球', 'ssq',
-                                 se=math.sqrt(6*(6/33)*(27/33))/math.sqrt(max(len(records)-_hold_start,1)))
+    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
+    _ablation = []
+    if TRAIN_MODE != 'frozen':
+        _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球', 'ssq',
+                                     se=math.sqrt(6*(6/33)*(27/33))/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
                           'ent_coef': ENT_COEF['ssq'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
-    save_ppo(model, 'ssq')
+    # 只有真正训练过才保存：冻结且未触发重训时权重没变，
+    # 重复推送没意义，还可能意外覆坏已有权重
+    _trained = (TRAIN_MODE != 'frozen') or is_new or _do
+    if _trained:
+        save_ppo(model, 'ssq')
+        save_last_trained_n('ssq', len(records))   # 记录本次训练时的期数，供下次判断
+    else:
+        print("  [冻结] 权重未改动，跳过保存")
 
     # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
@@ -2445,7 +2551,11 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                mk_arr, by_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    model = load_ppo('3d')
+    # fresh 模式才不加载；frozen 和 incremental 都需要旧权重
+    model = None if TRAIN_MODE == 'fresh' else load_ppo('3d')
+    _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
+    if TRAIN_MODE == 'fresh':
+        print("  [训练模式] fresh：不加载旧权重，本次从零全量训练")
     is_new = model is None
     t0 = time.time()
     if not is_new:
@@ -2488,11 +2598,21 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return apply_segment_switches(st, _segs_3d, '3d')
 
     _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
-    def _eval_holdout(mask=None):
-        """在holdout（模型未训练过的最近30期）上评分：平均命中位数。
-           mask=(start,end) 时把状态向量该区间清零，用于消融诊断。"""
+    _hold_mid = (_hold_start + len(records)) // 2
+    def _eval_holdout(mask=None, half='select'):
+        """
+        holdout评分。关键：分成两半用途不同——
+        · half='select'：前一半，用于早停挑权重
+        · half='report'：后一半，只报分、绝不参与选择
+
+        为什么要分：早停每天在同一批期数上挑分数最高的权重，
+        连续几十天下来，选出的是"最会做这批题"的模型，
+        它在这批题上的分数会稳步虚高，不代表真实泛化能力。
+        留一半从不参与选择的题，报出来的分才干净。
+        """
+        rng = range(_hold_start, _hold_mid) if half=='select' else range(_hold_mid, len(records))
         tot, n = 0, 0
-        for i in range(_hold_start, len(records)):
+        for i in rng:
             st = build_state(i)
             if st is None: continue
             if mask is not None:
@@ -2507,23 +2627,54 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             model, 100000, _eval_holdout, '3D首训', n_chunks=16, patience=6,
             reset_timesteps=True, warmup_chunks=5)
     else:
-        print("  增量微调（1万步，带早停）…")
-        model, _best, _hist = train_with_early_stop(
-            model, 10000, _eval_holdout, '3D微调', n_chunks=8, patience=4,
-            reset_timesteps=False, warmup_chunks=2)
+        if TRAIN_MODE == 'frozen':
+            # 冻结模式：平时不训练（输出稳定、无过拟合），
+            # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
+            # 而不是每天拿万分之一的新数据空转。
+            _do, _why = should_retrain('3d', len(records))
+            print(f"  [定期进化] {_why}")
+            if _do:
+                print("  触发全量重训（10万步，带早停）…")
+                model, _best, _hist = train_with_early_stop(
+                    model, 100000, _eval_holdout, '3D定期重训', n_chunks=16, patience=6,
+                reset_timesteps=True, warmup_chunks=5)
+            else:
+                _best = _eval_holdout(); _hist = [round(_best,4)]
+                print(f"  [冻结] 沿用已有权重出预测，当前holdout评分 {_best:.4f}")
+        else:
+            print("  增量微调（1万步，带早停）…")
+            model, _best, _hist = train_with_early_stop(
+                model, 10000, _eval_holdout, '3D微调', n_chunks=8, patience=4,
+                reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
-          f"回测第{_hold_start}~{len(records)-1}期（模型未训练过，样本外）")
+    _clean = _eval_holdout(half='report')
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期（样本外holdout {len(records)-_hold_start}期）")
+    print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
+          f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}（随机基准0.30）")
+    print(f"    → 这个数才是没被筛选污染的。若它长期不涨而选择分在涨，说明涨的是假象")
 
     # ── 消融诊断：测量状态向量各段的真实贡献 ──
     _segs = _segs_3d; _p = _segs[-1][2]
-    _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D', '3d',
-                                 se=math.sqrt(3*0.1*0.9)/math.sqrt(max(len(records)-_hold_start,1)))
-    append_history('3d', {'date': str(date.today()), 'holdout_score': round(_best,4),
+    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
+    _ablation = []
+    if TRAIN_MODE != 'frozen':
+        _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D', '3d',
+                                     se=math.sqrt(3*0.1*0.9)/math.sqrt(max(len(records)-_hold_start,1)))
+    append_history('3d', {'date': str(date.today()),
+                          'holdout_score': round(_best,4),        # 早停选出来的，会虚高
+                          'clean_score': round(_clean,4),         # 未参与选择，这个才可信
+                          'train_mode': TRAIN_MODE,
                           'ent_coef': ENT_COEF['3d'],
                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
-    save_ppo(model, '3d')
+    # 只有真正训练过才保存：冻结且未触发重训时权重没变，
+    # 重复推送没意义，还可能意外覆坏已有权重
+    _trained = (TRAIN_MODE != 'frozen') or is_new or _do
+    if _trained:
+        save_ppo(model, '3d')
+        save_last_trained_n('3d', len(records))   # 记录本次训练时的期数，供下次判断
+    else:
+        print("  [冻结] 权重未改动，跳过保存")
 
     # 回测最近30期：统计位命中数分布 + 全中次数
     start=max(SEQ_LEN+5, len(records)-30); total=0
@@ -2651,8 +2802,14 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
             _emax = math.log(10)
             _gap = _emax - float(np.mean(ent))
-            print(f"    → 平均熵比均匀低 {_gap:.4f}（ent_coef={ENT_COEF['3d']}）："
-                  + ("模型开始做判断了 ✓" if _gap > 0.05 else "仍接近均匀，模型没有形成偏好 ⚠"))
+            # 把熵差换算成"最高候选概率"，比抽象的熵值直观；
+            # 注意：熵只反映模型敢不敢下判断，不代表判断正确——
+            # 之前那个 0.05 的门槛是拍脑袋定的，会把17%这种明显有倾向的情况误判成"没偏好"。
+            _top_p = float(np.max([np.max(p) for p in pos_probs]))
+            print(f"    → 平均熵比均匀低 {_gap:.4f}，最高候选 {_top_p*100:.1f}%（均匀基准10.0%，"
+                  f"ent_coef={ENT_COEF['3d']}）")
+            print(f"    → 注意：熵低只说明模型敢下判断，不代表判断对。"
+                  f"是否真有价值看 holdout 评分是否稳定高于随机基准 0.30")
             # 与上次推荐对比：微调有没有产生实际变化，一眼可见
             try:
                 _prev = (prev_result or {}).get('ppo_groups') or []
