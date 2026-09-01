@@ -1273,27 +1273,69 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
     return {'skipped': True, 'games_tested': 0, 'reason': reason,
             'note': f'{reason}，且未找到上次训练结果可沿用（可能是首次运行）'}
 
-def normalize_state_segments(*segments):
+# 各段的归一化基准（首次计算后缓存，之后固定不变）
+_SEG_SCALE_CACHE = {}
+_SCALE_FILE = 'seg_scales.json'
+
+
+def load_seg_scales():
     """
-    分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
-    问题根源：raw特征里像"号码总和均值"这类聚合量级在几百到近千，
-    而遗漏值(0-3)、ML概率(0-1)量级很小，如果整个向量共用一个全局最大值做归一化，
-    遗漏和ML概率信号会被压缩到接近0，模型实际上"看不到"这些真正能区分号码好坏的关键信息，
-    只能学到一些跟具体选哪个球无关的全局统计偏向，导致策略跟状态基本脱钩、
-    收敛到一个固定的、看似随意的偏好（这次表现为一直偏向大号）。
-    修复：每一段各自独立按自己的最大值缩放到[-1,1]附近，再拼接，
-    确保任何一段都不会因为量级差异淹没其它段的信号。
+    从Dataset读取归一化基准。基准必须跨天保持一致——
+    如果每天重新计算，就退化回原来那个"输入天天漂移"的问题，
+    首训学到的权重第二天照样对不上。
     """
+    global _SEG_SCALE_CACHE
+    for p in (f'{RL_MOUNTED}/{_SCALE_FILE}', f'{RL_LOCAL_DIR}/{_SCALE_FILE}'):
+        if os.path.exists(p):
+            try:
+                with open(p) as f:
+                    raw = json.load(f)
+                _SEG_SCALE_CACHE = {k: {int(i): float(v) for i, v in d.items()} for k, d in raw.items()}
+                print(f"  ✓ 已加载归一化基准（{len(_SEG_SCALE_CACHE)}个游戏），保证与首训时的输入口径一致")
+                return
+            except Exception as e:
+                print(f"  ! 读取归一化基准失败: {e}")
+    print("  ! 未找到归一化基准，本次将新建（首次运行属正常）")
+
+
+def save_seg_scales():
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(f'{RL_LOCAL_DIR}/{_SCALE_FILE}', 'w') as f:
+            json.dump({k: {str(i): v for i, v in d.items()} for k, d in _SEG_SCALE_CACHE.items()}, f)
+    except Exception as e:
+        print(f"  ! 保存归一化基准失败: {e}")
+
+
+def normalize_state_segments(*segments, scale_key=None):
+    """
+    分段归一化，每段除以一个【固定基准】而不是"当前这一段自己的最大值"。
+
+    ── 为什么必须改 ──
+    原来每次调用都拿 seg.max() 当分母。新开一期后，某个特征成了新的最大值，
+    整段的缩放基准就跟着变——结果是【本来没变的特征，归一化后也变了】。
+    实测：一段5个值只有最后一个从812变成850，前4个值归一化后偏移了0.044，
+    模型每天看到的输入一直在漂移，首训学到的东西第二天就对不上，
+    表现为"同一份权重，昨天有偏好、今天变均匀"。
+
+    现在改成：首次调用时按该段的实际量级确定一个基准并缓存，之后固定使用。
+    同样的底层数据永远映射到同样的向量，模型学到的规律才能延用。
+    """
+    key = scale_key or 'default'
+    cache = _SEG_SCALE_CACHE.setdefault(key, {})
     normed = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         seg = np.asarray(seg, dtype=np.float32)
         if seg.size == 0:
-            normed.append(seg)
-            continue
-        m = np.abs(seg).max()
-        normed.append(seg / (m + 1e-8) if m > 0 else seg)
+            normed.append(seg); continue
+        if i not in cache:
+            m = float(np.abs(seg).max())
+            # 用当次最大值的1.5倍作为固定基准，留出后续波动空间，避免频繁越界被截断
+            cache[i] = max(m * 1.5, 1e-6)
+        normed.append(seg / cache[i])
     state = np.concatenate(normed).astype(np.float32)
     return np.clip(state, -5, 5)
+
 
 # ══════════════════════════════════════════════════════
 #  集成环境
@@ -1360,7 +1402,7 @@ class IntegratedKL8Env(gym.Env):
 
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr,mk,by)
+        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr,mk,by, scale_key='kl8')
         _sg = self._segs()
         state = apply_segment_switches(state, _sg, 'kl8')
         # 逐球信号（遗漏+频率）加权。用精确段边界定位，
@@ -1455,7 +1497,7 @@ class IntegratedSSQEnv(gym.Env):
 
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by, scale_key='ssq')
         return apply_segment_switches(st, self._segs(), 'ssq')
 
     def _segs(self):
@@ -1552,7 +1594,7 @@ class Integrated3DEnv(gym.Env):
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
         mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
         by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by, scale_key='3d')
         return apply_segment_switches(st, self._segs(), '3d')
 
     def _segs(self):
@@ -1741,7 +1783,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         om = omit_arr[idx]
         fr = freq_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
-        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr,mk,by)
+        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr,mk,by, scale_key='kl8')
         state = apply_segment_switches(state, _segs_kl8, 'kl8')
         # 逐球信号（遗漏+频率）加权。必须用精确段边界定位：
         # 之前写 state[-160:]，在马尔可夫/贝叶斯加进来之后，末尾160维已经变成它们了，
@@ -2126,7 +2168,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
-        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by, scale_key='ssq')
         return apply_segment_switches(st, _segs_ssq, 'ssq')
 
     # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
@@ -2442,7 +2484,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         mk = mk_arr[idx]; by = by_arr[idx]
-        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by)
+        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by, scale_key='3d')
         return apply_segment_switches(st, _segs_3d, '3d')
 
     _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
@@ -2611,6 +2653,17 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             _gap = _emax - float(np.mean(ent))
             print(f"    → 平均熵比均匀低 {_gap:.4f}（ent_coef={ENT_COEF['3d']}）："
                   + ("模型开始做判断了 ✓" if _gap > 0.05 else "仍接近均匀，模型没有形成偏好 ⚠"))
+            # 与上次推荐对比：微调有没有产生实际变化，一眼可见
+            try:
+                _prev = (prev_result or {}).get('ppo_groups') or []
+                if _prev:
+                    _now_set = {tuple(g) for g in groups}
+                    _pre_set = {tuple(g) for g in _prev}
+                    _same = len(_now_set & _pre_set)
+                    print(f"    [与上次对比] 本次{len(groups)}注中有 {_same} 注与上次相同，"
+                          f"{len(groups)-_same} 注是新的"
+                          + ("  ← 微调产生了有效变化 ✓" if _same < len(groups) else "  ← 推荐完全没变 ⚠"))
+            except Exception: pass
         except Exception as e:
             print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
             action,_ = model.predict(state, deterministic=True)
@@ -2658,6 +2711,9 @@ if not raw: print("失败"); sys.exit(1)
 history = json.loads(raw)
 
 # 读取 prediction.json 取ML概率向量（RL状态的一部分）
+# 加载归一化基准：必须在任何 build_state 之前，保证输入口径与首训时一致
+load_seg_scales()
+
 raw_ml = gh_raw('prediction.json')
 ml_preds = {}
 if raw_ml:
@@ -2703,6 +2759,7 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
         print(f"{game} 失败: {e}")
 
 # 推送RL模型到Kaggle Dataset
+save_seg_scales()   # 基准随模型一起持久化，下次运行沿用同一口径
 print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
 push_rl_dataset()
 
