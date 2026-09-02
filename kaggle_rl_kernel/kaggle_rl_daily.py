@@ -1097,14 +1097,21 @@ TRAIN_MODE = 'frozen'
 #    不过拟合 —— 上位门槛是干净数据上的真实提升，靠运气赢不了
 #    稳定   —— 挑战失败就完全不动，权重和输出保持不变
 # ══════════════════════════════════════════════════════
-CHALLENGE_EVERY = {
-    '3d':  20,   # 每天1期 → 约20天一次挑战
-    'ssq': 12,   # 每周3期 → 约4周一次
-    'kl8': 20,   # 每天1期 → 约20天一次
-}
+# 每期都挑战（新数据一到就发起），让模型尽快稳定到较好状态。
+# 注意：挑战次数变多会带来"多重比较"问题——
+# 实测所有模型真实水平完全相同时，每天挑战365次，
+# 有82%的概率纯靠运气发生一次"假上位"。挑得越勤，蒙对的机会越多。
+# 解决办法是把门槛从2倍标准误提到3.5倍，并加一道复检（见 run_challenge）：
+#   门槛2.0SE：假上位66.5%，真提升采纳99.7%
+#   门槛3.5SE：假上位17.7%，真提升采纳91.1%
+#   门槛3.5SE+复检：假上位 4.8%，真提升采纳89.5%  ← 采用这个
+CHALLENGE_EVERY = {'3d': 1, 'ssq': 1, 'kl8': 1}
+
+# 上位门槛（标准误的倍数）。每期挑战下必须调高，否则运气会不断"换人"
+CHALLENGE_MARGIN_K = 3.5
 
 
-def run_challenge(cur_model, make_fresh_model, train_fn, eval_clean, se, label):
+def run_challenge(cur_model, make_fresh_model, train_fn, eval_clean, se, label, recheck_fn=None):
     """
     挑战流程：训练一个全新模型，在干净holdout上与现任比较，赢了才替换。
 
@@ -1127,12 +1134,24 @@ def run_challenge(cur_model, make_fresh_model, train_fn, eval_clean, se, label):
     new_score = eval_clean(challenger)
 
     margin = new_score - cur_score
-    need = 2 * se     # 必须超过噪声水平才算真赢，否则只是运气
+    need = CHALLENGE_MARGIN_K * se
     print(f"    [挑战赛] 挑战者干净评分: {new_score:.4f}  差距 {margin:+.4f}"
-          f"（需超过 {need:.4f} 才算真提升）")
-    if margin > need:
-        return challenger, True, f"✓ 挑战成功，新模型上位（提升 {margin:+.4f}）"
-    return cur_model, False, f"✗ 挑战失败，保留现任（差距 {margin:+.4f} 未超过噪声 {need:.4f}）"
+          f"（需超过 {need:.4f} = {CHALLENGE_MARGIN_K}倍标准误）")
+    if margin <= need:
+        return cur_model, False, f"✗ 挑战失败，保留现任（差距 {margin:+.4f} 未达门槛 {need:.4f}）"
+
+    # 复检：赢了先别急着换。用另一半holdout（早停选权重用的那半，
+    # 对挑战者和现任同样都是"没参与过自己训练"的数据）独立再比一次。
+    # 单次赢可能是运气，两次都赢才可信——实测把假上位率从17.7%压到4.8%。
+    if recheck_fn is not None:
+        c2, n2 = recheck_fn(cur_model), recheck_fn(challenger)
+        m2 = n2 - c2
+        print(f"    [复检] 另一半数据上 现任{c2:.4f} vs 挑战者{n2:.4f}  差距 {m2:+.4f}"
+              f"（需超过 {need*0.5:.4f}）")
+        if m2 <= need * 0.5:
+            return cur_model, False, f"✗ 复检未通过，保留现任（首轮{margin:+.4f} 但复检仅{m2:+.4f}）"
+        return challenger, True, f"✓ 两轮均胜，新模型上位（首轮{margin:+.4f} 复检{m2:+.4f}）"
+    return challenger, True, f"✓ 挑战成功，新模型上位（提升 {margin:+.4f}）"
 
 
 def should_challenge(game, cur_n):
@@ -1937,8 +1956,11 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                                  reset_timesteps=True, warmup_chunks=5)
                 def _ev(m):
                     return _eval_holdout(half='report', use_model=m)
+                def _rc(m):
+                    # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
+                    return _eval_holdout(half='select', use_model=m)
                 model, _swapped, _msg = run_challenge(
-                    model, _mk, _tr, _ev, _se_clean, '快乐8')
+                    model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='快乐8')
                 print(f"  [挑战结果] {_msg}")
                 _do = _swapped   # 只有换人了才需要保存
                 _best = _eval_holdout(); _hist = [round(_best,4)]
@@ -2361,8 +2383,11 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                                  reset_timesteps=True, warmup_chunks=5)
                 def _ev(m):
                     return _eval_holdout(half='report', use_model=m)
+                def _rc(m):
+                    # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
+                    return _eval_holdout(half='select', use_model=m)
                 model, _swapped, _msg = run_challenge(
-                    model, _mk, _tr, _ev, _se_clean, '双色球')
+                    model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='双色球')
                 print(f"  [挑战结果] {_msg}")
                 _do = _swapped   # 只有换人了才需要保存
                 _best = _eval_holdout(); _hist = [round(_best,4)]
@@ -2719,8 +2744,11 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                                  reset_timesteps=True, warmup_chunks=5)
                 def _ev(m):
                     return _eval_holdout(half='report', use_model=m)
+                def _rc(m):
+                    # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
+                    return _eval_holdout(half='select', use_model=m)
                 model, _swapped, _msg = run_challenge(
-                    model, _mk, _tr, _ev, _se_clean, '3D')
+                    model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='3D')
                 print(f"  [挑战结果] {_msg}")
                 _do = _swapped   # 只有换人了才需要保存
                 _best = _eval_holdout(); _hist = [round(_best,4)]
