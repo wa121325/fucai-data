@@ -973,6 +973,58 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
         print(f"      ✓ 模型输出随状态变化，确实在用输入信息")
 
 
+def policy_dependence_test(model, build_state_fn, idx_list, game, n_pos=3, n_val=10):
+    """
+    策略依赖性检测：模型到底有没有在用状态？
+
+    ── 为什么这是最关键的诊断 ──
+    如果模型对差异很大的历史时点都输出几乎相同的分布，
+    说明它收敛成了"常数策略"——不管输入什么都推荐同一组号码，
+    那么权重学到的东西就没有意义，新开奖也永远影响不了推荐。
+    这跟"输入变化太小"是完全不同的两个问题，处理方式也完全不同。
+
+    做法：取若干相隔很远的历史时点，各算一次输出分布，
+    统计"最高概率数字"是否都一样、分布之间差异有多大。
+    """
+    dists, tops = [], []
+    for i in idx_list:
+        st = build_state_fn(i)
+        if st is None: continue
+        try:
+            obs_t, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs_t)
+            dl = getattr(dist, 'distribution', None)
+            if isinstance(dl, (list, tuple)):
+                p = np.concatenate([d.probs.detach().cpu().numpy()[0] for d in dl])
+                tops.append(tuple(int(np.argmax(d.probs.detach().cpu().numpy()[0])) for d in dl))
+            else:
+                p = model.predict(st, deterministic=True)[0].astype(np.float32)
+                tops.append(tuple(np.argsort(p)[-6:].tolist()))
+            dists.append(p)
+        except Exception:
+            continue
+    if len(dists) < 3:
+        print(f"    [策略依赖性] 样本不足，跳过"); return None
+    D = np.array(dists)
+    # 各维度在不同时点之间的标准差：越大说明输出越随状态变化
+    spread = float(np.mean(np.std(D, axis=0)))
+    mean_lvl = float(np.mean(np.abs(D)))
+    ratio = spread / (mean_lvl + 1e-9)
+    uniq = len(set(tops))
+    print(f"    [策略依赖性] 取{len(dists)}个相隔较远的历史时点分别预测：")
+    print(f"      最优组合出现 {uniq} 种不同结果（{len(dists)}个时点）")
+    print(f"      输出分布跨时点波动/均值 = {ratio*100:.1f}%")
+    if uniq <= 1 or ratio < 0.05:
+        print(f"      ⚠️ 模型基本是常数策略——不管输入什么都给同样的答案，")
+        print(f"         权重没有学到状态相关的规律，新开奖自然影响不了推荐")
+    elif ratio < 0.20:
+        print(f"      · 模型对状态有响应但较弱，相邻两天差异小属正常")
+    else:
+        print(f"      ✓ 模型输出明显随状态变化，权重是有内容的")
+    return {'n_points': len(dists), 'unique_best': uniq, 'spread_ratio': round(ratio, 4)}
+
+
 def report_entropy(model, state, game, n_out=None):
     """
     打印策略输出的熵，用来判断模型到底有没有在做判断。
@@ -1010,32 +1062,13 @@ def report_entropy(model, state, game, n_out=None):
 #     应该看 {game}_history.json 里连续多天的 ablation 记录，
 #     某段连续一两周都是负贡献，关掉才有依据。
 # ══════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════
-#  分段开关
-#
-#  ── 为什么关掉 LSTM/TFM 隐层 ──
-#  这672维（占状态向量76.5%）来自DL模型，而DL是【每周】训练一次的，
-#  一周之内权重不变、输入序列几乎不变 → 隐层输出也几乎不变。
-#  结果是：会随新开奖变化的82维走势特征只占9.3%，
-#  被672维几乎不动的数值彻底稀释，模型对"今天开了什么"基本无感，
-#  连续多天输出完全相同的12注推荐。
-#
-#  实测：新增一期后，82个走势特征里有44个变化超过5%（短窗口3期/5期全在动），
-#  输入本身变化很大，是被隐层压住了。
-#
-#  关掉之后，会变的部分占比从9.3%升到约40%，新开奖才能真正影响推荐。
-#  注意：清零不改变维度，所以切换开关不触发重训，随时可以改回来。
-# ══════════════════════════════════════════════════════
+# 分段开关：把某段清零来测试它的贡献。清零不改变维度，切换不触发重训。
 SEGMENT_ENABLE = {
-    '3d':  {'走势特征':True, 'ML+DL概率':True,
-            'LSTM隐层':False, 'TFM隐层':False,   # ← 稀释新数据，关闭
-            '遗漏':True,                          # ← 改回True（之前按单日噪声数据关的，判断不可靠）
-            '马尔可夫':True, '贝叶斯':True},
-    'ssq': {'走势特征':True, 'ML+DL概率':True,
-            'LSTM隐层':False, 'TFM隐层':False,
+    '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
             '遗漏':True, '马尔可夫':True, '贝叶斯':True},
-    'kl8': {'走势特征':True, 'ML+DL概率':True,
-            'LSTM隐层':False, 'TFM隐层':False,
+    'ssq': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+            '遗漏':True, '马尔可夫':True, '贝叶斯':True},
+    'kl8': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
             '遗漏':True, '频率':True, '马尔可夫':True, '贝叶斯':True},
 }
 
@@ -2056,6 +2089,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8', 'kl8',
                                      se=math.sqrt(6*0.25*0.75)/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                          'clean_score': round(_clean,4),
+                          'policy_dependence': _dep,
                           'ent_coef': ENT_COEF['kl8'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
@@ -2483,6 +2518,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球', 'ssq',
                                      se=math.sqrt(6*(6/33)*(27/33))/math.sqrt(max(len(records)-_hold_start,1)))
     append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
+                          'clean_score': round(_clean,4),
+                          'policy_dependence': _dep,
                           'ent_coef': ENT_COEF['ssq'],
                            'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
 
@@ -2848,6 +2885,27 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     except Exception as _e:
         print(f"    [状态敏感度] 检测失败: {_e}")
 
+    # 先测模型到底有没有在用状态——这比任何评分都更根本
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        _dep = policy_dependence_test(model, build_state, _pts, '3d')
+    except Exception as _e:
+        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
+
+    # 先测模型到底有没有在用状态——这比任何评分都更根本
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        _dep = policy_dependence_test(model, build_state, _pts, 'kl8')
+    except Exception as _e:
+        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
+
+    # 先测模型到底有没有在用状态——这比任何评分都更根本
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        _dep = policy_dependence_test(model, build_state, _pts, 'ssq')
+    except Exception as _e:
+        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
+
     _clean = _eval_holdout(half='report')
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期（样本外holdout {len(records)-_hold_start}期）")
     print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
@@ -2864,6 +2922,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     append_history('3d', {'date': str(date.today()),
                           'holdout_score': round(_best,4),        # 早停选出来的，会虚高
                           'clean_score': round(_clean,4),         # 未参与选择，这个才可信
+                          'policy_dependence': _dep,              # 模型是否真的在用状态
                           'train_mode': TRAIN_MODE,
                           'ent_coef': ENT_COEF['3d'],
                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
