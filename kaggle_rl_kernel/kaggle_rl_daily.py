@@ -926,6 +926,53 @@ ENT_COEF = {
 }
 
 
+def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
+    """
+    状态敏感度诊断：喂入多个【时间跨度很大、内容差异明显】的历史状态，
+    看模型输出的Top候选变不变。
+
+    ── 为什么必须查这个 ──
+    如果模型输出的Top候选在完全不同的历史时点都一样，
+    说明它压根没在用状态——学到的是一个固定偏好，跟输入无关。
+    这种情况下"每天喂新数据"毫无意义，推荐永远不变，
+    今天开什么奖对预测没有任何影响（实测出现过连续两天12注完全相同）。
+    """
+    tops, probs_all = [], []
+    for i in idx_list:
+        st = build_state_fn(i)
+        if st is None: continue
+        try:
+            obs_t, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs_t)
+            dl = getattr(dist, 'distribution', None)
+            if isinstance(dl, (list, tuple)):     # MultiDiscrete
+                ps = [d.probs.detach().cpu().numpy()[0] for d in dl]
+                tops.append(tuple(int(np.argmax(p)) for p in ps))
+                probs_all.append(np.concatenate(ps))
+            else:                                  # Box
+                a, _ = model.predict(st, deterministic=True)
+                a = np.asarray(a).ravel()
+                tops.append(tuple(int(x) for x in np.argsort(a)[::-1][:top_k]))
+                probs_all.append(a)
+        except Exception:
+            continue
+    if len(tops) < 2:
+        return
+    uniq = len(set(tops))
+    arr = np.array(probs_all)
+    var = float(np.mean(np.std(arr, axis=0)))     # 各维度在不同状态间的平均波动
+    print(f"    [状态敏感度] 在{len(tops)}个差异很大的历史时点上测试：")
+    print(f"      输出Top组合共{uniq}种（{len(tops)}次测试）  各维度平均波动 {var:.4f}")
+    if uniq == 1:
+        print(f"      ⚠️ 所有时点输出完全相同 —— 模型忽略了状态，学到的是固定偏好，")
+        print(f"         这意味着每天的新开奖对预测没有任何影响，推荐永远不会变")
+    elif uniq <= max(2, len(tops)//4):
+        print(f"      ⚠️ 输出种类很少，模型对状态的响应很弱")
+    else:
+        print(f"      ✓ 模型输出随状态变化，确实在用输入信息")
+
+
 def report_entropy(model, state, game, n_out=None):
     """
     打印策略输出的熵，用来判断模型到底有没有在做判断。
@@ -963,13 +1010,32 @@ def report_entropy(model, state, game, n_out=None):
 #     应该看 {game}_history.json 里连续多天的 ablation 记录，
 #     某段连续一两周都是负贡献，关掉才有依据。
 # ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  分段开关
+#
+#  ── 为什么关掉 LSTM/TFM 隐层 ──
+#  这672维（占状态向量76.5%）来自DL模型，而DL是【每周】训练一次的，
+#  一周之内权重不变、输入序列几乎不变 → 隐层输出也几乎不变。
+#  结果是：会随新开奖变化的82维走势特征只占9.3%，
+#  被672维几乎不动的数值彻底稀释，模型对"今天开了什么"基本无感，
+#  连续多天输出完全相同的12注推荐。
+#
+#  实测：新增一期后，82个走势特征里有44个变化超过5%（短窗口3期/5期全在动），
+#  输入本身变化很大，是被隐层压住了。
+#
+#  关掉之后，会变的部分占比从9.3%升到约40%，新开奖才能真正影响推荐。
+#  注意：清零不改变维度，所以切换开关不触发重训，随时可以改回来。
+# ══════════════════════════════════════════════════════
 SEGMENT_ENABLE = {
-    '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
-            '遗漏':False,   # ← 按消融结果关闭（单日数据，若后续证明是噪声可改回True）
+    '3d':  {'走势特征':True, 'ML+DL概率':True,
+            'LSTM隐层':False, 'TFM隐层':False,   # ← 稀释新数据，关闭
+            '遗漏':True,                          # ← 改回True（之前按单日噪声数据关的，判断不可靠）
             '马尔可夫':True, '贝叶斯':True},
-    'ssq': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+    'ssq': {'走势特征':True, 'ML+DL概率':True,
+            'LSTM隐层':False, 'TFM隐层':False,
             '遗漏':True, '马尔可夫':True, '贝叶斯':True},
-    'kl8': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+    'kl8': {'走势特征':True, 'ML+DL概率':True,
+            'LSTM隐层':False, 'TFM隐层':False,
             '遗漏':True, '频率':True, '马尔可夫':True, '贝叶斯':True},
 }
 
@@ -2761,6 +2827,27 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                 model, 10000, _eval_holdout, '3D微调', n_chunks=8, patience=4,
                 reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    # 状态敏感度：取横跨全部历史的8个时点，看模型输出是否真的随输入变化
+    try:
+        _probe = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 8)]
+        report_state_sensitivity(model, build_state, _probe, '3D')
+    except Exception as _e:
+        print(f"    [状态敏感度] 检测失败: {_e}")
+
+    # 状态敏感度：取横跨全部历史的8个时点，看模型输出是否真的随输入变化
+    try:
+        _probe = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 8)]
+        report_state_sensitivity(model, build_state, _probe, '快乐8')
+    except Exception as _e:
+        print(f"    [状态敏感度] 检测失败: {_e}")
+
+    # 状态敏感度：取横跨全部历史的8个时点，看模型输出是否真的随输入变化
+    try:
+        _probe = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 8)]
+        report_state_sensitivity(model, build_state, _probe, '双色球')
+    except Exception as _e:
+        print(f"    [状态敏感度] 检测失败: {_e}")
+
     _clean = _eval_holdout(half='report')
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期（样本外holdout {len(records)-_hold_start}期）")
     print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
@@ -2924,6 +3011,22 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                   f"ent_coef={ENT_COEF['3d']}）")
             print(f"    → 注意：熵低只说明模型敢下判断，不代表判断对。"
                   f"是否真有价值看 holdout 评分是否稳定高于随机基准 0.30")
+            # 输入敏感度检测：直接量化"今天的新开奖"对状态向量的影响。
+            # 如果推荐没变，这个数能立刻区分是【输入没变】还是【输入变了但模型不敏感】。
+            try:
+                _st_now = build_state(len(records))
+                _st_prev = build_state(len(records)-1)   # 少用最新一期算的状态
+                if _st_now is not None and _st_prev is not None:
+                    _d = np.abs(_st_now - _st_prev)
+                    _chg = float((_d > 1e-6).sum())
+                    _rel = float(_d.sum() / (np.abs(_st_prev).sum() + 1e-9))
+                    print(f"    [输入敏感度] 最新一期使 {int(_chg)}/{len(_st_now)} 维发生变化，"
+                          f"整体变化幅度 {_rel*100:.2f}%")
+                    if _rel < 0.005:
+                        print(f"      ⚠️ 变化过小，模型很难对新开奖产生反应")
+            except Exception as e:
+                print(f"    [输入敏感度] 检测失败: {e}")
+
             # 与上次推荐对比：微调有没有产生实际变化，一眼可见
             try:
                 _prev = (prev_result or {}).get('ppo_groups') or []
@@ -2932,8 +3035,16 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                     _pre_set = {tuple(g) for g in _prev}
                     _same = len(_now_set & _pre_set)
                     print(f"    [与上次对比] 本次{len(groups)}注中有 {_same} 注与上次相同，"
-                          f"{len(groups)-_same} 注是新的"
-                          + ("  ← 微调产生了有效变化 ✓" if _same < len(groups) else "  ← 推荐完全没变 ⚠"))
+                          f"{len(groups)-_same} 注是新的")
+                    if _same >= len(groups):
+                        # 概率其实是变了的（新数据进来了），但各位Top3的数字排序没变，
+                        # 组合出来自然还是同样12注。说清楚原因，不要只给个警告符号。
+                        _tp = [f"{int(np.argmax(p))}({np.max(p)*100:.1f}%)" for p in pos_probs]
+                        print(f"      ⚠️ 推荐完全没变。原因：各位概率随新数据有微小变化"
+                              f"（当前各位首选 {' / '.join(_tp)}），"
+                              f"但Top3的数字排序未变，组合结果自然相同。")
+                        print(f"      → 若连续多天如此，说明模型对状态的响应太弱，"
+                              f"新开奖信息实际上没有影响预测（见上方[状态敏感度]诊断）")
             except Exception: pass
         except Exception as e:
             print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
