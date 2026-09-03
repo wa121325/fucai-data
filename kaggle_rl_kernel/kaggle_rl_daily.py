@@ -2076,6 +2076,21 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _st_probe = build_state(len(records))
     if _st_probe is not None: report_entropy(model, _st_probe, '快乐8')
 
+    # 策略依赖性：模型到底有没有在用状态（比任何评分都更根本）
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        _dep = policy_dependence_test(model, build_state, _pts, 'kl8')
+    except Exception as _e:
+        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
+
+    # 干净评分：用从未参与早停选择的那半holdout评分，不会被筛选污染
+    try:
+        _clean = _eval_holdout(half='report')
+        print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
+              f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}")
+    except Exception as _e:
+        _clean = float('nan'); print(f"    [干净评分] 计算失败: {_e}")
+
     _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
     _p = 0; _segs = []
@@ -2505,6 +2520,21 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     _st_probe = build_state(len(records))
     if _st_probe is not None: report_entropy(model, _st_probe, '双色球')
 
+    # 策略依赖性：模型到底有没有在用状态（比任何评分都更根本）
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        _dep = policy_dependence_test(model, build_state, _pts, 'ssq')
+    except Exception as _e:
+        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
+
+    # 干净评分：用从未参与早停选择的那半holdout评分，不会被筛选污染
+    try:
+        _clean = _eval_holdout(half='report')
+        print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
+              f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}")
+    except Exception as _e:
+        _clean = float('nan'); print(f"    [干净评分] 计算失败: {_e}")
+
     _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
     _p = 0; _segs = []
@@ -2864,45 +2894,10 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                 model, 10000, _eval_holdout, '3D微调', n_chunks=8, patience=4,
                 reset_timesteps=False, warmup_chunks=2)
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    # 状态敏感度：取横跨全部历史的8个时点，看模型输出是否真的随输入变化
-    try:
-        _probe = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 8)]
-        report_state_sensitivity(model, build_state, _probe, '3D')
-    except Exception as _e:
-        print(f"    [状态敏感度] 检测失败: {_e}")
-
-    # 状态敏感度：取横跨全部历史的8个时点，看模型输出是否真的随输入变化
-    try:
-        _probe = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 8)]
-        report_state_sensitivity(model, build_state, _probe, '快乐8')
-    except Exception as _e:
-        print(f"    [状态敏感度] 检测失败: {_e}")
-
-    # 状态敏感度：取横跨全部历史的8个时点，看模型输出是否真的随输入变化
-    try:
-        _probe = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 8)]
-        report_state_sensitivity(model, build_state, _probe, '双色球')
-    except Exception as _e:
-        print(f"    [状态敏感度] 检测失败: {_e}")
-
-    # 先测模型到底有没有在用状态——这比任何评分都更根本
+    # 策略依赖性：模型到底有没有在用状态（比任何评分都更根本）
     try:
         _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
         _dep = policy_dependence_test(model, build_state, _pts, '3d')
-    except Exception as _e:
-        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
-
-    # 先测模型到底有没有在用状态——这比任何评分都更根本
-    try:
-        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
-        _dep = policy_dependence_test(model, build_state, _pts, 'kl8')
-    except Exception as _e:
-        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
-
-    # 先测模型到底有没有在用状态——这比任何评分都更根本
-    try:
-        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
-        _dep = policy_dependence_test(model, build_state, _pts, 'ssq')
     except Exception as _e:
         _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
 
