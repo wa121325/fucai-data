@@ -112,7 +112,12 @@ RL_DATASET_SLUG = 'fucai-rl-cache'
 RL_DATASET_ID   = f'megskfdbbskeb/{RL_DATASET_SLUG}'
 RL_LOCAL_DIR    = '/kaggle/working/rl_cache'
 RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
-WINDOW = 50; SEQ_LEN = 20
+# 特征窗口。原来是50期——8742期历史里99.4%的数据从没进过特征，
+# 每条统计量都只看最近50期，模型的"视野"极短。
+# 加到300期后，长周期统计量（road/prime/repeat等）才有足够样本，
+# 短窗口(3/5/10/20)照常保留对最新开奖的敏感度，两头都要。
+# 注意：窗口只影响统计量的计算范围，不增减特征个数，维度仍是82/133/131。
+WINDOW = 300; SEQ_LEN = 20
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -973,6 +978,38 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
         print(f"      ✓ 模型输出随状态变化，确实在用输入信息")
 
 
+def eval_logprob_3d(model, build_state_fn, records, rng_idx, use_model=None):
+    """
+    用【平均对数概率】评分，比"平均命中位数"灵敏得多。
+
+    命中位数每期只有0/1/2/3四个取值：模型把正确数字的概率从10%提到15%，
+    只要还不是最大值，这个指标完全看不见。
+    对数概率用的是全部10个概率值，这种改善能被捕捉到。
+    （机器学习里评估分类模型普遍用对数损失而非准确率，正是这个原因。）
+
+    返回值越大越好；均匀分布的基准是 ln(0.1) = -2.303。
+    """
+    m = use_model if use_model is not None else model
+    tot, n = 0.0, 0
+    for i in rng_idx:
+        st = build_state_fn(i)
+        if st is None: continue
+        try:
+            obs_t, _ = m.policy.obs_to_tensor(np.array(st).reshape(1, -1))
+            with torch.no_grad():
+                dist = m.policy.get_distribution(obs_t)
+            dl = getattr(dist, 'distribution', None)
+            if not isinstance(dl, (list, tuple)): continue
+            act = records[i]['digits']
+            for p_i, d in enumerate(dl):
+                p = d.probs.detach().cpu().numpy()[0]
+                tot += math.log(float(p[act[p_i]]) + 1e-12)
+                n += 1
+        except Exception:
+            continue
+    return tot / n if n else -99.0
+
+
 def policy_dependence_test(model, build_state_fn, idx_list, game, n_pos=3, n_val=10):
     """
     策略依赖性检测：模型到底有没有在用状态？
@@ -1207,7 +1244,17 @@ TRAIN_MODE = 'frozen'
 CHALLENGE_EVERY = {'3d': 1, 'ssq': 1, 'kl8': 1}
 
 # 上位门槛（标准误的倍数）。每期挑战下必须调高，否则运气会不断"换人"
-CHALLENGE_MARGIN_K = 3.5
+# 上位门槛（标准误的倍数）。
+# 原本设3.5是为了防每日挑战的多重比较问题，但实测 SE≈0.06 时
+# 3.5SE=0.21，等于要求挑战者比随机基准0.30高出70%——这几乎不可能发生，
+# 挑战机制形同虚设、权重永远不换。
+# 改为2.0，多重比较的防护交给"复检"那一关（两轮独立数据都要赢）。
+# 上位门槛（标准误的倍数）。这个值必须和 holdout 大小配套看：
+#   干净区 75期时，2.0倍SE = 0.120，要求挑战者达到0.42（随机基准的1.4倍）—— 太苛刻
+#   干净区500期时，2.0倍SE = 0.046，要求达到0.346 —— 一个真有提升的模型过得去
+# 所以真正的解法是把 holdout 扩大（见 holdout_size），而不是调低这个数。
+# 配合每期挑战+复检，纯运气很难连续两轮都赢这么多。
+CHALLENGE_MARGIN_K = 2.0
 
 
 def run_challenge(cur_model, make_fresh_model, train_fn, eval_clean, se, label, recheck_fn=None):
@@ -2902,6 +2949,13 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
 
     _clean = _eval_holdout(half='report')
+    # 对数概率评分：比命中位数灵敏，能看到"概率提升但还不是最大值"的改善
+    try:
+        _lp = eval_logprob_3d(model, build_state, records, range(_hold_mid, len(records)))
+        print(f"    [对数概率·干净区] {_lp:.4f}（均匀基准 {math.log(0.1):.4f}，越大越好，"
+              f"高出基准 {_lp-math.log(0.1):+.4f}）")
+    except Exception as _e:
+        _lp = None; print(f"    [对数概率] 计算失败: {_e}")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期（样本外holdout {len(records)-_hold_start}期）")
     print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
           f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}（随机基准0.30）")
@@ -2918,6 +2972,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                           'holdout_score': round(_best,4),        # 早停选出来的，会虚高
                           'clean_score': round(_clean,4),         # 未参与选择，这个才可信
                           'policy_dependence': _dep,              # 模型是否真的在用状态
+                          'logprob_clean': (round(_lp,4) if _lp is not None else None),
                           'train_mode': TRAIN_MODE,
                           'ent_coef': ENT_COEF['3d'],
                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
