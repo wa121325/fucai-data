@@ -2612,7 +2612,7 @@ function renderDLResult(dlResult){
         html += `</div>`;
       }
       if(d3Rl.ppo_groups?.length){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
         d3Rl.ppo_groups.forEach((g,i)=>{
           html += `<div class="rec-group">第${i+1}注：${g.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
         });
