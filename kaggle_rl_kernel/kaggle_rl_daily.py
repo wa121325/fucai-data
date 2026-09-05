@@ -979,89 +979,51 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
 
 
 # ══════════════════════════════════════════════════════
-#  AlphaGo式推理：先验(策略网络) × 证据(当前局面)
+#  3D 选号：枚举全部1000种组合，按【策略网络自己的联合概率】排序
 #
-#  ── 为什么要这么做 ──
-#  AlphaGo的落子不是直接取策略网络的最大值，而是把网络给的【先验P】
-#  和对当前局面的【评估Q】结合起来。权重固定不变，但局面一换Q就变，
-#  所以同一份权重能对每一步给出不同的着法。
+#  ── 为什么不再叠加手写权重 ──
+#  上一版曾在这里加了 先验1.0 + 马尔可夫0.8 + 遗漏0.3 + ML条件0.6 的加权打分，
+#  那是错的，三个原因：
 #
-#  原来这里的做法是 argmax(策略网络先验) —— 只用P、完全没用Q。
-#  而状态里明明有一堆每期都在变的证据（马尔可夫43.8%、遗漏25.1%、ML/DL条件），
-#  它们只被当成网络输入，网络输出又对它们不敏感，等于推理时全扔了。
-#  这才是"同一份权重推荐永远不变"的真正原因。
+#  ① 重复计算：马尔可夫、遗漏、ML/DL概率【本来就在状态向量里】
+#     （3D状态 = 走势82 + ML/DL概率44 + LSTM64 + TFM32 + 遗漏30 + 马尔可夫30 + 贝叶斯20），
+#     策略网络训练时早就看过它们，输出的概率已经是融合后的结论。
+#     推理时再把同一批证据拿出来算一遍，等于同一份信息用了两次。
 #
-#  现在改成：枚举全部1000种组合，每种按 先验 + 证据 综合打分。
-#  证据每期都变 → 即便权重冻结，推荐也会跟着新开奖变化。
+#  ② 手写权重凌驾于学到的权重：神经网络那几万个参数，学的就是
+#     "马尔可夫该占多少分量、遗漏该占多少"，这是它唯一的工作。
+#     而 0.8/0.3/0.6 是拍脑袋定的，没有依据却压过模型10万步的训练结果。
 #
-#  必须说明：这不创造预测能力。证据本身还是那些弱信号，
-#  换个方式组合不会凭空产生信息。它解决的是"推理时浪费了信息"这个工程问题，
-#  以及让【稳定权重】和【每日变化】能够同时成立。
+#  ③ AlphaGo类比不成立：AlphaGo的Q来自【搜索博弈树】——模拟后续几十步，
+#     那是先验看不到的新信息。而彩票没有博弈树可搜（选什么号不影响开奖），
+#     把"重新加权已有输入"包装成"搜索"是错的，一个bit的新信息都没产生。
+#
+#  现在回到唯一有依据的做法：完全按模型输出的联合概率排序。
+#  枚举1000种（而不是只看每位Top3的27种）仍然保留——
+#  它不引入任何外部假设，只是让排序覆盖完整的组合空间。
 # ══════════════════════════════════════════════════════
-D3_PRIOR_W  = 1.0    # 策略网络先验的权重
-D3_MARKOV_W = 0.8    # 马尔可夫转移概率
-D3_OMIT_W   = 0.3    # 遗漏（冷号补涨的假设，权重给低）
-D3_COND_W   = 0.6    # ML/DL预测的组合级条件（和值/奇偶/跨度等）
-
-
-def alphago_select_3d(pos_probs, mk_row, omit_row, conds, n_bets=12, verbose=True):
+def select_3d_by_policy(pos_probs, n_bets=12, verbose=True):
     """
-    枚举1000种组合，按 先验×证据 综合打分选出n_bets注。
+    枚举全部1000种组合，按策略网络的联合概率 P(百)×P(十)×P(个) 排序取前n_bets注。
 
-    pos_probs : 策略网络输出，3×10 的概率（先验P，权重固定时它不变）
-    mk_row    : 马尔可夫转移概率 30维（百/十/个位各10），每期变
-    omit_row  : 遗漏向量 30维，每期变
-    conds     : {目标名: (预测值, 置信度)}，来自ML/DL，每期变
+    不掺入任何手工权重——模型怎么想，就怎么推荐。
     """
     P = np.asarray(pos_probs, dtype=np.float64).reshape(3, 10)
-    MK = np.asarray(mk_row, dtype=np.float64).reshape(3, 10) if mk_row is not None and len(mk_row) == 30          else np.full((3, 10), 0.1)
-    OM = np.asarray(omit_row, dtype=np.float64).reshape(3, 10) if omit_row is not None and len(omit_row) == 30          else np.zeros((3, 10))
-    # 遗漏归一化到0~1，越久没出越接近1
-    # 注意用 np.ptp(...) 而不是 OM.ptp(...)：NumPy 2.0 已移除 ndarray.ptp 方法，
-    # 而 Kaggle 环境正是 NumPy 2.0，写成方法调用会直接崩
-    OM = (OM - OM.min(axis=1, keepdims=True)) / (np.ptp(OM, axis=1, keepdims=True) + 1e-9)
-
-    def _feats(c):
-        b, s, g = c; sm = b+s+g
-        tri = (b == s == g); g3 = (b == s or s == g or b == g) and not tri
-        s3 = sorted(c); rd = [x % 3 for x in c]
-        return {'sum_grp': 0 if sm <= 9 else (1 if sm <= 17 else 2),
-                'odd': sum(1 for x in c if x % 2 != 0),
-                'group_type': 0 if tri else (1 if g3 else 2),
-                'big': sum(1 for x in c if x >= 5),
-                'span_grp': (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c)-min(c)),
-                'road_dom': max(set(rd), key=rd.count),
-                'arith': int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0)}
-
     scored = []
     for b in range(10):
         for s in range(10):
             for g in range(10):
-                c = [b, s, g]
-                # 先验：三位联合对数概率
-                sc  = D3_PRIOR_W  * sum(math.log(P[i][c[i]] + 1e-9) for i in range(3))
-                # 证据①：马尔可夫转移
-                sc += D3_MARKOV_W * sum(math.log(MK[i][c[i]] + 1e-9) for i in range(3))
-                # 证据②：遗漏
-                sc += D3_OMIT_W   * sum(OM[i][c[i]] for i in range(3))
-                # 证据③：ML/DL的组合级条件，按置信度加权
-                if conds:
-                    f = _feats(c)
-                    sc += D3_COND_W * sum(w for k, (v, w) in conds.items() if f.get(k) == v)
-                scored.append((c, sc))
+                scored.append(([b, s, g], float(P[0][b] * P[1][s] * P[2][g])))
     scored.sort(key=lambda x: -x[1])
-
-    picks, seen = [], set()
-    for c, sc in scored:
-        if len(picks) >= n_bets: break
-        if tuple(c) not in seen:
-            seen.add(tuple(c)); picks.append(c)
+    picks = [c for c, _ in scored[:n_bets]]
     if verbose:
-        _top = scored[0][1]; _med = scored[len(scored)//2][1]
-        print(f"    [AlphaGo式推理] 枚举1000种组合，先验{D3_PRIOR_W}×网络 + "
-              f"马尔可夫{D3_MARKOV_W} + 遗漏{D3_OMIT_W} + 条件{D3_COND_W}")
-        print(f"      最高分{_top:.3f}  中位分{_med:.3f}  差距{_top-_med:.3f}"
-              f"（差距越大说明证据越有区分度）")
+        _top, _med = scored[0][1], scored[len(scored)//2][1]
+        _uni = 0.001   # 均匀分布下每种组合的概率
+        print(f"    [选号] 枚举1000种组合，按策略网络联合概率排序（不掺手工权重）")
+        print(f"      最高{_top:.5f}  中位{_med:.5f}  均匀基准{_uni:.5f}  "
+              f"最高/均匀={_top/_uni:.2f}倍")
+        if _top / _uni < 1.5:
+            print(f"      ⚠️ 最高概率仅为均匀分布的{_top/_uni:.2f}倍，模型几乎没有偏好")
     return picks
 
 
@@ -3159,11 +3121,31 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     # ── 消融诊断：测量状态向量各段的真实贡献 ──
     _segs = _segs_3d; _p = _segs[-1][2]
-    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
+    # ── 消融诊断：模型到底在用哪些输入 ──
+    # 改用【对数概率】而不是命中数：命中数每期只有0/1/2/3四档，
+    # 某段清零后模型概率变差5个百分点它也看不见；对数概率用全部10个概率值，
+    # 能捕捉到这种变化，才测得出"马尔可夫/遗漏这些信号有没有被真正使用"。
+    # 冻结模式下也要跑——权重稳定时结论才最可信，正是最该测的时候。
     _ablation = []
-    if TRAIN_MODE != 'frozen':
-        _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D', '3d',
-                                     se=math.sqrt(3*0.1*0.9)/math.sqrt(max(len(records)-_hold_start,1)))
+    try:
+        _base_lp = eval_logprob_3d(model, build_state, records, range(_hold_mid, len(records)))
+        print(f"    [消融·对数概率] 完整输入基准 {_base_lp:.4f}（均匀={math.log(0.1):.4f}）")
+        for _nm, _s, _e in _segs:
+            if _e <= _s: continue
+            def _masked(i, _s=_s, _e=_e):
+                st = build_state(i)
+                if st is None: return None
+                st = st.copy(); st[_s:_e] = 0.0
+                return st
+            _lp = eval_logprob_3d(model, _masked, records, range(_hold_mid, len(records)))
+            _drop = _base_lp - _lp
+            _mark = ("★ 模型确实在用" if _drop > 0.01 else
+                     ("· 用得很少" if _drop > 0.001 else
+                      ("  基本没用" if _drop > -0.001 else "⚠ 去掉反而更好")))
+            print(f"      {_nm:12}({_e-_s:4}维) 清零后 {_lp:.4f}  变化 {_drop:+.4f}  {_mark}")
+            _ablation.append({'segment': _nm, 'dims': _e-_s, 'logprob_drop': round(_drop, 5)})
+    except Exception as _e:
+        print(f"    [消融·对数概率] 失败: {_e}")
     append_history('3d', {'date': str(date.today()),
                           'holdout_score': round(_best,4),        # 早停选出来的，会虚高
                           'clean_score': round(_clean,4),         # 未参与选择，这个才可信
@@ -3272,11 +3254,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # ── AlphaGo式推理：先验(策略网络) × 证据(当前局面) ──
             # 不再只取策略网络Top3的组合（那样只用了先验、丢掉了每期都在变的证据，
             # 导致权重固定时推荐永远不变），改为枚举全部1000种组合综合打分。
-            groups = alphago_select_3d(
-                pos_probs,
-                mk_arr[idx] if mk_arr is not None else None,
-                omit_arr[idx] if omit_arr is not None else None,
-                _d3_conds, n_bets=D3_N_BETS)
+            groups = select_3d_by_policy(pos_probs, n_bets=D3_N_BETS)
             # 保留各注的策略网络联合概率，供前端展示
             picked = [(c, float(pos_probs[0][c[0]]*pos_probs[1][c[1]]*pos_probs[2][c[2]]))
                       for c in groups]
@@ -3292,13 +3270,21 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                 [{'digit': d, 'prob': round(pv*100, 1)} for d, pv in t] for t in top3
             ]
 
+            # 改叫"网络先验"而不是"候选"：AlphaGo式推理下它只是四项证据之一，
+            # 不再直接决定推荐（最终由 先验+马尔可夫+遗漏+ML条件 综合打分选出）
             names = ['百位','十位','个位']
             for ni, t in enumerate(top3):
-                print(f"  [{names[ni]}候选] " + "  ".join(f"{d}({pv*100:.1f}%)" for d, pv in t))
-            print(f"  [推荐6注] {groups}")
-            print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
-            _cov = [len(set(c[i] for c in groups)) for i in range(3)]
-            print(f"    候选覆盖: 百位{_cov[0]}/3  十位{_cov[1]}/3  个位{_cov[2]}/3")
+                print(f"  [{names[ni]}·网络先验Top3] " + "  ".join(f"{d}({pv*100:.1f}%)" for d, pv in t))
+            print(f"  [推荐{len(groups)}注] {groups}")
+            print(f"    各注的策略网络联合概率: {[round(x,5) for x in top_probs]}")
+            # 现在推荐完全按模型的联合概率排序，所以用到的数字必然来自各位概率较高的那些。
+            # 显示实际用了几个数字：数量少说明模型偏好集中，多说明它拿不定主意。
+            _names3 = ['百位','十位','个位']
+            for _i in range(3):
+                _used = sorted(set(c[_i] for c in groups))
+                _cover = sum(pos_probs[_i][d] for d in _used)
+                print(f"    {_names3[_i]}: 推荐用到 {_used}（{len(_used)}个数字，"
+                      f"覆盖该位{_cover*100:.1f}%的概率质量）")
             # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
             ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
             print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
