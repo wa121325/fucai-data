@@ -1,5 +1,5 @@
 """
-福彩 PPO 强化学习 — 每天增量微调
+福彩 PPO 强化学习 — 每日全量训练
 kaggle_rl_daily.py
 
 功能：
@@ -7,14 +7,14 @@ kaggle_rl_daily.py
      若没有则首次全量训练
   2. 加载本周训练好的 LSTM/Transformer 权重（从 "fucai-dl-cache"）
      计算最新一期的隐层状态，构建 RL 状态
-  3. 用最近新增的数据做增量微调（几千步，而非从头训练）
+  3. 每天用全部历史从零全量训练（不做增量微调）
   4. 保存更新后的 PPO 模型回 Kaggle Dataset
   5. 更新 prediction.json 的 dl_result.rl 字段（每天更新）
 
 Kaggle Secrets: GH_TOKEN, GH_REPO, KAGGLE_TOKEN
 Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
 """
-import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy, math
+import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, math
 from datetime import datetime, date
 from collections import Counter, defaultdict
 from itertools import combinations
@@ -112,11 +112,11 @@ RL_DATASET_SLUG = 'fucai-rl-cache'
 RL_DATASET_ID   = f'megskfdbbskeb/{RL_DATASET_SLUG}'
 RL_LOCAL_DIR    = '/kaggle/working/rl_cache'
 RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
-# 特征窗口。原来是50期——8742期历史里99.4%的数据从没进过特征，
+# 特征窗口。原来是50期——3D有8742期历史，99.4%的数据从没进过特征，
 # 每条统计量都只看最近50期，模型的"视野"极短。
-# 加到300期后，长周期统计量（road/prime/repeat等）才有足够样本，
+# 加到300期后，长周期统计量（012路/质合比/重号等）才有足够样本；
 # 短窗口(3/5/10/20)照常保留对最新开奖的敏感度，两头都要。
-# 注意：窗口只影响统计量的计算范围，不增减特征个数，维度仍是82/133/131。
+# 注意：窗口只影响统计量的计算范围，不增减特征个数，维度不变。
 WINDOW = 300; SEQ_LEN = 20
 
 # ══════════════════════════════════════════════════════
@@ -438,77 +438,6 @@ def fkl8(records, idx):
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
 
-    # ══════════════════════════════════════════════════════
-    #  快乐8专属新增特征（仅本游戏，3D/双色球不加）
-    # ══════════════════════════════════════════════════════
-
-    # ── ① 冷热变化率：这是维度上的真正空白 ──
-    # 现有信号（频率、遗漏）回答的都是"现在怎样"，没有一个回答"正在往哪变"。
-    # 一个球从冷转热、和一直是热的，含义完全不同，但之前的特征区分不出来。
-    _f10 = Counter(n for r in w[-10:] for n in r['numbers'])
-    _f50 = Counter(n for r in w[-50:] for n in r['numbers'])
-    _n10, _n50 = max(len(w[-10:]),1), max(len(w[-50:]),1)
-    _rates = [ _f10.get(n,0)/_n10 - _f50.get(n,0)/_n50 for n in range(1,81) ]
-    _rates = np.array(_rates, dtype=np.float32)
-    f['heat_rate_mean'] = float(_rates.mean())          # 整体升温还是降温
-    f['heat_rate_std']  = float(_rates.std())           # 冷热分化程度
-    f['heat_rising_cnt']  = float((_rates > 0.05).sum())  # 明显转热的球数
-    f['heat_falling_cnt'] = float((_rates < -0.05).sum()) # 明显转冷的球数
-    # 上期开出的号码，此前是在升温还是降温（判断"追热"还是"追冷"更奏效）
-    _prev_nums = w[-1]['numbers'] if w else []
-    f['prev_heat_rate'] = float(np.mean([_rates[n-1] for n in _prev_nums])) if _prev_nums else 0.0
-
-    # ── ② 尾数分布：80球按尾数正好分10组各8个，是干净的统计维度 ──
-    _tail_cnt = [0]*10
-    for n in _prev_nums: _tail_cnt[n % 10] += 1
-    for t in range(10): f[f'tail{t}'] = float(_tail_cnt[t])
-    f['tail_std']  = float(np.std(_tail_cnt))            # 尾数分布均匀还是集中
-    f['tail_zero'] = float(sum(1 for c in _tail_cnt if c == 0))  # 有几个尾数完全没出
-
-    # ── ③ 间隔分布：之前只有"连续号组数"，丢了间隔的整体形态 ──
-    _gaps_all = []
-    for x in w[-20:]:
-        s = sorted(x['numbers'])
-        _gaps_all.append([s[i+1]-s[i] for i in range(len(s)-1)])
-    if _gaps_all:
-        _flat = [g for gs in _gaps_all for g in gs]
-        f['gap_mean20'] = float(np.mean(_flat))
-        f['gap_std20']  = float(np.std(_flat))
-        f['gap_max20']  = float(np.mean([max(gs) for gs in _gaps_all if gs]))
-    else:
-        f['gap_mean20'] = f['gap_std20'] = f['gap_max20'] = 0.0
-
-    # ── ④ AC值：两两差值的离散度，双色球有、快乐8之前没有 ──
-    if _prev_nums and len(_prev_nums) > 1:
-        _d = set()
-        _ps = sorted(_prev_nums)
-        for i in range(len(_ps)):
-            for j in range(i+1, len(_ps)): _d.add(_ps[j]-_ps[i])
-        f['ac_value'] = float(len(_d) - (len(_ps)-1))
-    else:
-        f['ac_value'] = 0.0
-
-    # ── ⑤ 同尾号对数：彩民常看的形态维度 ──
-    f['same_tail_pairs'] = float(sum(c*(c-1)//2 for c in _tail_cnt))
-
-    # ── ⑥ 区间转移：号码在四个区之间的流动方向 ──
-    # 比"各区多少个"多一层信息：是从哪个区流向哪个区
-    if len(w) >= 2:
-        _pz = [sum(1 for n in w[-2]['numbers'] if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
-        _cz = [sum(1 for n in _prev_nums          if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
-        for zi in range(4): f[f'zone_delta{zi}'] = float(_cz[zi] - _pz[zi])
-    else:
-        for zi in range(4): f[f'zone_delta{zi}'] = 0.0
-
-    # ── ⑦ 重号的区间分布：比"重了几个"更细 ──
-    if len(w) >= 2:
-        _rep = set(w[-1]['numbers']) & set(w[-2]['numbers'])
-        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
-            f[f'repeat_z{zi}'] = float(sum(1 for n in _rep if lo<=n<=hi))
-    else:
-        for zi in range(4): f[f'repeat_z{zi}'] = 0.0
-
-
     return f
 
 
@@ -539,86 +468,48 @@ class TransformerEncoder(nn.Module):
 
 
 def load_lstm_tfm(game, current_feat_dim=None):
-    """
-    从挂载的 Dataset 加载本周训练好的LSTM/TFM权重。
-
-    返回 (lstm_list, tfm_list, meta)：
-    ── 之前只加载 {game}_lstm.pt（每个游戏第一个训练目标的模型），
-       另外6个目标训练出来的模型RL完全接触不到，等于DL 6/7的成果被浪费。
-       现在把7个目标的模型全部加载，各自的隐层表征都会进入RL状态。
-    """
+    """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重"""
     meta_path = f'{DL_MOUNTED}/{game}_meta.json'
     if not os.path.exists(meta_path):
         print(f"  ! 找不到 {game} 的LSTM/TFM权重（先运行 kaggle_lstm_tfm.py 并挂载 {DL_DATASET_SLUG}）")
-        return [], [], None
+        return None, None, None
     with open(meta_path) as f: meta = json.load(f)
+    # 特征维度校验：若当前特征函数产出维度与保存时不一致（特征工程改了），
+    # 直接跳过旧权重，避免运行到forward()时矩阵形状不匹配而崩溃
     if current_feat_dim is not None and meta.get('feat_dim') != current_feat_dim:
         print(f"  ! {game} 的LSTM/TFM权重特征维度({meta.get('feat_dim')})与当前特征工程({current_feat_dim})不一致")
         print(f"    请先重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
-        return [], [], None
+        return None, None, None
+    lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
+    lstm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu'))
+    lstm.eval()
+    tfm = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
+    tfm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu'))
+    tfm.eval()
+    return lstm, tfm, meta
 
-    # 该游戏的全部训练目标（顺序需与 kaggle_lstm_tfm.py 的 configs 一致）
-    TARGETS = {
-        '3d':  ['sum_grp','group_type','odd','big','span_grp','road_dom','arith'],
-        'ssq': ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec'],
-        'kl8': ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp'],
-    }.get(game, [])
-
-    lstm_list, tfm_list, loaded, skipped = [], [], [], []
-    for tname in TARGETS:
-        tmeta_path = f'{DL_MOUNTED}/{game}_{tname}_meta.json'
-        lpath = f'{DL_MOUNTED}/{game}_{tname}_lstm.pt'
-        tpath = f'{DL_MOUNTED}/{game}_{tname}_tfm.pt'
-        if not (os.path.exists(tmeta_path) and os.path.exists(lpath) and os.path.exists(tpath)):
-            skipped.append(tname); continue
-        try:
-            with open(tmeta_path) as f: tm = json.load(f)
-            if current_feat_dim is not None and tm.get('feat_dim') != current_feat_dim:
-                skipped.append(tname); continue
-            l = LSTMEncoder(tm['feat_dim'], hidden_dim=tm['hidden_dim'], output_dim=tm['n_classes'])
-            l.load_state_dict(torch.load(lpath, map_location='cpu')); l.eval()
-            t = TransformerEncoder(tm['feat_dim'], d_model=tm['d_model'], output_dim=tm['n_classes'])
-            t.load_state_dict(torch.load(tpath, map_location='cpu')); t.eval()
-            lstm_list.append(l); tfm_list.append(t); loaded.append(tname)
-        except Exception as e:
-            print(f"    ! 加载 {game}_{tname} 失败: {e}")
-            skipped.append(tname)
-
-    # 兼容旧版Dataset：若按目标命名的文件一个都没有，回退到只加载第一个目标的固定名文件
-    if not lstm_list:
-        try:
-            l = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
-            l.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu')); l.eval()
-            t = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
-            t.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu')); t.eval()
-            lstm_list, tfm_list = [l], [t]
-            print(f"    (旧版Dataset：仅加载到第一个目标的模型，重新运行DL脚本后可加载全部7个)")
-        except Exception as e:
-            print(f"    ! 回退加载也失败: {e}")
-            return [], [], None
-    else:
-        print(f"    ✓ 已加载 {len(loaded)}/{len(TARGETS)} 个目标的LSTM+TFM模型: {loaded}"
-              + (f"（跳过: {skipped}）" if skipped else ""))
-    return lstm_list, tfm_list, meta
+def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
+    """计算指定期数idx对应的隐层状态（单次调用，仅用于最后一期推荐）"""
+    seq = []
+    for j in range(idx-seq_len, idx):
+        feat = feat_fn(records, j)
+        if feat is None: return None
+        seq.append(list(feat.values()))
+    x = torch.FloatTensor([seq])
+    with torch.no_grad():
+        _, h = model(x, return_hidden=True)
+    return h.numpy()[0]
 
 
-def precompute_hidden_multi(records, feat_fn, models, seq_len=SEQ_LEN, batch_size=256):
+def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256):
     """
-    批量计算多个模型的隐层状态，序列只构造一次供所有模型共用。
-
-    ── 为什么必须共用序列 ──
-    构造序列要对每一期调用一次特征函数，是整个流程最慢的一步（实测占500秒以上）。
-    现在要加载7个目标的模型，若每个模型各构造一遍序列，耗时会翻7倍。
-    这里改成：序列构造一次，7个模型依次前向推理（推理很快），
-    最后把各模型的隐层横向拼接成一个大向量。
-
-    返回 (hidden_array, idx_to_row)：hidden_array 每行是所有模型隐层的拼接
+    批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
+    返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
     """
-    models = [m for m in (models or []) if m is not None]
-    if not models:
+    if model is None:
         return None, {}
     X, idxs = [], []
-    # 上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
+    # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
     # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
     # 被迫回退成零向量，白白丢掉LSTM/TFM的信息。
     for idx in range(seq_len, len(records)+1):
@@ -632,20 +523,16 @@ def precompute_hidden_multi(records, feat_fn, models, seq_len=SEQ_LEN, batch_siz
     if not X:
         return None, {}
     X = np.array(X, dtype=np.float32)
-
-    per_model = []
-    for model in models:
-        model.eval()
-        hs = []
-        with torch.no_grad():
-            for i in range(0, len(X), batch_size):
-                xb = torch.FloatTensor(X[i:i+batch_size])
-                _, h = model(xb, return_hidden=True)
-                hs.append(h.numpy())
-        per_model.append(np.vstack(hs))
-    hidden = np.concatenate(per_model, axis=1)   # 横向拼接所有模型的隐层
+    model.eval()
+    hs = []
+    with torch.no_grad():
+        for i in range(0, len(X), batch_size):
+            xb = torch.FloatTensor(X[i:i+batch_size])
+            _, h = model(xb, return_hidden=True)
+            hs.append(h.numpy())
+    hs = np.vstack(hs)
     idx_to_row = {idx:i for i,idx in enumerate(idxs)}
-    return hidden, idx_to_row
+    return hs, idx_to_row
 
 
 def precompute_omission_kl8(records):
@@ -718,94 +605,6 @@ def precompute_omission_ssq(records):
     return omit_arr
 
 
-# ══════════════════════════════════════════════════════
-#  马尔可夫转移 + 贝叶斯后验不确定性
-#  这两类信号在RL现有状态里都没有对应物：
-#  · 马尔可夫建模的是 P(下期=Y | 上期=X) 这种【跨期条件转移】，
-#    而走势特征是窗口聚合量、遗漏是"多久没出"，都不是转移关系。
-#  · 贝叶斯给的是【不确定性】——现有所有信号都只说"是什么"，
-#    没有一个告诉模型"这个判断有多可信"。样本少时后验方差大，
-#    模型可以据此少依赖该信号，这是点估计给不了的信息。
-# ══════════════════════════════════════════════════════
-MARKOV_WINDOW_RL = 200          # 转移统计只看最近N期，太长会让概率长期不变
-BAYES_PRIOR = 1.0               # Beta先验的伪计数（拉普拉斯平滑）
-
-
-def precompute_markov_3d(records, window=MARKOV_WINDOW_RL):
-    """
-    3D马尔可夫：对每一位，给出"上期该位是X时，下期各数字的转移概率"。
-    返回 arr[idx] = 30维（百/十/个位各10个数字的转移概率）
-    """
-    N = len(records)
-    arr = np.zeros((N+1, 30), dtype=np.float32)
-    for idx in range(1, N+1):
-        w = records[max(0, idx-window):idx]
-        if len(w) < 2:
-            arr[idx] = 0.1; continue
-        last = records[idx-1]['digits']
-        for p in range(3):
-            cnt = np.full(10, BAYES_PRIOR, dtype=np.float32)   # 拉普拉斯平滑，避免零概率
-            for i in range(1, len(w)):
-                if w[i-1]['digits'][p] == last[p]:
-                    cnt[w[i]['digits'][p]] += 1.0
-            arr[idx, p*10:(p+1)*10] = cnt / cnt.sum()
-    return arr
-
-
-def precompute_markov_balls(records, pool_max, get_nums, window=MARKOV_WINDOW_RL):
-    """
-    号码型玩法的马尔可夫：给出"上期开出的那批号码之后，各号码出现的条件概率"。
-    对每个号码 n，统计"上期出现过X且本期出现n"的比例（X遍历上期号码）。
-    返回 arr[idx] = pool_max 维
-    """
-    N = len(records)
-    arr = np.zeros((N+1, pool_max), dtype=np.float32)
-    for idx in range(1, N+1):
-        w = records[max(0, idx-window):idx]
-        if len(w) < 2:
-            arr[idx] = 1.0/pool_max; continue
-        prev_set = set(get_nums(records[idx-1]))
-        cnt = np.full(pool_max, BAYES_PRIOR, dtype=np.float32)
-        base = BAYES_PRIOR * pool_max
-        for i in range(1, len(w)):
-            # 上一期与"当前上期"有重叠时，本期的号码作为转移证据（重叠越多权重越高）
-            overlap = len(set(get_nums(w[i-1])) & prev_set)
-            if overlap == 0: continue
-            wt = overlap / max(len(prev_set), 1)
-            for n in get_nums(w[i]):
-                cnt[n-1] += wt
-            base += wt * len(get_nums(w[i]))
-        arr[idx] = cnt / max(base, 1e-6)
-    return arr
-
-
-def precompute_bayes(records, pool_max, get_nums, window=MARKOV_WINDOW_RL):
-    """
-    贝叶斯后验：对每个号码用 Beta-Binomial 估计出现率，同时给出【不确定性】。
-    返回 arr[idx] = pool_max*2 维（前半是后验均值，后半是后验标准差）
-
-    后验标准差是关键：观测样本少时它大，模型可以学会"这个估计不可信，别太依赖"。
-    现有的频率/遗漏都是点估计，给不了这个信息。
-    """
-    N = len(records)
-    arr = np.zeros((N+1, pool_max*2), dtype=np.float32)
-    for idx in range(1, N+1):
-        w = records[max(0, idx-window):idx]
-        n_draw = len(w)
-        if n_draw < 2:
-            arr[idx, :pool_max] = 0.5; arr[idx, pool_max:] = 0.5; continue
-        hits = np.full(pool_max, 0.0, dtype=np.float32)
-        for r in w:
-            for n in get_nums(r): hits[n-1] += 1.0
-        a = hits + BAYES_PRIOR                       # Beta后验的alpha
-        b = (n_draw - hits) + BAYES_PRIOR            # Beta后验的beta
-        mean = a / (a + b)
-        var = (a * b) / (((a + b) ** 2) * (a + b + 1.0))
-        arr[idx, :pool_max] = mean
-        arr[idx, pool_max:] = np.sqrt(var)
-    return arr
-
-
 def precompute_omission_3d(records):
     """福彩3D：百十个位各10个数字，共30维遗漏向量"""
     N = len(records)
@@ -846,38 +645,6 @@ def extract_ml_prob_vec(ml_pred, game, verbose=True):
             print(f"    ⚠️ [传统ML状态注入验证] 以下目标概率全为0，未生效={missing}（请确认 kaggle_fucai.py 已用最新目标重新跑过）")
     return np.array(vec, dtype=np.float32)
 
-def extract_dl_prob_vec(dl_pred, game, verbose=True):
-    """
-    提取深度学习(LSTM+Transformer集成)对各目标的预测概率，注入RL状态。
-
-    ── 为什么要补这个 ──
-    之前 RL 读了传统ML全部7个目标的概率，却一条深度学习的预测都没读——
-    DL 训练出的7组预测写在 dl_lstm_tfm.json 里，RL 脚本对它零引用。
-    RL 能接触到 DL 的唯一渠道是"第一个训练目标的隐层状态"，
-    另外6个目标学到的东西完全浪费。这里把 DL 的预测概率也接进来。
-
-    结构与 extract_ml_prob_vec 对称：同样7个目标，同样按概率展开成向量。
-    """
-    vec = []
-    game_data = (dl_pred or {}).get(game, {})
-    if game=='3d': tk=['sum_grp','odd','group_type','big','span_grp','road_dom','arith']; nc=[3,4,3,4,3,3,2]
-    elif game=='ssq': tk=['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']; nc=[7,3,3,3,3,7,6]
-    else: tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']; nc=[3,4,3,3,5,3,3]
-    found, missing = [], []
-    for tkey, n in zip(tk, nc):
-        probs = (game_data.get(tkey, {}) or {}).get('probs', {})
-        seg = [float(probs.get(str(i), 0.0))/100.0 for i in range(n)]
-        vec.extend(seg)
-        (found if any(v > 0 for v in seg) else missing).append(tkey)
-    if verbose:
-        if found:
-            print(f"    [深度学习状态注入验证] {game}: 成功读到概率的目标={found}")
-        if missing:
-            print(f"    ⚠️ [深度学习状态注入验证] 以下目标概率全为0，未生效={missing}"
-                  f"（若全部未生效，通常是 dl_lstm_tfm.json 尚未生成或该游戏未训练）")
-    return np.array(vec, dtype=np.float32)
-
-
 # （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
 
 # ══════════════════════════════════════════════════════
@@ -890,484 +657,17 @@ KL8_PAYOUT = {(1,1):2,(2,2):10,(3,3):30,(4,4):100,(4,3):3,(4,2):1,(5,5):200,(5,4
 TICKET_PRICE = 2.0
 def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 
+
 # ══════════════════════════════════════════════════════
-#  回测隔离：训练时必须留出最后 HOLDOUT_N 期不参与训练，专门用于回测。
-#  之前训练覆盖全部历史（第25期~最后一期），而回测取的是最近30期——
+#  训练/回测隔离
+#  之前训练覆盖全部历史（第25期~最后一期），而回测取最近30期——
 #  也就是说回测数据本身就在训练集里，考的是"背没背下来"而不是"会不会做新题"。
-#  修好模型持久化后，训练量逐日累积，模型开始记住这30期，
-#  回测平均命中从0.28位(=随机)涨到0.57位，这不是学会了，是背下来了。
-#  留出holdout后，回测才是真正的样本外评估。
+#  现在留出最后一段不参与训练，回测才是真正的样本外评估。
+#  再把这段对半分：前半用于观察，后半从不参与任何选择，评分最干净。
 # ══════════════════════════════════════════════════════
-# holdout期数。30期时标准误约0.095，能分辨的最小差异要0.19——
-# 比3D随机基准0.30的一半还大，早停在这个精度下等于抛硬币，
-# 它每次保留"训练前的随机权重"只是因为那次运气好，不代表模型更优。
-# 提到150期后标准误降到约0.042，早停才开始有判断力。
-HOLDOUT_N = 150
-
-# 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
-# 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
-D3_N_BETS = 12
-
 def holdout_size(n_records):
-    """按数据量自适应：至少80期保证测量精度，最多不超过总数的8%避免过度损失训练数据"""
-    return max(80, min(HOLDOUT_N, int(n_records * 0.08)))
-
-# ══════════════════════════════════════════════════════
-#  熵系数（entropy coefficient）
-#  PPO的损失里有一项 -ent_coef × entropy，也就是"分布越均匀奖励越高"。
-#  这个值当初调高是为了防止策略过早收敛到单一偏好（比如快乐8"全是大号"那次），
-#  但副作用是：3D在 ent_coef=0.03 下，保持均匀分布能白拿 0.03×ln(10)=0.069 的奖励，
-#  而做出判断的期望收益只有 0.1 分且方差极大 —— 模型算下来发现"不判断"更划算，
-#  于是熵稳定在 2.303（=ln10，完全均匀），输出各候选都是 10.0~10.1%，毫无区分度。
-#
-#  现在大幅调低，让模型有动力去做判断。注意这是把双刃剑：
-#  如果数据里真没规律，降低熵只会让模型"自信地瞎猜"——
-#  所以必须靠 holdout 评分来验证，而不是看分布拉开了就以为变好了。
-# ══════════════════════════════════════════════════════
-ENT_COEF = {
-    '3d':  0.005,   # 原 0.03
-    'ssq': 0.005,   # 原 0.02
-    'kl8': 0.010,   # 原 0.05（快乐8要从80球选6个，保留稍多探索）
-}
-
-
-def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
-    """
-    状态敏感度诊断：喂入多个【时间跨度很大、内容差异明显】的历史状态，
-    看模型输出的Top候选变不变。
-
-    ── 为什么必须查这个 ──
-    如果模型输出的Top候选在完全不同的历史时点都一样，
-    说明它压根没在用状态——学到的是一个固定偏好，跟输入无关。
-    这种情况下"每天喂新数据"毫无意义，推荐永远不变，
-    今天开什么奖对预测没有任何影响（实测出现过连续两天12注完全相同）。
-    """
-    tops, probs_all = [], []
-    for i in idx_list:
-        st = build_state_fn(i)
-        if st is None: continue
-        try:
-            obs_t, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
-            with torch.no_grad():
-                dist = model.policy.get_distribution(obs_t)
-            dl = getattr(dist, 'distribution', None)
-            if isinstance(dl, (list, tuple)):     # MultiDiscrete
-                ps = [d.probs.detach().cpu().numpy()[0] for d in dl]
-                tops.append(tuple(int(np.argmax(p)) for p in ps))
-                probs_all.append(np.concatenate(ps))
-            else:                                  # Box
-                a, _ = model.predict(st, deterministic=True)
-                a = np.asarray(a).ravel()
-                tops.append(tuple(int(x) for x in np.argsort(a)[::-1][:top_k]))
-                probs_all.append(a)
-        except Exception:
-            continue
-    if len(tops) < 2:
-        return
-    uniq = len(set(tops))
-    arr = np.array(probs_all)
-    var = float(np.mean(np.std(arr, axis=0)))     # 各维度在不同状态间的平均波动
-    print(f"    [状态敏感度] 在{len(tops)}个差异很大的历史时点上测试：")
-    print(f"      输出Top组合共{uniq}种（{len(tops)}次测试）  各维度平均波动 {var:.4f}")
-    if uniq == 1:
-        print(f"      ⚠️ 所有时点输出完全相同 —— 模型忽略了状态，学到的是固定偏好，")
-        print(f"         这意味着每天的新开奖对预测没有任何影响，推荐永远不会变")
-    elif uniq <= max(2, len(tops)//4):
-        print(f"      ⚠️ 输出种类很少，模型对状态的响应很弱")
-    else:
-        print(f"      ✓ 模型输出随状态变化，确实在用输入信息")
-
-
-def eval_logprob_3d(model, build_state_fn, records, rng_idx, use_model=None):
-    """
-    用【平均对数概率】评分，比"平均命中位数"灵敏得多。
-
-    命中位数每期只有0/1/2/3四个取值：模型把正确数字的概率从10%提到15%，
-    只要还不是最大值，这个指标完全看不见。
-    对数概率用的是全部10个概率值，这种改善能被捕捉到。
-    （机器学习里评估分类模型普遍用对数损失而非准确率，正是这个原因。）
-
-    返回值越大越好；均匀分布的基准是 ln(0.1) = -2.303。
-    """
-    m = use_model if use_model is not None else model
-    tot, n = 0.0, 0
-    for i in rng_idx:
-        st = build_state_fn(i)
-        if st is None: continue
-        try:
-            obs_t, _ = m.policy.obs_to_tensor(np.array(st).reshape(1, -1))
-            with torch.no_grad():
-                dist = m.policy.get_distribution(obs_t)
-            dl = getattr(dist, 'distribution', None)
-            if not isinstance(dl, (list, tuple)): continue
-            act = records[i]['digits']
-            for p_i, d in enumerate(dl):
-                p = d.probs.detach().cpu().numpy()[0]
-                tot += math.log(float(p[act[p_i]]) + 1e-12)
-                n += 1
-        except Exception:
-            continue
-    return tot / n if n else -99.0
-
-
-def policy_dependence_test(model, build_state_fn, idx_list, game, n_pos=3, n_val=10):
-    """
-    策略依赖性检测：模型到底有没有在用状态？
-
-    ── 为什么这是最关键的诊断 ──
-    如果模型对差异很大的历史时点都输出几乎相同的分布，
-    说明它收敛成了"常数策略"——不管输入什么都推荐同一组号码，
-    那么权重学到的东西就没有意义，新开奖也永远影响不了推荐。
-    这跟"输入变化太小"是完全不同的两个问题，处理方式也完全不同。
-
-    做法：取若干相隔很远的历史时点，各算一次输出分布，
-    统计"最高概率数字"是否都一样、分布之间差异有多大。
-    """
-    dists, tops = [], []
-    for i in idx_list:
-        st = build_state_fn(i)
-        if st is None: continue
-        try:
-            obs_t, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
-            with torch.no_grad():
-                dist = model.policy.get_distribution(obs_t)
-            dl = getattr(dist, 'distribution', None)
-            if isinstance(dl, (list, tuple)):
-                p = np.concatenate([d.probs.detach().cpu().numpy()[0] for d in dl])
-                tops.append(tuple(int(np.argmax(d.probs.detach().cpu().numpy()[0])) for d in dl))
-            else:
-                p = model.predict(st, deterministic=True)[0].astype(np.float32)
-                tops.append(tuple(np.argsort(p)[-6:].tolist()))
-            dists.append(p)
-        except Exception:
-            continue
-    if len(dists) < 3:
-        print(f"    [策略依赖性] 样本不足，跳过"); return None
-    D = np.array(dists)
-    # 各维度在不同时点之间的标准差：越大说明输出越随状态变化
-    spread = float(np.mean(np.std(D, axis=0)))
-    mean_lvl = float(np.mean(np.abs(D)))
-    ratio = spread / (mean_lvl + 1e-9)
-    uniq = len(set(tops))
-    print(f"    [策略依赖性] 取{len(dists)}个相隔较远的历史时点分别预测：")
-    print(f"      最优组合出现 {uniq} 种不同结果（{len(dists)}个时点）")
-    print(f"      输出分布跨时点波动/均值 = {ratio*100:.1f}%")
-    if uniq <= 1 or ratio < 0.05:
-        print(f"      ⚠️ 模型基本是常数策略——不管输入什么都给同样的答案，")
-        print(f"         权重没有学到状态相关的规律，新开奖自然影响不了推荐")
-    elif ratio < 0.20:
-        print(f"      · 模型对状态有响应但较弱，相邻两天差异小属正常")
-    else:
-        print(f"      ✓ 模型输出明显随状态变化，权重是有内容的")
-    return {'n_points': len(dists), 'unique_best': uniq, 'spread_ratio': round(ratio, 4)}
-
-
-def report_entropy(model, state, game, n_out=None):
-    """
-    打印策略输出的熵，用来判断模型到底有没有在做判断。
-    熵接近理论最大值 = 完全均匀 = 什么都没学到。
-    """
-    try:
-        obs_t, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
-        with torch.no_grad():
-            dist = model.policy.get_distribution(obs_t)
-        dl = getattr(dist, 'distribution', None)
-        if isinstance(dl, (list, tuple)):     # MultiDiscrete：每位一个分布
-            ents, maxent = [], math.log(10)
-            for d in dl:
-                p = d.probs.detach().cpu().numpy()[0]
-                ents.append(float(-(p*np.log(p+1e-12)).sum()))
-            print(f"    [熵监控] {game} 各位熵: {[round(e,3) for e in ents]}  "
-                  f"（均匀={maxent:.3f}，越低说明模型越有主见）")
-            return ents
-        else:                                  # Box：高斯策略，看动作标准差
-            std = float(np.mean(np.exp(model.policy.log_std.detach().cpu().numpy())))
-            print(f"    [熵监控] {game} 动作分布平均标准差: {std:.4f}（越小说明模型越确定）")
-            return [std]
-    except Exception as e:
-        print(f"    [熵监控] 读取失败: {e}")
-        return []
-
-# ══════════════════════════════════════════════════════
-#  状态向量分段开关：改这里就能开关任意一类信号，不用动其它代码。
-#  False = 该段清零（维度保留，不触发模型重训，随时可切回来）
-#
-#  ⚠️ 判断依据要看历史积累，别只看单日消融数字：
-#     holdout只有30期×3位=90次预测，随机波动的标准差就有3次命中，
-#     单日消融里 ±0.1 的"贡献"只有约1个标准差，属于纯噪声，
-#     明天再跑很可能正负号就翻转了。
-#     应该看 {game}_history.json 里连续多天的 ablation 记录，
-#     某段连续一两周都是负贡献，关掉才有依据。
-# ══════════════════════════════════════════════════════
-# 分段开关：把某段清零来测试它的贡献。清零不改变维度，切换不触发重训。
-SEGMENT_ENABLE = {
-    '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
-            '遗漏':True, '马尔可夫':True, '贝叶斯':True},
-    'ssq': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
-            '遗漏':True, '马尔可夫':True, '贝叶斯':True},
-    'kl8': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
-            '遗漏':True, '频率':True, '马尔可夫':True, '贝叶斯':True},
-}
-
-
-def apply_segment_switches(state, segs, game):
-    """按 SEGMENT_ENABLE 把关闭的段清零。维度不变，所以切换开关不会触发模型重训。"""
-    sw = SEGMENT_ENABLE.get(game, {})
-    if all(sw.get(n, True) for n, _, _ in segs):
-        return state
-    state = state.copy()
-    for name, s, e in segs:
-        if not sw.get(name, True):
-            state[s:e] = 0.0
-    return state
-
-
-def segment_ablation(eval_with_mask, segments, base_score, label, game=None, se=0.05):
-    """
-    消融诊断：逐段把输入清零，看holdout评分掉多少。掉得越多说明这段越重要。
-
-    ── 为什么需要 ──
-    现在状态向量有800~980维，其中隐层占70~80%，但这个配比是人为定的、没有验证依据。
-    参数量已是训练样本的6倍，很可能大部分维度只是在制造过拟合。
-    与其靠猜，不如直接测：把某段清零，模型表现掉多少，就是这段的真实贡献。
-
-    eval_with_mask: 接受 (start, end) 元组，把该区间清零后评估，返回分数
-    segments: [(名称, 起点, 终点), ...]
-    """
-    _se = se
-    print(f"    [{label} 消融诊断] 基准分 {base_score:.4f}，逐段清零后的变化"
-          f"（噪声水平±{2*_se:.3f}，差异小于此值不可信）：")
-    results = []
-    _sw = SEGMENT_ENABLE.get(game, {}) if game else {}
-    for name, s, e in segments:
-        if e <= s: continue
-        if not _sw.get(name, True):
-            # 该段已被开关关闭（值已全为0），再清零一次当然毫无变化，
-            # 测出来的"贡献0.0000/几乎无影响"是假象，会误导判断，直接跳过
-            print(f"      {name:12}({e-s:4}维)  已通过开关关闭，本次不参与消融测量")
-            results.append({'segment': name, 'dims': e-s, 'disabled': True})
-            continue
-        try:
-            score = eval_with_mask((s, e))
-        except Exception as ex:
-            print(f"      {name}: 评估失败({ex})"); continue
-        drop = base_score - score
-        results.append({'segment': name, 'dims': e-s, 'score_without': round(score,4),
-                        'contribution': round(drop,4)})
-        # 用测量噪声水平作为判断门槛，而不是拍脑袋定的固定值。
-        # 差异小于2倍标准误时无法与随机波动区分，标成"不可分辨"而非"无影响"，
-        # 避免把噪声当成结论去删特征。
-        if abs(drop) < 2 * _se:
-            mark = f"— 不可分辨（噪声±{2*_se:.3f}）"
-        elif drop > 0:
-            mark = "★ 重要"
-        else:
-            mark = "⚠ 去掉反而更好"
-        print(f"      {name:12}({e-s:4}维)  清零后{score:.4f}  贡献{drop:+.4f}  {mark}")
-    return results
-
-
-def append_history(game, record):
-    """
-    把每日成绩追加到历史文件，随RL_LOCAL_DIR一起持久化到Dataset。
-    单日数字波动大说明不了问题，长期曲线才能看出模型是在进步、退步还是原地打转。
-    """
-    path = f'{RL_LOCAL_DIR}/{game}_history.json'
-    hist = []
-    for p in (f'{RL_MOUNTED}/{game}_history.json', path):
-        if os.path.exists(p):
-            try:
-                with open(p) as f: hist = json.load(f)
-                break
-            except Exception: pass
-    hist.append(record)
-    hist = hist[-400:]   # 只保留最近400条，避免文件无限膨胀
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    try:
-        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False, indent=1)
-        if len(hist) >= 3:
-            sel = [h.get('holdout_score') for h in hist[-10:] if h.get('holdout_score') is not None]
-            cln = [h.get('clean_score')   for h in hist[-10:] if h.get('clean_score')   is not None]
-            if len(sel) >= 3:
-                print(f"    [历史] 已积累{len(hist)}天记录")
-                print(f"      选择分(会虚高): {[round(r,3) for r in sel]}")
-                if len(cln) >= 3:
-                    print(f"      干净分(可信)  : {[round(r,3) for r in cln]}")
-                    # 两条曲线背离 = 涨的是筛选假象，不是真本事
-                    d_sel = sel[-1] - sum(sel[:-1])/len(sel[:-1])
-                    d_cln = cln[-1] - sum(cln[:-1])/len(cln[:-1])
-                    if d_sel > 0.02 and d_cln <= 0:
-                        print(f"      ⚠ 选择分在涨({d_sel:+.3f})但干净分没涨({d_cln:+.3f})"
-                              f" —— 涨的是对holdout的过拟合，不是真实能力")
-                    elif d_cln > 0.02:
-                        print(f"      ✓ 干净分也在涨({d_cln:+.3f})，是真实提升")
-    except Exception as e:
-        print(f"    ! 写入历史失败: {e}")
-
-
-# ══════════════════════════════════════════════════════
-#  训练模式
-#  'frozen'      首训一次得到权重后冻结，之后每天只加载权重 + 喂新数据 + 出预测，
-#                不再训练。这样既不会过拟合（根本没训练），输出也稳定
-#                （权重固定，结果只随新数据变，不会今天有偏好明天变均匀）。
-#  'incremental' 每天在旧权重上微调（实测第2天六段全部低于基准、零提升）
-#  'fresh'       每天从零全量训练
-# ══════════════════════════════════════════════════════
-TRAIN_MODE = 'frozen'
-
-# ══════════════════════════════════════════════════════
-#  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
-#
-#  ── 为什么不是"冻结半年" ──
-#  之前设成180期才重训一次，隐含假设是"首训就是最好的"，但这没有依据：
-#  RL训练带随机性，一次首训完全可能落在很差的局部最优，
-#  冻结半年等于把一个可能很烂的模型锁死半年。
-#
-#  ── 现在的做法 ──
-#  每 CHALLENGE_EVERY 期就重训一个【全新随机初始化】的挑战者，
-#  在【从未参与训练、也从未参与早停选择】的干净holdout上跟现任比。
-#  只有赢过现任且幅度超过噪声水平(2倍标准误)，挑战者才上位。
-#
-#  三个效果同时成立：
-#    进化   —— 每次挑战都是一次找到更好模型的机会，不用等半年
-#    不过拟合 —— 上位门槛是干净数据上的真实提升，靠运气赢不了
-#    稳定   —— 挑战失败就完全不动，权重和输出保持不变
-# ══════════════════════════════════════════════════════
-# 每期都挑战（新数据一到就发起），让模型尽快稳定到较好状态。
-# 注意：挑战次数变多会带来"多重比较"问题——
-# 实测所有模型真实水平完全相同时，每天挑战365次，
-# 有82%的概率纯靠运气发生一次"假上位"。挑得越勤，蒙对的机会越多。
-# 解决办法是把门槛从2倍标准误提到3.5倍，并加一道复检（见 run_challenge）：
-#   门槛2.0SE：假上位66.5%，真提升采纳99.7%
-#   门槛3.5SE：假上位17.7%，真提升采纳91.1%
-#   门槛3.5SE+复检：假上位 4.8%，真提升采纳89.5%  ← 采用这个
-CHALLENGE_EVERY = {'3d': 1, 'ssq': 1, 'kl8': 1}
-
-# 上位门槛（标准误的倍数）。每期挑战下必须调高，否则运气会不断"换人"
-# 上位门槛（标准误的倍数）。
-# 原本设3.5是为了防每日挑战的多重比较问题，但实测 SE≈0.06 时
-# 3.5SE=0.21，等于要求挑战者比随机基准0.30高出70%——这几乎不可能发生，
-# 挑战机制形同虚设、权重永远不换。
-# 改为2.0，多重比较的防护交给"复检"那一关（两轮独立数据都要赢）。
-# 上位门槛（标准误的倍数）。这个值必须和 holdout 大小配套看：
-#   干净区 75期时，2.0倍SE = 0.120，要求挑战者达到0.42（随机基准的1.4倍）—— 太苛刻
-#   干净区500期时，2.0倍SE = 0.046，要求达到0.346 —— 一个真有提升的模型过得去
-# 所以真正的解法是把 holdout 扩大（见 holdout_size），而不是调低这个数。
-# 配合每期挑战+复检，纯运气很难连续两轮都赢这么多。
-CHALLENGE_MARGIN_K = 2.0
-
-
-def run_challenge(cur_model, make_fresh_model, train_fn, eval_clean, se, label, recheck_fn=None):
-    """
-    挑战流程：训练一个全新模型，在干净holdout上与现任比较，赢了才替换。
-
-    cur_model:        现任模型（可能为None，即首次运行）
-    make_fresh_model: 无参函数，返回一个全新随机初始化的模型
-    train_fn:         接受模型，训练后返回 (model, best_score, history)
-    eval_clean:       接受模型，在【干净holdout】上评分（该数据从未参与训练和早停选择）
-    se:               该评分的标准误，用来定"赢多少才算真赢"
-
-    返回 (最终采用的模型, 是否换人, 说明文字)
-    """
-    if cur_model is None:
-        m, _b, _h = train_fn(make_fresh_model())
-        return m, True, "首次训练，直接采用"
-
-    cur_score = eval_clean(cur_model)
-    print(f"    [挑战赛] 现任模型干净评分: {cur_score:.4f}")
-    print(f"    [挑战赛] 训练挑战者（全新随机初始化）…")
-    challenger, _b, _h = train_fn(make_fresh_model())
-    new_score = eval_clean(challenger)
-
-    margin = new_score - cur_score
-    need = CHALLENGE_MARGIN_K * se
-    print(f"    [挑战赛] 挑战者干净评分: {new_score:.4f}  差距 {margin:+.4f}"
-          f"（需超过 {need:.4f} = {CHALLENGE_MARGIN_K}倍标准误）")
-    if margin <= need:
-        return cur_model, False, f"✗ 挑战失败，保留现任（差距 {margin:+.4f} 未达门槛 {need:.4f}）"
-
-    # 复检：赢了先别急着换。用另一半holdout（早停选权重用的那半，
-    # 对挑战者和现任同样都是"没参与过自己训练"的数据）独立再比一次。
-    # 单次赢可能是运气，两次都赢才可信——实测把假上位率从17.7%压到4.8%。
-    if recheck_fn is not None:
-        c2, n2 = recheck_fn(cur_model), recheck_fn(challenger)
-        m2 = n2 - c2
-        print(f"    [复检] 另一半数据上 现任{c2:.4f} vs 挑战者{n2:.4f}  差距 {m2:+.4f}"
-              f"（需超过 {need*0.5:.4f}）")
-        if m2 <= need * 0.5:
-            return cur_model, False, f"✗ 复检未通过，保留现任（首轮{margin:+.4f} 但复检仅{m2:+.4f}）"
-        return challenger, True, f"✓ 两轮均胜，新模型上位（首轮{margin:+.4f} 复检{m2:+.4f}）"
-    return challenger, True, f"✓ 挑战成功，新模型上位（提升 {margin:+.4f}）"
-
-
-def should_challenge(game, cur_n):
-    """是否到了发起挑战的时候。返回 (是否挑战, 说明)"""
-    last = get_last_trained_n(game)
-    if last <= 0:
-        return True, "首次运行，需要完整训练"
-    grew = cur_n - last
-    need = CHALLENGE_EVERY.get(game, 20)
-    if grew >= need:
-        return True, f"距上次挑战已新增{grew}期（周期{need}期），发起新挑战"
-    return False, f"距下次挑战还差{need-grew}期（已积累{grew}/{need}），保持现任模型"
-
-
-
-def train_with_early_stop(model, total_steps, eval_fn, label,
-                          n_chunks=8, patience=3, reset_timesteps=True, warmup_chunks=0):
-    """
-    分段训练 + 早停 + 保留最佳模型。
-
-    ── 解决的问题 ──
-    原来是"练满N步 → 无条件保存 → 覆盖昨天的模型"，
-    哪怕今天练完变差了也照样覆盖，而且旧版本被覆盖后不可恢复。
-    强化学习训练不稳定是常态，很容易越练越差。
-
-    ── 现在的做法 ──
-    把训练预算切成 n_chunks 段，每段结束后在 holdout（模型未训练过的最近30期）
-    上评估一次，记录最佳分数和当时的权重快照。
-    连续 patience 段没有提升就提前停止，最后把权重恢复到最佳状态再返回。
-
-    warmup_chunks: 前N段不触发早停。RL训练前期策略震荡是正常现象，
-    刚开始几段分数掉下去很常见，这时候判死刑会让模型永远停在随机初始状态
-    （实测3D连续三次运行都因为前3段下滑而回滚到未训练权重）。
-    热身期内照常记录最佳分，但不累计"无提升"计数。
-
-    eval_fn: 无参函数，返回一个分数（越大越好）
-    返回 (model, best_score, history)
-    """
-    chunk = max(1, total_steps // n_chunks)
-    best_score = eval_fn()
-    best_params = copy.deepcopy(model.get_parameters())
-    history = [round(best_score, 4)]
-    no_improve = 0
-    print(f"    [{label}] 训练前基准分: {best_score:.4f}")
-
-    for i in range(n_chunks):
-        model.learn(total_timesteps=chunk,
-                    reset_num_timesteps=(reset_timesteps and i == 0),
-                    progress_bar=False)
-        score = eval_fn()
-        history.append(round(score, 4))
-        if score > best_score:
-            best_score = score
-            best_params = copy.deepcopy(model.get_parameters())
-            no_improve = 0
-            flag = "✓ 新最佳"
-        elif i < warmup_chunks:
-            flag = f"（热身期第{i+1}/{warmup_chunks}段，不计入早停）"
-        else:
-            no_improve += 1
-            flag = f"（无提升 {no_improve}/{patience}）"
-        print(f"    [{label}] 第{i+1}/{n_chunks}段({chunk}步) 评分 {score:.4f}  {flag}")
-        if i >= warmup_chunks and no_improve >= patience:
-            print(f"    [{label}] 连续{patience}段无提升，提前停止（省下{(n_chunks-i-1)*chunk}步）")
-            break
-
-    # 恢复到最佳状态，而不是用最后一段训练完的（可能更差的）权重
-    model.set_parameters(best_params)
-    print(f"    [{label}] 已恢复到最佳权重，最终评分 {best_score:.4f}  评分轨迹: {history}")
-    return model, best_score, history
+    """按数据量的12%留出，至少120期保证测量精度，最多1000期避免过度损失训练数据"""
+    return max(120, min(1000, int(n_records * 0.12)))
 
 
 
@@ -1426,76 +726,6 @@ def get_last_trained_n(game):
             except Exception: pass
     return 0
 
-def get_fixed_eval_range(game, records, size=50):
-    """
-    固定评测集：锁定一批期数作为长期不变的"考题"。
-
-    ── 为什么需要 ──
-    原来的回测窗口是 len(records)-30，每天新增1期就整体后移1期，
-    于是"模型权重"和"考题"两个变量同时在变——
-    今天净收益-1.72、明天-1.38，你根本分不清是模型进步了，
-    还是今天这30期恰好比昨天好猜。这样就永远无法验证微调有没有用。
-
-    固定评测集把考题锁死：首次运行时记录一个区间，之后一直用它。
-    这样分数变化只可能来自模型本身，跨天可比。
-    （注意：随着训练数据增长，这批期数会逐渐变成"训练集内的数据"，
-     所以它衡量的是"拟合能力是否提升"，不能当作纯样本外泛化指标——
-     真正的样本外表现仍看每日滚动回测。两者结合看才完整。）
-    """
-    path_mount = f'{RL_MOUNTED}/{game}_eval_range.json'
-    path_local = f'{RL_LOCAL_DIR}/{game}_eval_range.json'
-    rng = None
-    for p in (path_mount, path_local):
-        if os.path.exists(p):
-            try:
-                with open(p) as f: rng = json.load(f)
-                break
-            except Exception: pass
-    if not rng or 'start' not in rng or 'end' not in rng:
-        end = len(records) - 1
-        start = max(SEQ_LEN + 30, end - size)
-        rng = {'start': start, 'end': end, 'locked_at': str(date.today()), 'locked_n': len(records)}
-        print(f"  [固定评测集] 首次锁定: 第{start}~{end}期（共{end-start}期），"
-              f"之后每天用同一批考题评测，分数变化才可比")
-    if rng['end'] > len(records) - 1:   # 数据被回滚等异常情况的保护
-        return None
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    try:
-        with open(path_local, 'w') as f: json.dump(rng, f)
-    except Exception: pass
-    return rng
-
-
-def append_eval_history(game, score_dict):
-    """把每天在固定评测集上的成绩追加到历史曲线，便于观察长期是否进步"""
-    path_mount = f'{RL_MOUNTED}/{game}_eval_history.json'
-    path_local = f'{RL_LOCAL_DIR}/{game}_eval_history.json'
-    hist = []
-    for p in (path_mount, path_local):
-        if os.path.exists(p):
-            try:
-                with open(p) as f: hist = json.load(f)
-                break
-            except Exception: pass
-    if not isinstance(hist, list): hist = []
-    hist.append({'date': str(date.today()), **score_dict})
-    hist = hist[-200:]   # 只留最近200条，避免文件无限膨胀
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    try:
-        with open(path_local, 'w') as f: json.dump(hist, f, ensure_ascii=False)
-    except Exception: pass
-    # 打印近期趋势，让"有没有进步"一眼可见
-    if len(hist) >= 2:
-        key = [k for k in score_dict if k != 'date']
-        if key:
-            k = key[0]
-            vals = [h.get(k) for h in hist[-10:] if h.get(k) is not None]
-            if len(vals) >= 2:
-                trend = "↑ 上升" if vals[-1] > vals[0] else ("↓ 下降" if vals[-1] < vals[0] else "→ 持平")
-                print(f"  [固定评测集·历史] 近{len(vals)}次 {k}: {vals[0]} → {vals[-1]}  {trend}")
-    return hist
-
-
 def save_last_trained_n(game, n):
     """记录本次训练用到的数据期数，随RL_LOCAL_DIR一起推送到Dataset持久化"""
     os.makedirs(RL_LOCAL_DIR, exist_ok=True)
@@ -1527,69 +757,181 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
     return {'skipped': True, 'games_tested': 0, 'reason': reason,
             'note': f'{reason}，且未找到上次训练结果可沿用（可能是首次运行）'}
 
-# 各段的归一化基准（首次计算后缓存，之后固定不变）
-_SEG_SCALE_CACHE = {}
-_SCALE_FILE = 'seg_scales.json'
+def policy_dependence_test(model, build_state_fn, idx_list, game):
+    """
+    策略依赖性：模型的输出到底跟不跟着状态变？这决定了能否冻结权重使用。
+
+    ── 为什么这是"稳定权重"的前提 ──
+    你想要的两件事——权重稳定、推荐跟着新数据变——同时成立的唯一条件是
+    【模型是状态相关的】：输入变，输出就跟着变。
+      · 状态相关 → 冻结权重也能天天出不同推荐（AlphaGo就是这么工作的）
+      · 常数策略 → 冻结就永远不变，只能靠每天换权重制造"假变化"
+    所以先测这个，再决定用哪种模式，否则怎么改都是瞎猜。
+
+    做法：取若干相隔很远的历史时点各预测一次，看输出差异有多大。
+    """
+    dists, tops = [], []
+    for i in idx_list:
+        st = build_state_fn(i)
+        if st is None: continue
+        try:
+            obs, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs)
+            dl = getattr(dist, 'distribution', None)
+            if isinstance(dl, (list, tuple)):
+                p = np.concatenate([d.probs.detach().cpu().numpy()[0] for d in dl])
+                tops.append(tuple(int(np.argmax(d.probs.detach().cpu().numpy()[0])) for d in dl))
+            else:
+                a, _ = model.predict(st, deterministic=True)
+                p = np.asarray(a, dtype=np.float32)
+                tops.append(tuple(np.argsort(p)[-6:].tolist()))
+            dists.append(p)
+        except Exception:
+            continue
+    if len(dists) < 3:
+        print(f"    [策略依赖性] 样本不足，跳过"); return None
+    D = np.array(dists)
+    spread = float(np.mean(np.std(D, axis=0)))
+    ratio = spread / (float(np.mean(np.abs(D))) + 1e-9)
+    uniq = len(set(tops))
+    print(f"    [策略依赖性] {len(dists)}个相隔较远的历史时点分别预测：")
+    print(f"      最优选择出现 {uniq} 种不同结果；输出跨时点波动/均值 = {ratio*100:.1f}%")
+    if uniq <= 2 or ratio < 0.05:
+        print(f"      ⚠️ 接近常数策略——不管输入什么都给几乎一样的答案。")
+        print(f"         这种模型冻结后推荐永远不变，权重也谈不上『学到了什么』")
+    elif ratio < 0.20:
+        print(f"      · 有响应但偏弱，冻结后相邻两天推荐可能相同")
+    else:
+        print(f"      ✓ 输出明显随状态变化 —— 可以冻结权重使用，")
+        print(f"         每天新数据自然会带来不同推荐（AlphaGo模式）")
+    return {'n_points': len(dists), 'unique_best': uniq, 'spread_ratio': round(ratio, 4)}
 
 
-def load_seg_scales():
+def record_clean_score(game, clean, n_clean, base, sd_per_period):
     """
-    从Dataset读取归一化基准。基准必须跨天保持一致——
-    如果每天重新计算，就退化回原来那个"输入天天漂移"的问题，
-    首训学到的权重第二天照样对不上。
+    累积记录每天的干净分，并用【多天平均】做判断。
+
+    ── 为什么必须累积 ──
+    单日干净分的标准误很大（3D约0.023、双色球约0.090），
+    2个标准误换算成"要有13~16%的相对提升"才算数——对彩票场景太苛刻，
+    真有5%的微弱优势也会被判成"等于随机"。
+
+    但解法不是调低门槛（那会把噪声当成信号），而是累积天数：
+    N天平均的标准误缩小到 1/√N，20天后3D只要3.5%的真实提升就能检出。
+    这是在【不放松标准】的前提下提高灵敏度。
     """
-    global _SEG_SCALE_CACHE
-    for p in (f'{RL_MOUNTED}/{_SCALE_FILE}', f'{RL_LOCAL_DIR}/{_SCALE_FILE}'):
+    path = f'{RL_LOCAL_DIR}/{game}_clean_history.json'
+    hist = []
+    for p in (f'{RL_MOUNTED}/{game}_clean_history.json', path):
         if os.path.exists(p):
             try:
-                with open(p) as f:
-                    raw = json.load(f)
-                _SEG_SCALE_CACHE = {k: {int(i): float(v) for i, v in d.items()} for k, d in raw.items()}
-                print(f"  ✓ 已加载归一化基准（{len(_SEG_SCALE_CACHE)}个游戏），保证与首训时的输入口径一致")
-                return
-            except Exception as e:
-                print(f"  ! 读取归一化基准失败: {e}")
-    print("  ! 未找到归一化基准，本次将新建（首次运行属正常）")
-
-
-def save_seg_scales():
+                with open(p) as f: hist = json.load(f); break
+            except Exception: pass
+    hist.append({'date': str(date.today()), 'clean': round(float(clean), 4), 'n': int(n_clean)})
+    hist = hist[-400:]
     os.makedirs(RL_LOCAL_DIR, exist_ok=True)
     try:
-        with open(f'{RL_LOCAL_DIR}/{_SCALE_FILE}', 'w') as f:
-            json.dump({k: {str(i): v for i, v in d.items()} for k, d in _SEG_SCALE_CACHE.items()}, f)
+        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False)
     except Exception as e:
-        print(f"  ! 保存归一化基准失败: {e}")
+        print(f"    ! 写入干净分历史失败: {e}")
+
+    vals = [h['clean'] for h in hist if h.get('clean') is not None]
+    if len(vals) < 2:
+        print(f"    [累积判断] 已记录{len(vals)}天，至少需要2天才能给出趋势")
+        return
+    import statistics as _st
+    avg = _st.fmean(vals)
+    # 多天平均的标准误：单期标准差 / √(总期数)
+    tot_n = sum(h.get('n', n_clean) for h in hist)
+    se_avg = sd_per_period / math.sqrt(max(tot_n, 1))
+    z = (avg - base) / se_avg if se_avg > 0 else 0.0
+    print(f"    [累积判断] 已积累{len(vals)}天（合计{tot_n}期评估样本）")
+    print(f"      历年平均干净分 {avg:.4f}   随机基准 {base:.4f}   偏离 {z:+.2f}个标准误")
+    if abs(z) < 2:
+        need = 2*se_avg/base*100
+        print(f"      → 仍在随机范围内。当前样本量下能检出的最小提升为 {need:.1f}%")
+    elif z >= 2:
+        print(f"      → ✓ 已显著高于随机，模型确实存在预测能力")
+    else:
+        print(f"      → ⚠️ 显著低于随机，模型表现比瞎猜还差")
 
 
-def normalize_state_segments(*segments, scale_key=None):
+def data_contribution_test(model, build_state_fn, n_records, game, topk=3):
     """
-    分段归一化，每段除以一个【固定基准】而不是"当前这一段自己的最大值"。
+    新数据贡献度：今天这一期开奖，对推荐究竟有多大影响？
 
-    ── 为什么必须改 ──
-    原来每次调用都拿 seg.max() 当分母。新开一期后，某个特征成了新的最大值，
-    整段的缩放基准就跟着变——结果是【本来没变的特征，归一化后也变了】。
-    实测：一段5个值只有最后一个从812变成850，前4个值归一化后偏移了0.044，
-    模型每天看到的输入一直在漂移，首训学到的东西第二天就对不上，
-    表现为"同一份权重，昨天有偏好、今天变均匀"。
+    ── 为什么必须单独测 ──
+    每日全量训练下，推荐号码天天都不一样，但变化来自两个来源：
+      ① 每天全新随机初始化 → 落在不同局部最优
+      ② 今天新增的那一期数据
+    两者混在一起，光看"号码变了"根本说明不了新数据有用。
 
-    现在改成：首次调用时按该段的实际量级确定一个基准并缓存，之后固定使用。
-    同样的底层数据永远映射到同样的向量，模型学到的规律才能延用。
+    ── 做法 ──
+    用【同一份权重】预测两次：一次喂含今天这期的状态，一次喂不含的。
+    权重相同，唯一变量就是这一期数据，差异即为它的纯粹贡献。
     """
-    key = scale_key or 'default'
-    cache = _SEG_SCALE_CACHE.setdefault(key, {})
+    try:
+        s_with = build_state_fn(n_records)        # 含今天这期
+        s_without = build_state_fn(n_records - 1)  # 不含
+        if s_with is None or s_without is None:
+            print(f"    [新数据贡献] 状态构建失败，跳过"); return None
+
+        d = np.abs(s_with - s_without)
+        in_chg = int((d > 1e-9).sum()); in_rel = float(d.sum()/(np.abs(s_without).sum()+1e-9))
+
+        def _pred(st):
+            obs, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs)
+            dl = getattr(dist, 'distribution', None)
+            if isinstance(dl, (list, tuple)):   # MultiDiscrete
+                return [d_.probs.detach().cpu().numpy()[0] for d_ in dl]
+            a, _ = model.predict(st, deterministic=True)
+            return [np.asarray(a, dtype=np.float32)]
+
+        p_w, p_o = _pred(s_with), _pred(s_without)
+        out_diff = float(np.mean([np.abs(a-b).mean() for a, b in zip(p_w, p_o)]))
+        top_w = [tuple(np.argsort(a)[::-1][:topk].tolist()) for a in p_w]
+        top_o = [tuple(np.argsort(a)[::-1][:topk].tolist()) for a in p_o]
+        flipped = sum(1 for a, b in zip(top_w, top_o) if a != b)
+
+        print(f"    [新数据贡献] 今天这期使状态 {in_chg}/{len(s_with)} 维变化（幅度{in_rel*100:.2f}%）")
+        print(f"      → 输出分布平均变化 {out_diff*100:.3f}个百分点，"
+              f"{flipped}/{len(top_w)} 个位置的Top{topk}排序发生翻转")
+        if flipped == 0 and out_diff < 0.002:
+            print(f"      ⚠️ 新数据几乎没有影响推荐——号码的日常变化主要来自每天重新随机初始化，"
+                  f"不是来自今天的开奖")
+        elif flipped > 0:
+            print(f"      ✓ 今天的开奖确实改变了推荐号码")
+        return {'input_dims_changed': in_chg, 'input_rel': round(in_rel, 5),
+                'output_diff': round(out_diff, 6), 'top_flipped': flipped}
+    except Exception as e:
+        print(f"    [新数据贡献] 检测失败: {e}")
+        return None
+
+
+def normalize_state_segments(*segments):
+    """
+    分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
+    问题根源：raw特征里像"号码总和均值"这类聚合量级在几百到近千，
+    而遗漏值(0-3)、ML概率(0-1)量级很小，如果整个向量共用一个全局最大值做归一化，
+    遗漏和ML概率信号会被压缩到接近0，模型实际上"看不到"这些真正能区分号码好坏的关键信息，
+    只能学到一些跟具体选哪个球无关的全局统计偏向，导致策略跟状态基本脱钩、
+    收敛到一个固定的、看似随意的偏好（这次表现为一直偏向大号）。
+    修复：每一段各自独立按自己的最大值缩放到[-1,1]附近，再拼接，
+    确保任何一段都不会因为量级差异淹没其它段的信号。
+    """
     normed = []
-    for i, seg in enumerate(segments):
+    for seg in segments:
         seg = np.asarray(seg, dtype=np.float32)
         if seg.size == 0:
-            normed.append(seg); continue
-        if i not in cache:
-            m = float(np.abs(seg).max())
-            # 用当次最大值的1.5倍作为固定基准，留出后续波动空间，避免频繁越界被截断
-            cache[i] = max(m * 1.5, 1e-6)
-        normed.append(seg / cache[i])
+            normed.append(seg)
+            continue
+        m = np.abs(seg).max()
+        normed.append(seg / (m + 1e-8) if m > 0 else seg)
     state = np.concatenate(normed).astype(np.float32)
     return np.clip(state, -5, 5)
-
 
 # ══════════════════════════════════════════════════════
 #  集成环境
@@ -1617,25 +959,21 @@ class IntegratedKL8Env(gym.Env):
     PERBALL_WEIGHT = 2.0   # 逐球信号（遗漏+频率）额外加权，突出其重要性
 
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N,
-                 mk_arr=None, by_arr=None):
+                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
+        # 训练上界：留出末段给回测，训练时绝不触碰
         self.train_end = max(SEQ_LEN + 40, len(records) - holdout_size(len(records)))
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.freq_arr=freq_arr
-        self.mk_arr=mk_arr; self.by_arr=by_arr
         self.train_n=train_n
         self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 80; freq_dim = 80
-        mk_dim = mk_arr.shape[1] if mk_arr is not None else 0
-        by_dim = by_arr.shape[1] if by_arr is not None else 0
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim+mk_dim+by_dim
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
 
@@ -1654,29 +992,11 @@ class IntegratedKL8Env(gym.Env):
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
         fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(80,dtype=np.float32)
 
-        mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
-        by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr,mk,by, scale_key='kl8')
-        _sg = self._segs()
-        state = apply_segment_switches(state, _sg, 'kl8')
-        # 逐球信号（遗漏+频率）加权。用精确段边界定位，
-        # 不能再写 state[-160:] —— 马尔可夫/贝叶斯加进来后末尾160维已不是遗漏+频率了。
+        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr)
+        # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
         state = state.copy()
-        state[_sg[4][1]:_sg[5][2]] *= self.PERBALL_WEIGHT
+        state[-160:] *= self.PERBALL_WEIGHT
         return np.clip(state, -5, 5)
-
-    def _segs(self):
-        lh = self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0
-        th = self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0
-        mk = self.mk_arr.shape[1] if self.mk_arr is not None else 0
-        by = self.by_arr.shape[1] if self.by_arr is not None else 0
-        base = self.state_dim-len(self.ml_vec)-lh-th-160-mk-by
-        dims = [('走势特征', base), ('ML+DL概率', len(self.ml_vec)),
-                ('LSTM隐层', lh), ('TFM隐层', th), ('遗漏', 80), ('频率', 80),
-                ('马尔可夫', mk), ('贝叶斯', by)]
-        out, p = [], 0
-        for n, d in dims: out.append((n, p, p+d)); p += d
-        return out
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1714,24 +1034,21 @@ class IntegratedSSQEnv(gym.Env):
     """
     metadata={'render_modes':[]}
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N,
-                 mk_arr=None, by_arr=None):
+                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
+        # 训练上界：留出末段给回测，训练时绝不触碰
         self.train_end = max(SEQ_LEN + 40, len(records) - holdout_size(len(records)))
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr; self.mk_arr=mk_arr; self.by_arr=by_arr
+        self.omit_arr=omit_arr
         self.red_pick_n=red_pick_n
         self.start=SEQ_LEN+30; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 49   # 33红球+16蓝球遗漏值，已含每个号码的差异化信息
-        mk_dim = mk_arr.shape[1] if mk_arr is not None else 0
-        by_dim = by_arr.shape[1] if by_arr is not None else 0
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+mk_dim+by_dim
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(33+16,),dtype=np.float32)
 
@@ -1749,23 +1066,7 @@ class IntegratedSSQEnv(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
 
-        mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
-        by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by, scale_key='ssq')
-        return apply_segment_switches(st, self._segs(), 'ssq')
-
-    def _segs(self):
-        lh = self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0
-        th = self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0
-        mk = self.mk_arr.shape[1] if self.mk_arr is not None else 0
-        by = self.by_arr.shape[1] if self.by_arr is not None else 0
-        base = self.state_dim-len(self.ml_vec)-lh-th-49-mk-by
-        dims = [('走势特征', base), ('ML+DL概率', len(self.ml_vec)),
-                ('LSTM隐层', lh), ('TFM隐层', th), ('遗漏', 49),
-                ('马尔可夫', mk), ('贝叶斯', by)]
-        out, p = [], 0
-        for n, d in dims: out.append((n, p, p+d)); p += d
-        return out
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1814,22 +1115,20 @@ class Integrated3DEnv(gym.Env):
     """
     metadata={'render_modes':[]}
     def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, mk_arr=None, by_arr=None):
+                 tfm_hidden, tfm_idx2row, omit_arr):
         super().__init__()
         self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        # 训练上界：留出最后 HOLDOUT_N 期给回测，训练时绝不触碰
+        # 训练上界：留出末段给回测，训练时绝不触碰
         self.train_end = max(SEQ_LEN + 40, len(records) - holdout_size(len(records)))
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr; self.mk_arr=mk_arr; self.by_arr=by_arr
+        self.omit_arr=omit_arr
         self.start=SEQ_LEN+5; self.idx=self.start
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 30
-        mk_dim = mk_arr.shape[1] if mk_arr is not None else 0
-        by_dim = by_arr.shape[1] if by_arr is not None else 0
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+mk_dim+by_dim
+        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.MultiDiscrete([10,10,10])
 
@@ -1846,23 +1145,7 @@ class Integrated3DEnv(gym.Env):
         else:
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
-        mk = self.mk_arr[self.idx] if self.mk_arr is not None else np.zeros(0,dtype=np.float32)
-        by = self.by_arr[self.idx] if self.by_arr is not None else np.zeros(0,dtype=np.float32)
-        st = normalize_state_segments(raw,self.ml_vec,lh,th,om,mk,by, scale_key='3d')
-        return apply_segment_switches(st, self._segs(), '3d')
-
-    def _segs(self):
-        """状态向量各段的起止下标，供开关和消融诊断共用"""
-        lh = self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0
-        th = self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0
-        mk = self.mk_arr.shape[1] if self.mk_arr is not None else 0
-        by = self.by_arr.shape[1] if self.by_arr is not None else 0
-        dims = [('走势特征', self.state_dim-len(self.ml_vec)-lh-th-30-mk-by),
-                ('ML+DL概率', len(self.ml_vec)), ('LSTM隐层', lh), ('TFM隐层', th),
-                ('遗漏', 30), ('马尔可夫', mk), ('贝叶斯', by)]
-        out, p = [], 0
-        for n, d in dims: out.append((n, p, p+d)); p += d
-        return out
+        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1960,10 +1243,10 @@ def push_rl_dataset():
         print(f"  ! 推送异常: {e}"); return False
 
 # ══════════════════════════════════════════════════════
-#  主流程：kl8 增量微调
+#  主流程：kl8 每日全量训练
 # ══════════════════════════════════════════════════════
-def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
-    print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
+def run_kl8_daily(records, ml_pred, prev_result=None):
+    print(f"\n{'='*50}\n快乐8 PPO 每日全量训练（全号码打分排序，{len(records)}期）\n{'='*50}")
 
     # 新数据检测：快乐8虽然每天开奖，但手动重复触发时数据是完全相同的，
     # 反复训练会让模型对同一批数据过拟合，这里直接跳过
@@ -1973,16 +1256,13 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
-    dl_vec = extract_dl_prob_vec(dl_pred, 'kl8')
-    # 传统ML概率 + 深度学习概率 拼成统一的外部模型信号向量
-    ml_vec = np.concatenate([ml_vec, dl_vec]).astype(np.float32)
     _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_multi(records, fkl8, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_multi(records, fkl8, tfm)
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -1995,39 +1275,28 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     freq_arr = precompute_freq_kl8(records, window=30)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [频率向量] ✓已加载（80维，第二个逐球差异化信号）")
 
-    print("  批量预计算马尔可夫转移 + 贝叶斯后验…")
-    t0 = time.time()
-    mk_arr = precompute_markov_balls(records, 80, lambda r: r['numbers'])   # 80维
-    by_arr = precompute_bayes(records, 80, lambda r: r['numbers'])          # 160维
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [马尔可夫] 80维  [贝叶斯均值+不确定性] 160维")
-
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
 
     def make_env():
         return IntegratedKL8Env(records, fkl8, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr,
-                                mk_arr=mk_arr, by_arr=by_arr)
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    model = load_ppo('kl8')
-    _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
-    is_new = model is None
+    # 每日全量训练，不加载旧权重（加载了也会被全量重训覆盖，白白浪费时间）
     t0 = time.time()
-    if not is_new:
-        try:
-            model.set_env(vec_env)
-            # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
-            # 否则改了 ENT_COEF 对已有模型完全不生效，还以为调了参
-            model.ent_coef = ENT_COEF['kl8']
-            print(f"    熵系数已设为 {model.ent_coef}")
-        except Exception as e:
-            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
-            model = None; is_new = True
-    if is_new:
-        print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=ENT_COEF['kl8'],
-                    verbose=0, device='cpu')
+    # 每日全量训练：不做增量微调。
+    # 原因：每天只新增1期（占总数万分之一），在旧权重上微调几千步
+    # 学不到新东西，反而每天扰动权重，导致输出忽有偏好忽而均匀。
+    # 全量重训每次都是全新随机初始化，当天的新开奖直接进入训练数据，
+    # 推荐号码自然会跟着变化。
+    print("  每日全量训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
+    model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
+                verbose=0, device='cpu')
+    model.learn(total_timesteps=200000, progress_bar=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+
+    save_ppo(model, 'kl8')
 
     def build_state(idx):
         feat = fkl8(records, idx)
@@ -2037,136 +1306,18 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         fr = freq_arr[idx]
-        mk = mk_arr[idx]; by = by_arr[idx]
-        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr,mk,by, scale_key='kl8')
-        state = apply_segment_switches(state, _segs_kl8, 'kl8')
-        # 逐球信号（遗漏+频率）加权。必须用精确段边界定位：
-        # 之前写 state[-160:]，在马尔可夫/贝叶斯加进来之后，末尾160维已经变成它们了，
-        # 加权加错了对象（训练和推理都错、方向一致所以没报错，但含义已偏）。
+        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr)
         state = state.copy()
-        _s0 = _segs_kl8[4][1]; _s1 = _segs_kl8[5][2]   # 遗漏起点 ~ 频率终点
-        state[_s0:_s1] *= IntegratedKL8Env.PERBALL_WEIGHT
+        state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
         return np.clip(state, -5, 5)
 
-    # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
-    _lh_d = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-    _th_d = tfm_hidden.shape[1] if tfm_hidden is not None else 0
-    _segs_kl8, _pp = [], 0
-    for _n, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                   ('LSTM隐层', _lh_d), ('TFM隐层', _th_d), ('遗漏', 80), ('频率', 80),
-                   ('马尔可夫', mk_arr.shape[1]), ('贝叶斯', by_arr.shape[1])]:
-        _segs_kl8.append((_n, _pp, _pp+_d)); _pp += _d
-    _off = [n for n,_,_ in _segs_kl8 if not SEGMENT_ENABLE.get('kl8',{}).get(n, True)]
-    if _off: print(f"  [分段开关] 快乐8 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
-
-    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
-    _hold_mid = (_hold_start + len(records)) // 2   # 前半选权重，后半只报分
-    def _eval_holdout(mask=None, half='select', use_model=None):
-        """在holdout上评分：选六标准的平均命中球数。mask=(s,e)时清零该区间用于消融诊断。
-           half='select'用前一半(早停选权重)，half='report'用后一半(从不参与选择，评分干净)"""
-        tot, n = 0, 0
-        _rng = range(_hold_start, _hold_mid) if half=='select' else range(_hold_mid, len(records))
-        for i in _rng:
-            st = build_state(i)
-            if st is None: continue
-            if mask is not None:
-                st = st.copy(); st[mask[0]:mask[1]] = 0.0
-            _m = use_model if use_model is not None else model
-            a,_ = _m.predict(st, deterministic=True)
-            sel = set(int(x)+1 for x in np.argsort(a)[-6:])
-            tot += len(set(records[i]['numbers']) & sel); n += 1
-        return tot/n if n else 0.0
-
-    if is_new:
-        model, _best, _hist = train_with_early_stop(
-            model, 200000, _eval_holdout, '快乐8首训', n_chunks=16, patience=6,
-            reset_timesteps=True, warmup_chunks=5)
-    else:
-        if TRAIN_MODE == 'frozen':
-            # 冻结模式：平时不训练（输出稳定、无过拟合），
-            # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
-            # 而不是每天拿万分之一的新数据空转。
-            _do, _why = should_challenge('kl8', len(records))
-            print(f"  [挑战周期] {_why}")
-            if _do:
-                _n_clean = max(len(records) - _hold_mid, 1)
-                _se_clean = math.sqrt(6*0.25*0.75) / math.sqrt(_n_clean)
-                def _mk():
-                    m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
-                            n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
-                            ent_coef=ENT_COEF['kl8'], verbose=0, device='cpu')
-                    return m
-                def _tr(m):
-                    return train_with_early_stop(m, 200000, _eval_holdout, '快乐8挑战者',
-                                                 n_chunks=16, patience=6,
-                                                 reset_timesteps=True, warmup_chunks=5)
-                def _ev(m):
-                    return _eval_holdout(half='report', use_model=m)
-                def _rc(m):
-                    # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
-                    return _eval_holdout(half='select', use_model=m)
-                model, _swapped, _msg = run_challenge(
-                    model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='快乐8')
-                print(f"  [挑战结果] {_msg}")
-                _do = _swapped   # 只有换人了才需要保存
-                _best = _eval_holdout(); _hist = [round(_best,4)]
-            else:
-                _best = _eval_holdout(); _hist = [round(_best,4)]
-                print(f"  [现任模型] 沿用已有权重出预测，holdout评分 {_best:.4f}")
-        else:
-            print("  增量微调（2万步，带早停）…")
-            model, _best, _hist = train_with_early_stop(
-                model, 20000, _eval_holdout, '快乐8微调', n_chunks=8, patience=4,
-                reset_timesteps=False, warmup_chunks=2)
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
-    _st_probe = build_state(len(records))
-    if _st_probe is not None: report_entropy(model, _st_probe, '快乐8')
-
-    # 策略依赖性：模型到底有没有在用状态（比任何评分都更根本）
-    try:
-        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
-        _dep = policy_dependence_test(model, build_state, _pts, 'kl8')
-    except Exception as _e:
-        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
-
-    # 干净评分：用从未参与早停选择的那半holdout评分，不会被筛选污染
-    try:
-        _clean = _eval_holdout(half='report')
-        print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
-              f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}")
-    except Exception as _e:
-        _clean = float('nan'); print(f"    [干净评分] 计算失败: {_e}")
-
-    _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-    _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
-    _p = 0; _segs = []
-    for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 80), ('频率', 80),
-                    ('马尔可夫', 80), ('贝叶斯', 160)]:
-        _segs.append((_nm, _p, _p+_d)); _p += _d
-    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
-    _ablation = []
-    if TRAIN_MODE != 'frozen':
-        _ablation = segment_ablation(_eval_holdout, _segs, _best, '快乐8', 'kl8',
-                                     se=math.sqrt(6*0.25*0.75)/math.sqrt(max(len(records)-_hold_start,1)))
-    append_history('kl8', {'date': str(date.today()), 'holdout_score': round(_best,4),
-                          'clean_score': round(_clean,4),
-                          'policy_dependence': _dep,
-                          'ent_coef': ENT_COEF['kl8'],
-                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
-
-    # 只有真正训练过才保存：冻结且未触发重训时权重没变，
-    # 重复推送没意义，还可能意外覆坏已有权重
-    _trained = (TRAIN_MODE != 'frozen') or is_new or _do
-    if _trained:
-        save_ppo(model, 'kl8')
-        save_last_trained_n('kl8', len(records))   # 记录本次训练时的期数，供下次判断
-    else:
-        print("  [冻结] 权重未改动，跳过保存")
-
     # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
-    start = max(SEQ_LEN+30, len(records)-30)
+    # 回测区间 = holdout（训练时完全没碰过的末段），这才是真正的样本外评估。
+    # 再对半分：前半 observe 供观察，后半 clean 从不参与任何选择，评分最干净。
+    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
+    _hold_mid = (_hold_start + len(records)) // 2
+    start = _hold_start
+    _clean_sum, _clean_n = 0, 0
     play_sizes = [4,5,6,9,10]
     net_by_size = {n: 0.0 for n in play_sizes}
     hit_by_size = {n: 0.0 for n in play_sizes}
@@ -2185,6 +1336,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             hit = len(actual & sel)
             net_by_size[n] += calc_payout(n, hit)
             hit_by_size[n] += hit
+        if idx >= _hold_mid:                       # 后半段：干净区（从不参与任何选择）
+            _clean_sum += len(actual & set(ranked_all[:6])); _clean_n += 1
         games+=1
 
     backtest_by_play = {}
@@ -2193,33 +1346,18 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         avg_hit = round(hit_by_size[n]/games,2) if games else 0
         backtest_by_play[n] = {'avg_net_per_game':avg_net,'avg_hit':avg_hit}
 
-    # ── 固定评测集：考题锁死，只有模型在变，跨天成绩才可比 ──
-    fixed_eval = None
-    _rng = get_fixed_eval_range('kl8', records)
-    if _rng:
-        _net = 0.0; _hit = 0; _ft = 0
-        for idx in range(_rng['start'], _rng['end']+1):
-            st = build_state(idx)
-            if st is None: continue
-            act,_ = model.predict(st, deterministic=True)
-            order = np.argsort(act)[::-1]
-            sel = set(int(i)+1 for i in order[:KL8_TRAIN_N])
-            h = len(set(records[idx]['numbers']) & sel)
-            _net += calc_payout(KL8_TRAIN_N, h); _hit += h; _ft += 1
-        if _ft:
-            f_net = round(_net/_ft, 2); f_hit = round(_hit/_ft, 3)
-            print(f"  [固定评测集] 第{_rng['start']}~{_rng['end']}期({_ft}期，选六标准): "
-                  f"平均净收益{f_net}元/期  平均命中{f_hit}个")
-            append_eval_history('kl8', {'avg_net': f_net, 'avg_hit': f_hit, 'n': _ft})
-            fixed_eval = {'range': [_rng['start'], _rng['end']], 'n': _ft,
-                          'avg_net': f_net, 'avg_hit': f_hit}
-
     # 找出净收益回测表现最好的玩法（仅供参考，彩票本质随机，历史回测不代表未来）
     best_play_n = max(play_sizes, key=lambda n: backtest_by_play[n]['avg_net_per_game'])
     avg_net = backtest_by_play[6]['avg_net_per_game']   # 兼容旧字段：保留选六作为默认展示值
     print(f"  回测（近{games}期，全玩法对比）：" + "  ".join(
         f"选{['','','','','四','五','六','','','九','十'][n]}净收益{backtest_by_play[n]['avg_net_per_game']}元/期" for n in play_sizes))
     print(f"  回测表现最好的玩法：选{['','','','','四','五','六','','','九','十'][best_play_n]}")
+    _clean = round(_clean_sum/_clean_n, 4) if _clean_n else 0.0
+    _se = math.sqrt(6*0.25*0.75)/math.sqrt(max(_clean_n,1))
+    print(f"  [样本外回测] holdout共{games}期（第{start}~{len(records)-1}期，训练时未接触）")
+    print(f"    干净区（后{_clean_n}期）选六平均命中 {_clean}  随机基准1.50  "
+          f"偏离 {(_clean-1.5)/_se:+.2f}个标准误")
+    record_clean_score('kl8', _clean, _clean_n, 1.50, math.sqrt(6*0.25*0.75))
 
     # 今日推荐：以RL自己的判断为主——它的状态输入已经融合了ML概率/LSTM/TFM隐层/遗漏/频率/走势特征，
     # 训练过程中神经网络自己学会了怎么综合这些信息，不再用人工权重公式二次加工跟它的判断"打架"。
@@ -2230,6 +1368,14 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    # 新数据贡献度：同一份权重下，今天这期开奖对推荐的纯粹影响
+    data_contribution_test(model, build_state, len(records), 'kl8')
+    # 策略依赖性：决定这份权重能否冻结后长期使用
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        policy_dependence_test(model, build_state, _pts, 'kl8')
+    except Exception as _e:
+        print(f"    [策略依赖性] 检测异常: {_e}")
     idx = len(records)
     state = build_state(idx)
     rl_order = []
@@ -2409,35 +1555,37 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             'ppo_selected':picks_by_n[6],   # 兼容旧字段
             'picks_by_n':picks_by_n,        # 兼容旧字段
             'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
-            'fixed_eval':fixed_eval,           # 固定评测集成绩（考题不变，跨天可比）
             'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
             'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
             'ref_info':ref_info,            # 参考信息：遗漏/频率/ML预测，仅供理解RL判断依据，不影响排序
-            'is_first_train':is_new,
+            'is_first_train':True,   # 每日全量训练，每次都是从零开始
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'}
 
 
-def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
-    print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
+def run_ssq_daily(records, ml_pred, prev_result=None):
+    print(f"\n{'='*50}\n双色球 PPO 每日全量训练（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
 
-    # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据；
-    # 手动重复触发时也会命中这个检查，避免同一批数据被反复训练导致过拟合
+    # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据。
+    # 判据用"期数有没有增加"而不是"今天星期几"——期数是事实，
+    # 星期是推断，遇到节假日调整开奖日时星期判断会失效。
+    _wd = ['周一','周二','周三','周四','周五','周六','周日'][date.today().weekday()]
+    _is_draw_day = date.today().weekday() in (1, 3, 6)   # 仅用于日志提示
     last_trained_n = get_last_trained_n('ssq')
     if len(records) <= last_trained_n:
+        print(f"  今天是{_wd}（{'开奖日' if _is_draw_day else '非开奖日'}），"
+              f"当前{len(records)}期与上次训练时相同，无新数据")
         return carry_over_result('ssq', '双色球', prev_result, len(records), last_trained_n,
-                                 '双色球周二/四/日开奖，本次运行无新开奖数据')
+                                 f'双色球周二/四/日开奖，今天是{_wd}，本次运行无新开奖数据')
+    print(f"  今天是{_wd}，检测到新开奖（{last_trained_n}期 → {len(records)}期），开始训练")
 
     ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
-    dl_vec = extract_dl_prob_vec(dl_pred, 'ssq')
-    # 传统ML概率 + 深度学习概率 拼成统一的外部模型信号向量
-    ml_vec = np.concatenate([ml_vec, dl_vec]).astype(np.float32)
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_multi(records, fssq, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_multi(records, fssq, tfm)
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2445,39 +1593,28 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     omit_arr = precompute_omission_ssq(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
 
-    print("  批量预计算马尔可夫转移 + 贝叶斯后验…")
-    t0 = time.time()
-    mk_arr = precompute_markov_balls(records, 33, lambda r: r['red'])   # 33维
-    by_arr = precompute_bayes(records, 33, lambda r: r['red'])          # 66维
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [马尔可夫] 33维  [贝叶斯均值+不确定性] 66维")
-
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习) + LSTM隐层 + TFM隐层 + 遗漏49维")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
 
     def make_env():
         return IntegratedSSQEnv(records, fssq, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
-                                mk_arr=mk_arr, by_arr=by_arr)
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    model = load_ppo('ssq')
-    _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
-    is_new = model is None
+    # 每日全量训练，不加载旧权重（加载了也会被全量重训覆盖，白白浪费时间）
     t0 = time.time()
-    if not is_new:
-        try:
-            model.set_env(vec_env)
-            # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
-            # 否则改了 ENT_COEF 对已有模型完全不生效，还以为调了参
-            model.ent_coef = ENT_COEF['ssq']
-            print(f"    熵系数已设为 {model.ent_coef}")
-        except Exception as e:
-            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
-            model = None; is_new = True
-    if is_new:
-        print("  首次训练（15万步，红球33全量打分+蓝球联合优化）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=ENT_COEF['ssq'],
-                    verbose=0, device='cpu')
+    # 每日全量训练：不做增量微调。
+    # 原因：每天只新增1期（占总数万分之一），在旧权重上微调几千步
+    # 学不到新东西，反而每天扰动权重，导致输出忽有偏好忽而均匀。
+    # 全量重训每次都是全新随机初始化，当天的新开奖直接进入训练数据，
+    # 推荐号码自然会跟着变化。
+    print("  每日全量训练（15万步，红球33全量打分+蓝球联合优化）…")
+    model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
+                verbose=0, device='cpu')
+    model.learn(total_timesteps=150000, progress_bar=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+
+    save_ppo(model, 'ssq')
 
     def build_state(idx):
         feat = fssq(records, idx)
@@ -2486,131 +1623,15 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        mk = mk_arr[idx]; by = by_arr[idx]
-        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by, scale_key='ssq')
-        return apply_segment_switches(st, _segs_ssq, 'ssq')
-
-    # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
-    _lh_d = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-    _th_d = tfm_hidden.shape[1] if tfm_hidden is not None else 0
-    _segs_ssq, _pp = [], 0
-    for _n, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                   ('LSTM隐层', _lh_d), ('TFM隐层', _th_d), ('遗漏', 49),
-                   ('马尔可夫', mk_arr.shape[1]), ('贝叶斯', by_arr.shape[1])]:
-        _segs_ssq.append((_n, _pp, _pp+_d)); _pp += _d
-    _off = [n for n,_,_ in _segs_ssq if not SEGMENT_ENABLE.get('ssq',{}).get(n, True)]
-    if _off: print(f"  [分段开关] 双色球 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
-
-    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
-    _hold_mid = (_hold_start + len(records)) // 2   # 前半选权重，后半只报分
-    def _eval_holdout(mask=None, half='select', use_model=None):
-        """在holdout上评分：红球平均命中数 + 蓝球命中率加权。mask=(s,e)时清零该区间。
-           half='select'用前一半(早停选权重)，half='report'用后一半(从不参与选择，评分干净)"""
-        tot, n = 0.0, 0
-        _rng = range(_hold_start, _hold_mid) if half=='select' else range(_hold_mid, len(records))
-        for i in _rng:
-            st = build_state(i)
-            if st is None: continue
-            if mask is not None:
-                st = st.copy(); st[mask[0]:mask[1]] = 0.0
-            _m = use_model if use_model is not None else model
-            a,_ = _m.predict(st, deterministic=True)
-            rsel = set(int(x)+1 for x in np.argsort(a[:33])[-SSQ_RED_PICK_N:])
-            bpred = int(np.argmax(a[33:]))+1
-            tot += len(set(records[i]['red']) & rsel) + 0.5*int(bpred==records[i]['blue'])
-            n += 1
-        return tot/n if n else 0.0
-
-    if is_new:
-        model, _best, _hist = train_with_early_stop(
-            model, 150000, _eval_holdout, '双色球首训', n_chunks=16, patience=6,
-            reset_timesteps=True, warmup_chunks=5)
-    else:
-        if TRAIN_MODE == 'frozen':
-            # 冻结模式：平时不训练（输出稳定、无过拟合），
-            # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
-            # 而不是每天拿万分之一的新数据空转。
-            _do, _why = should_challenge('ssq', len(records))
-            print(f"  [挑战周期] {_why}")
-            if _do:
-                _n_clean = max(len(records) - _hold_mid, 1)
-                _se_clean = math.sqrt(6*(6/33)*(27/33)) / math.sqrt(_n_clean)
-                def _mk():
-                    m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
-                            n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
-                            ent_coef=ENT_COEF['ssq'], verbose=0, device='cpu')
-                    return m
-                def _tr(m):
-                    return train_with_early_stop(m, 150000, _eval_holdout, '双色球挑战者',
-                                                 n_chunks=16, patience=6,
-                                                 reset_timesteps=True, warmup_chunks=5)
-                def _ev(m):
-                    return _eval_holdout(half='report', use_model=m)
-                def _rc(m):
-                    # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
-                    return _eval_holdout(half='select', use_model=m)
-                model, _swapped, _msg = run_challenge(
-                    model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='双色球')
-                print(f"  [挑战结果] {_msg}")
-                _do = _swapped   # 只有换人了才需要保存
-                _best = _eval_holdout(); _hist = [round(_best,4)]
-            else:
-                _best = _eval_holdout(); _hist = [round(_best,4)]
-                print(f"  [现任模型] 沿用已有权重出预测，holdout评分 {_best:.4f}")
-        else:
-            print("  增量微调（1.5万步，带早停）…")
-            model, _best, _hist = train_with_early_stop(
-                model, 15000, _eval_holdout, '双色球微调', n_chunks=8, patience=4,
-                reset_timesteps=False, warmup_chunks=2)
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，回测第{_hold_start}~{len(records)-1}期（样本外）")
-    _st_probe = build_state(len(records))
-    if _st_probe is not None: report_entropy(model, _st_probe, '双色球')
-
-    # 策略依赖性：模型到底有没有在用状态（比任何评分都更根本）
-    try:
-        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
-        _dep = policy_dependence_test(model, build_state, _pts, 'ssq')
-    except Exception as _e:
-        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
-
-    # 干净评分：用从未参与早停选择的那半holdout评分，不会被筛选污染
-    try:
-        _clean = _eval_holdout(half='report')
-        print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
-              f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}")
-    except Exception as _e:
-        _clean = float('nan'); print(f"    [干净评分] 计算失败: {_e}")
-
-    _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-    _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
-    _p = 0; _segs = []
-    for _nm, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                    ('LSTM隐层', _lh_dim), ('TFM隐层', _th_dim), ('遗漏', 49),
-                    ('马尔可夫', 33), ('贝叶斯', 66)]:
-        _segs.append((_nm, _p, _p+_d)); _p += _d
-    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
-    _ablation = []
-    if TRAIN_MODE != 'frozen':
-        _ablation = segment_ablation(_eval_holdout, _segs, _best, '双色球', 'ssq',
-                                     se=math.sqrt(6*(6/33)*(27/33))/math.sqrt(max(len(records)-_hold_start,1)))
-    append_history('ssq', {'date': str(date.today()), 'holdout_score': round(_best,4),
-                          'clean_score': round(_clean,4),
-                          'policy_dependence': _dep,
-                          'ent_coef': ENT_COEF['ssq'],
-                           'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
-
-    # 只有真正训练过才保存：冻结且未触发重训时权重没变，
-    # 重复推送没意义，还可能意外覆坏已有权重
-    _trained = (TRAIN_MODE != 'frozen') or is_new or _do
-    if _trained:
-        save_ppo(model, 'ssq')
-        save_last_trained_n('ssq', len(records))   # 记录本次训练时的期数，供下次判断
-    else:
-        print("  [冻结] 权重未改动，跳过保存")
+        return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     # 回测最近30期：红球命中数分布 + 蓝球命中率
-    start=max(SEQ_LEN+30, len(records)-30)
+    # 回测区间 = holdout（训练时完全没碰过的末段），这才是真正的样本外评估。
+    # 再对半分：前半 observe 供观察，后半 clean 从不参与任何选择，评分最干净。
+    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
+    _hold_mid = (_hold_start + len(records)) // 2
+    start = _hold_start
+    _clean_sum, _clean_n = 0, 0
     total=0; blue_correct=0; red_hit_dist={0:0,1:0,2:0,3:0,4:0,5:0,6:0}
     # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
     # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
@@ -2627,31 +1648,18 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         rh = len(actual_red & red_selected); bh = int(blue_pred==actual_blue)
         red_hit_dist[rh]+=1
         if bh: blue_correct+=1
+        if idx >= _hold_mid:                       # 后半段：干净区（从不参与任何选择）
+            _clean_sum += rh; _clean_n += 1
         total+=1
 
     blue_acc = round(blue_correct/total*100,1) if total else 0
     avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
-
-    # ── 固定评测集：考题锁死，只有模型在变，跨天成绩才可比 ──
-    fixed_eval = None
-    _rng = get_fixed_eval_range('ssq', records)
-    if _rng:
-        _rh = 0; _bh = 0; _ft = 0
-        for idx in range(_rng['start'], _rng['end']+1):
-            st = build_state(idx)
-            if st is None: continue
-            act,_ = model.predict(st, deterministic=True)
-            rs = act[:33]; bs = act[33:]
-            sel = set(int(i)+1 for i in np.argsort(rs)[-SSQ_RED_PICK_N:])
-            _rh += len(set(records[idx]['red']) & sel)
-            _bh += int(int(np.argmax(bs))+1 == records[idx]['blue']); _ft += 1
-        if _ft:
-            f_rh = round(_rh/_ft, 3); f_ba = round(_bh/_ft*100, 1)
-            print(f"  [固定评测集] 第{_rng['start']}~{_rng['end']}期({_ft}期): "
-                  f"红球平均命中{f_rh}个  蓝球准确率{f_ba}%")
-            append_eval_history('ssq', {'avg_red_hit': f_rh, 'blue_acc': f_ba, 'n': _ft})
-            fixed_eval = {'range': [_rng['start'], _rng['end']], 'n': _ft,
-                          'avg_red_hit': f_rh, 'blue_acc': f_ba}
+    _clean = round(_clean_sum/_clean_n, 4) if _clean_n else 0.0
+    _se = math.sqrt(6*(6/33)*(27/33))/math.sqrt(max(_clean_n,1))
+    print(f"  [样本外回测] holdout共{total}期（第{start}~{len(records)-1}期，训练时未接触）")
+    print(f"    干净区（后{_clean_n}期）红球平均命中 {_clean}  随机基准1.09  "
+          f"偏离 {(_clean-6*6/33)/_se:+.2f}个标准误")
+    record_clean_score('ssq', _clean, _clean_n, 6*6/33, math.sqrt(6*(6/33)*(27/33)))
     print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
 
     # 今日推荐：以RL自己的判断为主，红球排序滑动窗口切分成6注，遗漏/ML预测仅作参考展示
@@ -2660,6 +1668,14 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    # 新数据贡献度：同一份权重下，今天这期开奖对推荐的纯粹影响
+    data_contribution_test(model, build_state, len(records), 'ssq')
+    # 策略依赖性：决定这份权重能否冻结后长期使用
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        policy_dependence_test(model, build_state, _pts, 'ssq')
+    except Exception as _e:
+        print(f"    [策略依赖性] 检测异常: {_e}")
     idx = len(records)
     state = build_state(idx)
     groups=[]
@@ -2779,14 +1795,14 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     return {'blue_acc_pct':blue_acc,'games_tested':total,
             'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
             'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
-            'ppo_groups':groups,'ref_info':ref_info,'fixed_eval':fixed_eval,
+            'ppo_groups':groups,'ref_info':ref_info,
             'red_core':red_core_info,'red_pool':red_pool_info,
-            'is_first_train':is_new,
+            'is_first_train':True,   # 每日全量训练，每次都是从零开始
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
 
 
-def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
-    print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
+def run_3d_daily(records, ml_pred, prev_result=None):
+    print(f"\n{'='*50}\n福彩3D PPO 每日全量训练（{len(records)}期）\n{'='*50}")
 
     # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
     last_trained_n = get_last_trained_n('3d')
@@ -2795,16 +1811,13 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
     ml_vec = extract_ml_prob_vec(ml_pred, '3d')
-    dl_vec = extract_dl_prob_vec(dl_pred, '3d')
-    # 传统ML概率 + 深度学习概率 拼成统一的外部模型信号向量
-    ml_vec = np.concatenate([ml_vec, dl_vec]).astype(np.float32)
     _cur_feat_dim = len(f3d(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_multi(records, f3d, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_multi(records, f3d, tfm)
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2812,56 +1825,29 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     omit_arr = precompute_omission_3d(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
 
-    print("  批量预计算马尔可夫转移 + 贝叶斯后验…")
-    t0 = time.time()
-    mk_arr = precompute_markov_3d(records)                                    # 30维
-    by_arr = precompute_bayes(records, 10, lambda r: [d+1 for d in r['digits']])  # 20维
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [马尔可夫] 30维  [贝叶斯均值+不确定性] 20维")
-
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 外部模型概率{len(ml_vec)}维(传统ML+深度学习)"
-          f" + LSTM隐层 + TFM隐层 + 遗漏30维 + 马尔可夫30维 + 贝叶斯20维")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
 
     def make_env():
         return Integrated3DEnv(records, f3d, ml_vec,
-                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
-                               mk_arr, by_arr)
+                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    # fresh 模式才不加载；frozen 和 incremental 都需要旧权重
-    model = None if TRAIN_MODE == 'fresh' else load_ppo('3d')
-    _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
-    if TRAIN_MODE == 'fresh':
-        print("  [训练模式] fresh：不加载旧权重，本次从零全量训练")
-    is_new = model is None
+    # 每日全量训练，不加载旧权重（加载了也会被全量重训覆盖，白白浪费时间）
     t0 = time.time()
-    if not is_new:
-        try:
-            model.set_env(vec_env)
-            # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
-            # 否则改了 ENT_COEF 对已有模型完全不生效，还以为调了参
-            model.ent_coef = ENT_COEF['3d']
-            print(f"    熵系数已设为 {model.ent_coef}")
-        except Exception as e:
-            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
-            model = None; is_new = True
-    if is_new:
-        print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
-                    n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=ENT_COEF['3d'],
-                    verbose=0, device='cpu')
+    # 每日全量训练：不做增量微调。
+    # 原因：每天只新增1期（占总数万分之一），在旧权重上微调几千步
+    # 学不到新东西，反而每天扰动权重，导致输出忽有偏好忽而均匀。
+    # 全量重训每次都是全新随机初始化，当天的新开奖直接进入训练数据，
+    # 推荐号码自然会跟着变化。
+    print("  每日全量训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
+    model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                    n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
+                verbose=0, device='cpu')
+    model.learn(total_timesteps=100000, progress_bar=False)
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
 
-    # 分段边界（开关与消融诊断共用，必须与环境类 _segs() 一致）
-    _lh_d = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-    _th_d = tfm_hidden.shape[1] if tfm_hidden is not None else 0
-    _segs_3d, _pp = [], 0
-    for _n, _d in [('走势特征', _cur_feat_dim), ('ML+DL概率', len(ml_vec)),
-                   ('LSTM隐层', _lh_d), ('TFM隐层', _th_d), ('遗漏', 30),
-                   ('马尔可夫', mk_arr.shape[1]), ('贝叶斯', by_arr.shape[1])]:
-        _segs_3d.append((_n, _pp, _pp+_d)); _pp += _d
-    _off = [n for n,_,_ in _segs_3d if not SEGMENT_ENABLE.get('3d',{}).get(n, True)]
-    if _off: print(f"  [分段开关] 3D 已关闭: {_off}（维度保留并清零，可随时切回，不触发重训）")
+    save_ppo(model, '3d')
 
-    # build_state 提前定义：早停要在每段训练后用它在holdout上评分
     def build_state(idx):
         feat = f3d(records, idx)
         if feat is None: return None
@@ -2869,128 +1855,18 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        mk = mk_arr[idx]; by = by_arr[idx]
-        st = normalize_state_segments(raw,ml_vec,lh,th,om,mk,by, scale_key='3d')
-        return apply_segment_switches(st, _segs_3d, '3d')
-
-    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
-    _hold_mid = (_hold_start + len(records)) // 2
-    def _eval_holdout(mask=None, half='select', use_model=None):
-        """
-        holdout评分。关键：分成两半用途不同——
-        · half='select'：前一半，用于早停挑权重
-        · half='report'：后一半，只报分、绝不参与选择
-
-        为什么要分：早停每天在同一批期数上挑分数最高的权重，
-        连续几十天下来，选出的是"最会做这批题"的模型，
-        它在这批题上的分数会稳步虚高，不代表真实泛化能力。
-        留一半从不参与选择的题，报出来的分才干净。
-        """
-        rng = range(_hold_start, _hold_mid) if half=='select' else range(_hold_mid, len(records))
-        tot, n = 0, 0
-        for i in rng:
-            st = build_state(i)
-            if st is None: continue
-            if mask is not None:
-                st = st.copy(); st[mask[0]:mask[1]] = 0.0
-            _m = use_model if use_model is not None else model
-            a,_ = _m.predict(st, deterministic=True)
-            act = records[i]['digits']
-            tot += sum(1 for k in range(3) if int(a[k])==act[k]); n += 1
-        return tot/n if n else 0.0
-
-    if is_new:
-        model, _best, _hist = train_with_early_stop(
-            model, 100000, _eval_holdout, '3D首训', n_chunks=16, patience=6,
-            reset_timesteps=True, warmup_chunks=5)
-    else:
-        if TRAIN_MODE == 'frozen':
-            # 冻结模式：平时不训练（输出稳定、无过拟合），
-            # 但攒够足够新数据后触发一次全量重训——这才是真正的"进化"，
-            # 而不是每天拿万分之一的新数据空转。
-            _do, _why = should_challenge('3d', len(records))
-            print(f"  [挑战周期] {_why}")
-            if _do:
-                _n_clean = max(len(records) - _hold_mid, 1)
-                _se_clean = math.sqrt(3*0.1*0.9) / math.sqrt(_n_clean)
-                def _mk():
-                    m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
-                            n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
-                            ent_coef=ENT_COEF['3d'], verbose=0, device='cpu')
-                    return m
-                def _tr(m):
-                    return train_with_early_stop(m, 100000, _eval_holdout, '3D挑战者',
-                                                 n_chunks=16, patience=6,
-                                                 reset_timesteps=True, warmup_chunks=5)
-                def _ev(m):
-                    return _eval_holdout(half='report', use_model=m)
-                def _rc(m):
-                    # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
-                    return _eval_holdout(half='select', use_model=m)
-                model, _swapped, _msg = run_challenge(
-                    model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='3D')
-                print(f"  [挑战结果] {_msg}")
-                _do = _swapped   # 只有换人了才需要保存
-                _best = _eval_holdout(); _hist = [round(_best,4)]
-            else:
-                _best = _eval_holdout(); _hist = [round(_best,4)]
-                print(f"  [现任模型] 沿用已有权重出预测，holdout评分 {_best:.4f}")
-        else:
-            print("  增量微调（1万步，带早停）…")
-            model, _best, _hist = train_with_early_stop(
-                model, 10000, _eval_holdout, '3D微调', n_chunks=8, patience=4,
-                reset_timesteps=False, warmup_chunks=2)
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    # 策略依赖性：模型到底有没有在用状态（比任何评分都更根本）
-    try:
-        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
-        _dep = policy_dependence_test(model, build_state, _pts, '3d')
-    except Exception as _e:
-        _dep = None; print(f"    [策略依赖性] 检测异常: {_e}")
-
-    _clean = _eval_holdout(half='report')
-    # 对数概率评分：比命中位数灵敏，能看到"概率提升但还不是最大值"的改善
-    try:
-        _lp = eval_logprob_3d(model, build_state, records, range(_hold_mid, len(records)))
-        print(f"    [对数概率·干净区] {_lp:.4f}（均匀基准 {math.log(0.1):.4f}，越大越好，"
-              f"高出基准 {_lp-math.log(0.1):+.4f}）")
-    except Exception as _e:
-        _lp = None; print(f"    [对数概率] 计算失败: {_e}")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期（样本外holdout {len(records)-_hold_start}期）")
-    print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
-          f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}（随机基准0.30）")
-    print(f"    → 这个数才是没被筛选污染的。若它长期不涨而选择分在涨，说明涨的是假象")
-
-    # ── 消融诊断：测量状态向量各段的真实贡献 ──
-    _segs = _segs_3d; _p = _segs[-1][2]
-    # 冻结模式下权重不变，消融结论不会变，跳过以节省十几次评估的时间
-    _ablation = []
-    if TRAIN_MODE != 'frozen':
-        _ablation = segment_ablation(_eval_holdout, _segs, _best, '3D', '3d',
-                                     se=math.sqrt(3*0.1*0.9)/math.sqrt(max(len(records)-_hold_start,1)))
-    append_history('3d', {'date': str(date.today()),
-                          'holdout_score': round(_best,4),        # 早停选出来的，会虚高
-                          'clean_score': round(_clean,4),         # 未参与选择，这个才可信
-                          'policy_dependence': _dep,              # 模型是否真的在用状态
-                          'logprob_clean': (round(_lp,4) if _lp is not None else None),
-                          'train_mode': TRAIN_MODE,
-                          'ent_coef': ENT_COEF['3d'],
-                          'state_dim': _p, 'score_history': _hist, 'ablation': _ablation})
-
-    # 只有真正训练过才保存：冻结且未触发重训时权重没变，
-    # 重复推送没意义，还可能意外覆坏已有权重
-    _trained = (TRAIN_MODE != 'frozen') or is_new or _do
-    if _trained:
-        save_ppo(model, '3d')
-        save_last_trained_n('3d', len(records))   # 记录本次训练时的期数，供下次判断
-    else:
-        print("  [冻结] 权重未改动，跳过保存")
+        return normalize_state_segments(raw,ml_vec,lh,th,om)
 
     # 回测最近30期：统计位命中数分布 + 全中次数
-    start=max(SEQ_LEN+5, len(records)-30); total=0
+    # 回测区间 = holdout（训练时完全没碰过的末段），这才是真正的样本外评估。
+    # 再对半分：前半 observe 供观察，后半 clean 从不参与任何选择，评分最干净。
+    _hold_start = max(SEQ_LEN+40, len(records)-holdout_size(len(records)))
+    _hold_mid = (_hold_start + len(records)) // 2
+    start = _hold_start; total=0
     match_dist={0:0,1:0,2:0,3:0}
     # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
     # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    _clean_sum, _clean_n = 0, 0
     for idx in range(start, len(records)):
         state = build_state(idx)
         if state is None: continue
@@ -2999,39 +1875,37 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         actual=records[idx]['digits']
         m = sum(1 for i in range(3) if pred[i]==actual[i])
         match_dist[m]+=1; total+=1
+        if idx >= _hold_mid:            # 后半段：干净区
+            _clean_sum += m; _clean_n += 1
     exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
     avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
-
-    # ── 固定评测集：考题锁死，只有模型在变，跨天成绩才可比 ──
-    fixed_eval = None
-    _rng = get_fixed_eval_range('3d', records)
-    if _rng:
-        _fm = {0:0,1:0,2:0,3:0}; _ft = 0
-        for idx in range(_rng['start'], _rng['end']+1):
-            st = build_state(idx)
-            if st is None: continue
-            act,_ = model.predict(st, deterministic=True)
-            p=[int(act[0]),int(act[1]),int(act[2])]; a=records[idx]['digits']
-            _fm[sum(1 for i in range(3) if p[i]==a[i])] += 1; _ft += 1
-        if _ft:
-            f_avg = round(sum(k*v for k,v in _fm.items())/_ft, 3)
-            f_exact = round(_fm[3]/_ft*100, 2)
-            print(f"  [固定评测集] 第{_rng['start']}~{_rng['end']}期({_ft}期): "
-                  f"平均命中{f_avg}位  全中率{f_exact}%")
-            append_eval_history('3d', {'avg_match': f_avg, 'exact_rate': f_exact, 'n': _ft})
-            fixed_eval = {'range': [_rng['start'], _rng['end']], 'n': _ft,
-                          'avg_match': f_avg, 'exact_rate': f_exact}
+    _clean = round(_clean_sum/_clean_n, 4) if _clean_n else 0.0
+    _se = math.sqrt(3*0.1*0.9)/math.sqrt(max(_clean_n,1))
+    print(f"    [样本外回测] holdout共{total}期（第{start}~{len(records)-1}期，训练时未接触）")
+    print(f"      整体平均命中 {avg_match} 位，全中率 {exact_hit_rate}%")
+    print(f"      干净区（后{_clean_n}期）平均命中 {_clean}  随机基准0.30  "
+          f"偏离 {(_clean-0.30)/_se:+.2f}个标准误")
+    print(f"      → 需超过 +2 个标准误才算真的高于随机")
+    record_clean_score('3d', _clean, _clean_n, 0.30, math.sqrt(3*0.1*0.9))
 
     # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
     # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    # 新数据贡献度：同一份权重下，今天这期开奖对推荐的纯粹影响
+    data_contribution_test(model, build_state, len(records), '3d')
+    # 策略依赖性：决定这份权重能否冻结后长期使用
+    try:
+        _pts = [int(x) for x in np.linspace(SEQ_LEN+60, len(records)-1, 24).astype(int)]
+        policy_dependence_test(model, build_state, _pts, '3d')
+    except Exception as _e:
+        print(f"    [策略依赖性] 检测异常: {_e}")
     idx=len(records); state=build_state(idx)
     groups=[]; pos_candidates=[]
     if state is not None:
         # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
-        # 用联合概率排序生成多注真正的次优组合，能说清楚"这是第几优的组合"
+        # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
         try:
             obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
             with torch.no_grad():
@@ -3076,14 +1950,14 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                 c = [top3[0][i][0], top3[1][i][0], top3[2][i][0]]
                 pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
                 picked.append((c, pr)); seen.add(tuple(c))
-            # 其余注数：从27种组合里按联合概率补足
+            # 后3注：从27种组合里补足，优先选符合ML条件多的（同分再看联合概率）
             # 按RL自己的联合概率排序（不用ML条件干预，理由同上）
             all27 = sorted(
                 (([b, s, g], pb*ps*pg)
                  for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
                 key=lambda x: -x[1])
             for c, pr in all27:
-                if len(picked) >= D3_N_BETS: break
+                if len(picked) >= 6: break
                 if tuple(c) not in seen:
                     picked.append((c, pr)); seen.add(tuple(c))
             picked.sort(key=lambda x: -x[1])
@@ -3091,7 +1965,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             if _d3_conds:
                 _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
                                  if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
-                print(f"  [诊断·仅参考] RL自选的{len(groups)}注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
+                print(f"  [诊断·仅参考] RL自选的6注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
                       f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
             top_probs = [pr for _, pr in picked]
 
@@ -3110,75 +1984,18 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
             ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
             print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
-            _emax = math.log(10)
-            _gap = _emax - float(np.mean(ent))
-            # 把熵差换算成"最高候选概率"，比抽象的熵值直观；
-            # 注意：熵只反映模型敢不敢下判断，不代表判断正确——
-            # 之前那个 0.05 的门槛是拍脑袋定的，会把17%这种明显有倾向的情况误判成"没偏好"。
-            _top_p = float(np.max([np.max(p) for p in pos_probs]))
-            print(f"    → 平均熵比均匀低 {_gap:.4f}，最高候选 {_top_p*100:.1f}%（均匀基准10.0%，"
-                  f"ent_coef={ENT_COEF['3d']}）")
-            print(f"    → 注意：熵低只说明模型敢下判断，不代表判断对。"
-                  f"是否真有价值看 holdout 评分是否稳定高于随机基准 0.30")
-            # 输入敏感度检测：直接量化"今天的新开奖"对状态向量的影响。
-            # 如果推荐没变，这个数能立刻区分是【输入没变】还是【输入变了但模型不敏感】。
-            try:
-                _st_now = build_state(len(records))
-                _st_prev = build_state(len(records)-1)   # 少用最新一期算的状态
-                if _st_now is not None and _st_prev is not None:
-                    _d = np.abs(_st_now - _st_prev)
-                    _chg = float((_d > 1e-6).sum())
-                    _rel = float(_d.sum() / (np.abs(_st_prev).sum() + 1e-9))
-                    print(f"    [输入敏感度] 最新一期使 {int(_chg)}/{len(_st_now)} 维发生变化，"
-                          f"整体变化幅度 {_rel*100:.2f}%")
-                    if _rel < 0.005:
-                        print(f"      ⚠️ 变化过小，模型很难对新开奖产生反应")
-            except Exception as e:
-                print(f"    [输入敏感度] 检测失败: {e}")
-
-            # 与上次推荐对比：微调有没有产生实际变化，一眼可见
-            try:
-                _prev = (prev_result or {}).get('ppo_groups') or []
-                if _prev:
-                    _now_set = {tuple(g) for g in groups}
-                    _pre_set = {tuple(g) for g in _prev}
-                    _same = len(_now_set & _pre_set)
-                    print(f"    [与上次对比] 本次{len(groups)}注中有 {_same} 注与上次相同，"
-                          f"{len(groups)-_same} 注是新的")
-                    if _same >= len(groups):
-                        # 概率其实是变了的（新数据进来了），但各位Top3的数字排序没变，
-                        # 组合出来自然还是同样12注。说清楚原因，不要只给个警告符号。
-                        _tp = [f"{int(np.argmax(p))}({np.max(p)*100:.1f}%)" for p in pos_probs]
-                        print(f"      ⚠️ 推荐完全没变。原因：各位概率随新数据有微小变化"
-                              f"（当前各位首选 {' / '.join(_tp)}），"
-                              f"但Top3的数字排序未变，组合结果自然相同。")
-                        print(f"      → 若连续多天如此，说明模型对状态的响应太弱，"
-                              f"新开奖信息实际上没有影响预测（见上方[状态敏感度]诊断）")
-            except Exception: pass
         except Exception as e:
             print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
             action,_ = model.predict(state, deterministic=True)
             groups = [[int(action[0]),int(action[1]),int(action[2])]]
 
-        # 不足时补齐。原来是把最后一注反复复制，12注会出现大量重复，很难看；
-        # 改成从各位Top3之外按概率顺延取候选，凑不满就少给几注，绝不重复填充。
-        if not groups:
-            action,_ = model.predict(state, deterministic=True)
-            groups.append([int(action[0]),int(action[1]),int(action[2])])
-        if len(groups) < D3_N_BETS:
-            try:
-                _seen2 = {tuple(g) for g in groups}
-                _wide = [np.argsort(p)[::-1][:5] for p in pos_probs]   # 放宽到每位Top5
-                _cand = sorted(
-                    (([int(b),int(s),int(g)], float(pos_probs[0][b]*pos_probs[1][s]*pos_probs[2][g]))
-                     for b in _wide[0] for s in _wide[1] for g in _wide[2]),
-                    key=lambda x: -x[1])
-                for c, _ in _cand:
-                    if len(groups) >= D3_N_BETS: break
-                    if tuple(c) not in _seen2:
-                        _seen2.add(tuple(c)); groups.append(c)
-            except Exception:
-                pass
+        # 不足6注时（比如候选池不够8种或提取失败），用确定性预测补齐
+        while len(groups)<6:
+            if not groups:
+                action,_ = model.predict(state, deterministic=True)
+                groups.append([int(action[0]),int(action[1]),int(action[2])])
+            else:
+                groups.append(groups[-1])
     pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注（联合概率最高的组合）
 
     # 记录本次训练时的期数，供下次运行判断是否有新数据
@@ -3188,43 +2005,24 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'ppo_pred':pred,'ppo_groups':groups,
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
-            'fixed_eval':fixed_eval,           # 固定评测集成绩（考题不变，跨天可比）
-            'is_first_train':is_new,
-            'note':f'PPO给出百/十/个位各3个候选，{len(groups)}注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
+            'is_first_train':True,   # 每日全量训练，每次都是从零开始
+            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════
-print(f"\n{'#'*55}\nPPO 强化学习 每日增量微调  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
+print(f"\n{'#'*55}\nPPO 强化学习 每日全量训练  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
 
 raw = gh_raw('history.json')
 if not raw: print("失败"); sys.exit(1)
 history = json.loads(raw)
 
 # 读取 prediction.json 取ML概率向量（RL状态的一部分）
-# 加载归一化基准：必须在任何 build_state 之前，保证输入口径与首训时一致
-load_seg_scales()
-
 raw_ml = gh_raw('prediction.json')
 ml_preds = {}
 if raw_ml:
     try: ml_preds = json.loads(raw_ml).get('predictions', {})
     except Exception: pass
-
-# 读取深度学习的预测结果（LSTM+TFM集成），与传统ML概率一起注入RL状态。
-# 之前RL对这份数据零引用，DL训练出的7组预测完全没被用上。
-raw_dl = gh_raw('dl_lstm_tfm.json')
-dl_preds = {}
-if raw_dl:
-    try:
-        _dlj = json.loads(raw_dl)
-        dl_preds = _dlj.get('results', _dlj) or {}
-        print(f"✓ 已读取深度学习预测 dl_lstm_tfm.json（覆盖游戏: {list(dl_preds.keys())}）")
-    except Exception as e:
-        print(f"! 解析 dl_lstm_tfm.json 失败: {e}，本次RL状态将不含DL预测")
-else:
-    print("! 未读取到 dl_lstm_tfm.json，本次RL状态将不含DL预测"
-          "（首次运行或DL周训练尚未产出时属正常）")
 
 # 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
 # （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
@@ -3244,21 +2042,20 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
     ml_pred = ml_preds.get(game, {})
     try:
         # 三个游戏统一传入上次结果，无新数据时沿用，避免重复训练造成过拟合
-        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game), dl_preds)
+        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game))
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"{game} 失败: {e}")
 
 # 推送RL模型到Kaggle Dataset
-save_seg_scales()   # 基准随模型一起持久化，下次运行沿用同一口径
 print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
 push_rl_dataset()
 
 # ── 写入独立文件 dl_rl.json（不再读取/合并 prediction.json，速度更快）──
 out = {
     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    'method': 'PPO强化学习（每日增量微调）',
-    'state_composition': '原始特征 + 传统ML概率 + 深度学习概率 + LSTM隐层 + Transformer特征 + 遗漏向量',
+    'method': 'PPO强化学习（每日全量训练）',
+    'state_composition': '原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量',
     'results': rl_results,
 }
 out_json = json.dumps(out, ensure_ascii=False, indent=2)
