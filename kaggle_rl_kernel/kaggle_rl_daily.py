@@ -1010,6 +1010,96 @@ def eval_logprob_3d(model, build_state_fn, records, rng_idx, use_model=None):
     return tot / n if n else -99.0
 
 
+def data_contribution_test(model, build_state_fn, n_records, game, topk=3):
+    """
+    新数据贡献度：今天这一期开奖，对推荐究竟有多大影响？
+
+    ── 为什么必须单独测 ──
+    每日全量训练下推荐天天不一样，但变化有两个来源：
+      ① 每天全新随机初始化 → 落在不同局部最优
+      ② 今天新增的那一期数据
+    两者混在一起，光看"号码变了"根本说明不了新数据有用。
+
+    做法：用【同一份权重】预测两次，一次喂含今天这期的状态，一次喂不含的。
+    权重相同，唯一变量就是这期数据，差异即为它的纯粹贡献。
+    """
+    try:
+        s_with = build_state_fn(n_records)
+        s_without = build_state_fn(n_records - 1)
+        if s_with is None or s_without is None:
+            print("    [新数据贡献] 状态构建失败，跳过"); return None
+        d = np.abs(s_with - s_without)
+        in_chg = int((d > 1e-9).sum()); in_rel = float(d.sum()/(np.abs(s_without).sum()+1e-9))
+
+        def _pred(st):
+            obs, _ = model.policy.obs_to_tensor(np.array(st).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs)
+            dl = getattr(dist, 'distribution', None)
+            if isinstance(dl, (list, tuple)):
+                return [x.probs.detach().cpu().numpy()[0] for x in dl]
+            a, _ = model.predict(st, deterministic=True)
+            return [np.asarray(a, dtype=np.float32)]
+
+        p_w, p_o = _pred(s_with), _pred(s_without)
+        out_diff = float(np.mean([np.abs(a-b).mean() for a, b in zip(p_w, p_o)]))
+        top_w = [tuple(np.argsort(a)[::-1][:topk].tolist()) for a in p_w]
+        top_o = [tuple(np.argsort(a)[::-1][:topk].tolist()) for a in p_o]
+        flipped = sum(1 for a, b in zip(top_w, top_o) if a != b)
+        print(f"    [新数据贡献] 今天这期使状态 {in_chg}/{len(s_with)} 维变化（幅度{in_rel*100:.2f}%）")
+        print(f"      → 输出分布平均变化 {out_diff*100:.3f}个百分点，"
+              f"{flipped}/{len(top_w)} 个位置的Top{topk}排序翻转")
+        if flipped == 0 and out_diff < 0.002:
+            print("      ⚠️ 新数据几乎没影响推荐——号码的日常变化主要来自每天重新随机初始化")
+        elif flipped > 0:
+            print("      ✓ 今天的开奖确实改变了推荐号码")
+        return {'input_dims_changed': in_chg, 'input_rel': round(in_rel, 5),
+                'output_diff': round(out_diff, 6), 'top_flipped': flipped}
+    except Exception as e:
+        print(f"    [新数据贡献] 检测失败: {e}")
+        return None
+
+
+def record_clean_score(game, clean, n_clean, base, sd_per_period):
+    """
+    累积记录每天的干净分，用【多天平均】判断，而不是看单日。
+
+    单日干净分标准误很大（3D约0.023、双色球约0.090），2个标准误换算成
+    "要有13~16%的相对提升"才算数——对彩票场景太苛刻，真有5%的微弱优势也会被漏掉。
+    解法不是调低门槛（那会把噪声当信号），而是累积天数：
+    N天平均的标准误缩小到 1/√N，20天后3D只要3.5%的真实提升就能检出。
+    """
+    path = f'{RL_LOCAL_DIR}/{game}_clean_history.json'
+    hist = []
+    for p in (f'{RL_MOUNTED}/{game}_clean_history.json', path):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: hist = json.load(f); break
+            except Exception: pass
+    hist.append({'date': str(date.today()), 'clean': round(float(clean), 4), 'n': int(n_clean)})
+    hist = hist[-400:]
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"    ! 写入干净分历史失败: {e}")
+    vals = [h['clean'] for h in hist if h.get('clean') is not None]
+    if len(vals) < 2:
+        print(f"    [累积判断] 已记录{len(vals)}天，至少2天才能给出趋势"); return
+    avg = sum(vals)/len(vals)
+    tot_n = sum(h.get('n', n_clean) for h in hist)
+    se_avg = sd_per_period / math.sqrt(max(tot_n, 1))
+    z = (avg - base) / se_avg if se_avg > 0 else 0.0
+    print(f"    [累积判断] 已积累{len(vals)}天（合计{tot_n}期评估样本）")
+    print(f"      多天平均干净分 {avg:.4f}   随机基准 {base:.4f}   偏离 {z:+.2f}个标准误")
+    if abs(z) < 2:
+        print(f"      → 仍在随机范围内。当前样本量下能检出的最小提升为 {2*se_avg/base*100:.1f}%")
+    elif z >= 2:
+        print("      → ✓ 已显著高于随机，模型确实存在预测能力")
+    else:
+        print("      → ⚠️ 显著低于随机，表现比瞎猜还差")
+
+
 def policy_dependence_test(model, build_state_fn, idx_list, game, n_pos=3, n_val=10):
     """
     策略依赖性检测：模型到底有没有在用状态？
@@ -1213,7 +1303,12 @@ def append_history(game, record):
 #  'incremental' 每天在旧权重上微调（实测第2天六段全部低于基准、零提升）
 #  'fresh'       每天从零全量训练
 # ══════════════════════════════════════════════════════
-TRAIN_MODE = 'frozen'
+# 'fresh' = 每天从零全量训练：不加载旧权重、不做增量微调、不跑挑战者比较。
+# 选它的原因：每天只新增1期（占总数万分之一），在旧权重上微调几千步学不到新东西，
+# 反而每天扰动权重；而冻结模式下权重不变、一期数据又不足以翻转排序，
+# 推荐会连续多天一模一样。每天全新随机初始化 + 全量重训，
+# 当天的新开奖直接进入训练数据，推荐号码自然会变。
+TRAIN_MODE = 'fresh'
 
 # ══════════════════════════════════════════════════════
 #  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
@@ -2137,6 +2232,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
               f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}")
     except Exception as _e:
         _clean = float('nan'); print(f"    [干净评分] 计算失败: {_e}")
+    if _clean == _clean:      # 非NaN时才累积
+        record_clean_score('kl8', _clean, max(len(records)-_hold_mid,1), 1.50, math.sqrt(6*0.25*0.75))
 
     _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
@@ -2230,6 +2327,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    # 新数据贡献度：同一份权重下，今天这期开奖对推荐的纯粹影响
+    data_contribution_test(model, build_state, len(records), 'kl8')
     idx = len(records)
     state = build_state(idx)
     rl_order = []
@@ -2581,6 +2680,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
               f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}")
     except Exception as _e:
         _clean = float('nan'); print(f"    [干净评分] 计算失败: {_e}")
+    if _clean == _clean:      # 非NaN时才累积
+        record_clean_score('ssq', _clean, max(len(records)-_hold_mid,1), 6*6/33, math.sqrt(6*(6/33)*(27/33)))
 
     _lh_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
     _th_dim = tfm_hidden.shape[1] if tfm_hidden is not None else 0
@@ -2660,6 +2761,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    # 新数据贡献度：同一份权重下，今天这期开奖对推荐的纯粹影响
+    data_contribution_test(model, build_state, len(records), 'ssq')
     idx = len(records)
     state = build_state(idx)
     groups=[]
@@ -2960,6 +3063,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     print(f"    [干净评分] 选权重用第{_hold_start}~{_hold_mid-1}期，"
           f"未参与选择的第{_hold_mid}~{len(records)-1}期得分 {_clean:.4f}（随机基准0.30）")
     print(f"    → 这个数才是没被筛选污染的。若它长期不涨而选择分在涨，说明涨的是假象")
+    if _clean == _clean:      # 非NaN时才累积
+        record_clean_score('3d', _clean, max(len(records)-_hold_mid,1), 0.30, math.sqrt(3*0.1*0.9))
 
     # ── 消融诊断：测量状态向量各段的真实贡献 ──
     _segs = _segs_3d; _p = _segs[-1][2]
@@ -3027,6 +3132,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    # 新数据贡献度：同一份权重下，今天这期开奖对推荐的纯粹影响
+    data_contribution_test(model, build_state, len(records), '3d')
     idx=len(records); state=build_state(idx)
     groups=[]; pos_candidates=[]
     if state is not None:
