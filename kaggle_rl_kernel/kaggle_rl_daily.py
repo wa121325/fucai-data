@@ -978,6 +978,93 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
         print(f"      ✓ 模型输出随状态变化，确实在用输入信息")
 
 
+# ══════════════════════════════════════════════════════
+#  AlphaGo式推理：先验(策略网络) × 证据(当前局面)
+#
+#  ── 为什么要这么做 ──
+#  AlphaGo的落子不是直接取策略网络的最大值，而是把网络给的【先验P】
+#  和对当前局面的【评估Q】结合起来。权重固定不变，但局面一换Q就变，
+#  所以同一份权重能对每一步给出不同的着法。
+#
+#  原来这里的做法是 argmax(策略网络先验) —— 只用P、完全没用Q。
+#  而状态里明明有一堆每期都在变的证据（马尔可夫43.8%、遗漏25.1%、ML/DL条件），
+#  它们只被当成网络输入，网络输出又对它们不敏感，等于推理时全扔了。
+#  这才是"同一份权重推荐永远不变"的真正原因。
+#
+#  现在改成：枚举全部1000种组合，每种按 先验 + 证据 综合打分。
+#  证据每期都变 → 即便权重冻结，推荐也会跟着新开奖变化。
+#
+#  必须说明：这不创造预测能力。证据本身还是那些弱信号，
+#  换个方式组合不会凭空产生信息。它解决的是"推理时浪费了信息"这个工程问题，
+#  以及让【稳定权重】和【每日变化】能够同时成立。
+# ══════════════════════════════════════════════════════
+D3_PRIOR_W  = 1.0    # 策略网络先验的权重
+D3_MARKOV_W = 0.8    # 马尔可夫转移概率
+D3_OMIT_W   = 0.3    # 遗漏（冷号补涨的假设，权重给低）
+D3_COND_W   = 0.6    # ML/DL预测的组合级条件（和值/奇偶/跨度等）
+
+
+def alphago_select_3d(pos_probs, mk_row, omit_row, conds, n_bets=12, verbose=True):
+    """
+    枚举1000种组合，按 先验×证据 综合打分选出n_bets注。
+
+    pos_probs : 策略网络输出，3×10 的概率（先验P，权重固定时它不变）
+    mk_row    : 马尔可夫转移概率 30维（百/十/个位各10），每期变
+    omit_row  : 遗漏向量 30维，每期变
+    conds     : {目标名: (预测值, 置信度)}，来自ML/DL，每期变
+    """
+    P = np.asarray(pos_probs, dtype=np.float64).reshape(3, 10)
+    MK = np.asarray(mk_row, dtype=np.float64).reshape(3, 10) if mk_row is not None and len(mk_row) == 30          else np.full((3, 10), 0.1)
+    OM = np.asarray(omit_row, dtype=np.float64).reshape(3, 10) if omit_row is not None and len(omit_row) == 30          else np.zeros((3, 10))
+    # 遗漏归一化到0~1，越久没出越接近1
+    # 注意用 np.ptp(...) 而不是 OM.ptp(...)：NumPy 2.0 已移除 ndarray.ptp 方法，
+    # 而 Kaggle 环境正是 NumPy 2.0，写成方法调用会直接崩
+    OM = (OM - OM.min(axis=1, keepdims=True)) / (np.ptp(OM, axis=1, keepdims=True) + 1e-9)
+
+    def _feats(c):
+        b, s, g = c; sm = b+s+g
+        tri = (b == s == g); g3 = (b == s or s == g or b == g) and not tri
+        s3 = sorted(c); rd = [x % 3 for x in c]
+        return {'sum_grp': 0 if sm <= 9 else (1 if sm <= 17 else 2),
+                'odd': sum(1 for x in c if x % 2 != 0),
+                'group_type': 0 if tri else (1 if g3 else 2),
+                'big': sum(1 for x in c if x >= 5),
+                'span_grp': (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c)-min(c)),
+                'road_dom': max(set(rd), key=rd.count),
+                'arith': int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0)}
+
+    scored = []
+    for b in range(10):
+        for s in range(10):
+            for g in range(10):
+                c = [b, s, g]
+                # 先验：三位联合对数概率
+                sc  = D3_PRIOR_W  * sum(math.log(P[i][c[i]] + 1e-9) for i in range(3))
+                # 证据①：马尔可夫转移
+                sc += D3_MARKOV_W * sum(math.log(MK[i][c[i]] + 1e-9) for i in range(3))
+                # 证据②：遗漏
+                sc += D3_OMIT_W   * sum(OM[i][c[i]] for i in range(3))
+                # 证据③：ML/DL的组合级条件，按置信度加权
+                if conds:
+                    f = _feats(c)
+                    sc += D3_COND_W * sum(w for k, (v, w) in conds.items() if f.get(k) == v)
+                scored.append((c, sc))
+    scored.sort(key=lambda x: -x[1])
+
+    picks, seen = [], set()
+    for c, sc in scored:
+        if len(picks) >= n_bets: break
+        if tuple(c) not in seen:
+            seen.add(tuple(c)); picks.append(c)
+    if verbose:
+        _top = scored[0][1]; _med = scored[len(scored)//2][1]
+        print(f"    [AlphaGo式推理] 枚举1000种组合，先验{D3_PRIOR_W}×网络 + "
+              f"马尔可夫{D3_MARKOV_W} + 遗漏{D3_OMIT_W} + 条件{D3_COND_W}")
+        print(f"      最高分{_top:.3f}  中位分{_med:.3f}  差距{_top-_med:.3f}"
+              f"（差距越大说明证据越有区分度）")
+    return picks
+
+
 def eval_logprob_3d(model, build_state_fn, records, rng_idx, use_model=None):
     """
     用【平均对数概率】评分，比"平均命中位数"灵敏得多。
@@ -1308,7 +1395,11 @@ def append_history(game, record):
 # 反而每天扰动权重；而冻结模式下权重不变、一期数据又不足以翻转排序，
 # 推荐会连续多天一模一样。每天全新随机初始化 + 全量重训，
 # 当天的新开奖直接进入训练数据，推荐号码自然会变。
-TRAIN_MODE = 'fresh'
+# 'frozen' = 权重稳定：训练一次后长期沿用，只在挑战者明显更优时才更换。
+# 之所以现在能用冻结模式，是因为推理改成了AlphaGo式（先验×证据）：
+# 权重固定不变，但马尔可夫/遗漏/ML条件这些证据每期都变，
+# 推荐自然跟着新开奖走——不会再出现"连续多天一模一样"。
+TRAIN_MODE = 'frozen'
 
 # ══════════════════════════════════════════════════════
 #  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
@@ -3178,23 +3269,17 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                 if _p.get('value') is not None:
                     _d3_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
 
-            picked, seen = [], set()
-            for i in range(3):   # 前3注：各位第i候选组合，确保候选全覆盖
-                c = [top3[0][i][0], top3[1][i][0], top3[2][i][0]]
-                pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
-                picked.append((c, pr)); seen.add(tuple(c))
-            # 其余注数：从27种组合里按联合概率补足
-            # 按RL自己的联合概率排序（不用ML条件干预，理由同上）
-            all27 = sorted(
-                (([b, s, g], pb*ps*pg)
-                 for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
-                key=lambda x: -x[1])
-            for c, pr in all27:
-                if len(picked) >= D3_N_BETS: break
-                if tuple(c) not in seen:
-                    picked.append((c, pr)); seen.add(tuple(c))
-            picked.sort(key=lambda x: -x[1])
-            groups = [c for c, _ in picked]
+            # ── AlphaGo式推理：先验(策略网络) × 证据(当前局面) ──
+            # 不再只取策略网络Top3的组合（那样只用了先验、丢掉了每期都在变的证据，
+            # 导致权重固定时推荐永远不变），改为枚举全部1000种组合综合打分。
+            groups = alphago_select_3d(
+                pos_probs,
+                mk_arr[idx] if mk_arr is not None else None,
+                omit_arr[idx] if omit_arr is not None else None,
+                _d3_conds, n_bets=D3_N_BETS)
+            # 保留各注的策略网络联合概率，供前端展示
+            picked = [(c, float(pos_probs[0][c[0]]*pos_probs[1][c[1]]*pos_probs[2][c[2]]))
+                      for c in groups]
             if _d3_conds:
                 _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
                                  if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
