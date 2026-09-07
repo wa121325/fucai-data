@@ -1076,28 +1076,54 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
 #  枚举1000种（而不是只看每位Top3的27种）仍然保留——
 #  它不引入任何外部假设，只是让排序覆盖完整的组合空间。
 # ══════════════════════════════════════════════════════
-def select_3d_by_policy(pos_probs, n_bets=12, verbose=True):
+def select_3d_by_policy(pos_probs, n_bets=12, verbose=True, seed=None):
     """
-    枚举全部1000种组合，按策略网络的联合概率 P(百)×P(十)×P(个) 排序取前n_bets注。
+    按策略网络的概率分布【采样】出n_bets注互不重复的组合。
 
-    不掺入任何手工权重——模型怎么想，就怎么推荐。
+    ── 为什么是采样而不是取Top-N ──
+    PPO训练出来的本来就是【随机策略】——网络输出的是概率分布，
+    动作本该从这个分布里采样。之前取"联合概率最高的前12种"是把随机性扔掉了，
+    后果是 Top1×Top1×Top1 的组合必然排第一、Top1×Top1×Top2 排第二……
+    只要Top1/Top2不换人，前几注就永远一样。实测两天的先验：
+    百位 8(18.0%)→8(18.0%)、2(17.5%)→2(17.3%)，Top2纹丝不动，
+    推荐自然连续多天完全相同。
+
+    采样则不同：0号在个位占29%，意味着约29%的注会选它，而不是"必选"。
+    概率稍微变一点，采样结果就会变，而且【采样比例忠实反映模型的置信度】——
+    这才是随机策略的正确用法，不是人为制造变化。
     """
     P = np.asarray(pos_probs, dtype=np.float64).reshape(3, 10)
-    scored = []
-    for b in range(10):
-        for s in range(10):
-            for g in range(10):
-                scored.append(([b, s, g], float(P[0][b] * P[1][s] * P[2][g])))
-    scored.sort(key=lambda x: -x[1])
-    picks = [c for c, _ in scored[:n_bets]]
+    P = P / P.sum(axis=1, keepdims=True)
+    rng = np.random.default_rng(seed)
+
+    picks, seen, guard = [], set(), 0
+    while len(picks) < n_bets and guard < n_bets * 200:
+        guard += 1
+        c = [int(rng.choice(10, p=P[i])) for i in range(3)]
+        t = tuple(c)
+        if t not in seen:
+            seen.add(t); picks.append(c)
+    # 极端情况下采样凑不满（分布过于集中），用联合概率最高的组合补齐
+    if len(picks) < n_bets:
+        allc = sorted((([b,s,g], P[0][b]*P[1][s]*P[2][g])
+                       for b in range(10) for s in range(10) for g in range(10)),
+                      key=lambda x: -x[1])
+        for c, _ in allc:
+            if len(picks) >= n_bets: break
+            if tuple(c) not in seen:
+                seen.add(tuple(c)); picks.append(c)
+    # 按联合概率排序展示，让置信度高的排前面
+    picks.sort(key=lambda c: -(P[0][c[0]]*P[1][c[1]]*P[2][c[2]]))
+
     if verbose:
-        _top, _med = scored[0][1], scored[len(scored)//2][1]
-        _uni = 0.001   # 均匀分布下每种组合的概率
-        print(f"    [选号] 枚举1000种组合，按策略网络联合概率排序（不掺手工权重）")
-        print(f"      最高{_top:.5f}  中位{_med:.5f}  均匀基准{_uni:.5f}  "
-              f"最高/均匀={_top/_uni:.2f}倍")
-        if _top / _uni < 1.5:
-            print(f"      ⚠️ 最高概率仅为均匀分布的{_top/_uni:.2f}倍，模型几乎没有偏好")
+        _jp = [P[0][c[0]]*P[1][c[1]]*P[2][c[2]] for c in picks]
+        _best = max(P[0].max()*P[1].max()*P[2].max(), 1e-12)
+        print(f"    [选号] 按策略分布采样{n_bets}注（PPO是随机策略，采样才是它的正确用法）")
+        print(f"      各注联合概率 {min(_jp):.5f}~{max(_jp):.5f}  "
+              f"理论最高{_best:.5f}  均匀基准0.00100")
+        _ent = [float(-(p*np.log(p+1e-12)).sum()) for p in P]
+        print(f"      分布熵 百{_ent[0]:.3f} 十{_ent[1]:.3f} 个{_ent[2]:.3f}"
+              f"（均匀=2.303，越低说明模型越有主见）")
     return picks
 
 
@@ -1431,11 +1457,13 @@ def append_history(game, record):
 # 反而每天扰动权重；而冻结模式下权重不变、一期数据又不足以翻转排序，
 # 推荐会连续多天一模一样。每天全新随机初始化 + 全量重训，
 # 当天的新开奖直接进入训练数据，推荐号码自然会变。
-# 'frozen' = 权重稳定：训练一次后长期沿用，只在挑战者明显更优时才更换。
-# 之所以现在能用冻结模式，是因为推理改成了AlphaGo式（先验×证据）：
-# 权重固定不变，但马尔可夫/遗漏/ML条件这些证据每期都变，
-# 推荐自然跟着新开奖走——不会再出现"连续多天一模一样"。
-TRAIN_MODE = 'frozen'
+# 'fresh' = 每天从零全量训练。
+# 冻结模式下推荐连续多天完全相同：策略网络学到的是一个几乎不随输入变化的映射，
+# Top1/Top2 纹丝不动，而12注按联合概率取，Top1×Top1×Top1 必然排最前，
+# 所以前几注永远一样。这不是bug，是模型认为"输入不影响结果"的诚实表达，
+# 但对每天要看新推荐的实际用途来说没有价值。
+# 每天全新随机初始化重训，落在不同局部最优，推荐自然天天不同。
+TRAIN_MODE = 'fresh'
 
 # ══════════════════════════════════════════════════════
 #  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
@@ -2150,6 +2178,40 @@ def load_ppo(game):
               f"或该Dataset尚未创建")
     return None
 
+def save_state_dim(game, dim):
+    """
+    记录本次训练时的状态维度。
+
+    冻结模式依赖"明天能把今天的权重读回来"，而权重能否加载取决于状态维度是否一致。
+    改了特征工程（比如加窗口档位、加趋势特征）维度就会变，旧权重必然失效。
+    把维度存下来，下次加载前先比对，就能明确告诉你"是维度变了"而不是含糊的加载失败。
+    """
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(f'{RL_LOCAL_DIR}/{game}_state_dim.json', 'w') as f:
+            json.dump({'state_dim': int(dim), 'date': str(date.today())}, f)
+    except Exception as e:
+        print(f"  ! 记录状态维度失败: {e}")
+
+
+def check_state_dim(game, cur_dim):
+    """加载前比对维度，不一致时明确说明原因"""
+    for p in (f'{RL_MOUNTED}/{game}_state_dim.json', f'{RL_LOCAL_DIR}/{game}_state_dim.json'):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: old = int(json.load(f).get('state_dim', 0))
+                if old and old != cur_dim:
+                    print(f"  ! 状态维度已变化：上次训练时{old}维，现在{cur_dim}维")
+                    print(f"    → 特征工程改动过，旧权重无法复用，本次必须全量重训（一次性代价）")
+                    return False
+                if old == cur_dim:
+                    print(f"  ✓ 状态维度与上次一致（{cur_dim}维），旧权重可复用")
+                    return True
+            except Exception: pass
+    print(f"  · 未找到上次的维度记录（当前{cur_dim}维），首次运行属正常")
+    return None
+
+
 def save_ppo(model, game):
     os.makedirs(RL_LOCAL_DIR, exist_ok=True)
     model.save(f'{RL_LOCAL_DIR}/{game}_ppo')
@@ -2236,6 +2298,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
     is_new = model is None
     t0 = time.time()
     if not is_new:
+        check_state_dim('kl8', int(vec_env.observation_space.shape[0]))
         try:
             model.set_env(vec_env)
             # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
@@ -2382,10 +2445,18 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     # 只有真正训练过才保存：冻结且未触发重训时权重没变，
     # 重复推送没意义，还可能意外覆坏已有权重
+    # 一眼看清今天用的是哪份权重：新训练的、还是沿用之前存下来的最优
+    if is_new:
+        print(f"  [权重来源] 本次全新训练（旧权重不存在或维度不匹配），"
+              f"已保存供后续冻结使用，最佳评分 {_best:.4f}")
+    elif TRAIN_MODE == 'frozen' and not _do:
+        print(f"  [权重来源] 沿用已保存的权重（未重新训练），"
+              f"当前在holdout上评分 {_best:.4f} —— 这正是『稳定权重+新数据』模式")
     _trained = (TRAIN_MODE != 'frozen') or is_new or _do
     if _trained:
         save_ppo(model, 'kl8')
-        save_last_trained_n('kl8', len(records))   # 记录本次训练时的期数，供下次判断
+        save_last_trained_n('kl8', len(records))
+        save_state_dim('kl8', int(vec_env.observation_space.shape[0]))   # 绑定维度，供下次加载前比对
     else:
         print("  [冻结] 权重未改动，跳过保存")
 
@@ -2690,6 +2761,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
     is_new = model is None
     t0 = time.time()
     if not is_new:
+        check_state_dim('ssq', int(vec_env.observation_space.shape[0]))
         try:
             model.set_env(vec_env)
             # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
@@ -2830,10 +2902,18 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     # 只有真正训练过才保存：冻结且未触发重训时权重没变，
     # 重复推送没意义，还可能意外覆坏已有权重
+    # 一眼看清今天用的是哪份权重：新训练的、还是沿用之前存下来的最优
+    if is_new:
+        print(f"  [权重来源] 本次全新训练（旧权重不存在或维度不匹配），"
+              f"已保存供后续冻结使用，最佳评分 {_best:.4f}")
+    elif TRAIN_MODE == 'frozen' and not _do:
+        print(f"  [权重来源] 沿用已保存的权重（未重新训练），"
+              f"当前在holdout上评分 {_best:.4f} —— 这正是『稳定权重+新数据』模式")
     _trained = (TRAIN_MODE != 'frozen') or is_new or _do
     if _trained:
         save_ppo(model, 'ssq')
-        save_last_trained_n('ssq', len(records))   # 记录本次训练时的期数，供下次判断
+        save_last_trained_n('ssq', len(records))
+        save_state_dim('ssq', int(vec_env.observation_space.shape[0]))   # 绑定维度，供下次加载前比对
     else:
         print("  [冻结] 权重未改动，跳过保存")
 
@@ -3065,6 +3145,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
     is_new = model is None
     t0 = time.time()
     if not is_new:
+        check_state_dim('3d', int(vec_env.observation_space.shape[0]))
         try:
             model.set_env(vec_env)
             # PPO保存时会把超参一起存进去，加载后必须显式覆盖，
@@ -3231,10 +3312,18 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
 
     # 只有真正训练过才保存：冻结且未触发重训时权重没变，
     # 重复推送没意义，还可能意外覆坏已有权重
+    # 一眼看清今天用的是哪份权重：新训练的、还是沿用之前存下来的最优
+    if is_new:
+        print(f"  [权重来源] 本次全新训练（旧权重不存在或维度不匹配），"
+              f"已保存供后续冻结使用，最佳评分 {_best:.4f}")
+    elif TRAIN_MODE == 'frozen' and not _do:
+        print(f"  [权重来源] 沿用已保存的权重（未重新训练），"
+              f"当前在holdout上评分 {_best:.4f} —— 这正是『稳定权重+新数据』模式")
     _trained = (TRAIN_MODE != 'frozen') or is_new or _do
     if _trained:
         save_ppo(model, '3d')
-        save_last_trained_n('3d', len(records))   # 记录本次训练时的期数，供下次判断
+        save_last_trained_n('3d', len(records))
+        save_state_dim('3d', int(vec_env.observation_space.shape[0]))   # 绑定维度，供下次加载前比对
     else:
         print("  [冻结] 权重未改动，跳过保存")
 
