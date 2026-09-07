@@ -282,7 +282,11 @@ def f3d(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
     f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+    # 时间尺度档位：短(3/5/10) 中(20/50) 中长(100) 长(300=WINDOW)
+    # 原来是 3/5/10/20/300，20到300之间是15倍断层，50和100这些中期尺度完全空白。
+    # 补上之后最大跨度降到3倍，短中长连续覆盖：
+    # 短窗口对最新开奖敏感，长窗口给出稳定的基线，中窗口衔接两者。
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(50,'50'),(100,'100'),(WINDOW,'W')]:
         chunk=w[-ws:]
         sms=[sum(x['digits']) for x in chunk]
         sps=[max(x['digits'])-min(x['digits']) for x in chunk]
@@ -353,6 +357,27 @@ def f3d(records, idx):
     for pi in range(3):
         f[f'prev_pos{pi}'] = float(last[pi]) if pi < len(last) else 0.0
 
+
+    # ── 跨尺度趋势：短期相对长期的偏离方向和幅度 ──
+    # 光有各窗口的"水平值"不够——3期均值15、300期均值14，这个"高出多少"
+    # 才是走势方向。之前只有 sm_trend（最近两期比大小）这种极简趋势，
+    # 而多窗口的水平值之间的关系（短期是在偏离还是回归长期）完全没被表达。
+    for _k in ['sm', 'sp', 'odd', 'big']:
+        _sh = f.get(f'{_k}5');  _md = f.get(f'{_k}50');  _lg = f.get(f'{_k}W')
+        if _sh is not None and _lg is not None:
+            f[f'{_k}_dev_long']  = float(_sh - _lg)            # 短期偏离长期
+            f[f'{_k}_dev_ratio'] = float((_sh - _lg) / (abs(_lg) + 1e-6))
+        else:
+            f[f'{_k}_dev_long'] = 0.0; f[f'{_k}_dev_ratio'] = 0.0
+        if _sh is not None and _md is not None:
+            f[f'{_k}_dev_mid'] = float(_sh - _md)              # 短期偏离中期
+        else:
+            f[f'{_k}_dev_mid'] = 0.0
+    # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
+    for _k in ['sm', 'sp']:
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+                                 (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
+
     return f
 
 
@@ -360,7 +385,11 @@ def fssq(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
     f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+    # 时间尺度档位：短(3/5/10) 中(20/50) 中长(100) 长(300=WINDOW)
+    # 原来是 3/5/10/20/300，20到300之间是15倍断层，50和100这些中期尺度完全空白。
+    # 补上之后最大跨度降到3倍，短中长连续覆盖：
+    # 短窗口对最新开奖敏感，长窗口给出稳定的基线，中窗口衔接两者。
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(50,'50'),(100,'100'),(WINDOW,'W')]:
         chunk=w[-ws:]
         sms=[sum(x['red']) for x in chunk]
         bls=[x['blue'] for x in chunk]
@@ -433,6 +462,27 @@ def fssq(records, idx):
         f[f'prev_r{n}'] = 1.0 if n in prev_red else 0.0
     f['prev_blue'] = float(w[-1]['blue']) if w else 0.0
 
+
+    # ── 跨尺度趋势：短期相对长期的偏离方向和幅度 ──
+    # 光有各窗口的"水平值"不够——3期均值15、300期均值14，这个"高出多少"
+    # 才是走势方向。之前只有 sm_trend（最近两期比大小）这种极简趋势，
+    # 而多窗口的水平值之间的关系（短期是在偏离还是回归长期）完全没被表达。
+    for _k in ['sm', 'sp', 'odd', 'big']:
+        _sh = f.get(f'{_k}5');  _md = f.get(f'{_k}50');  _lg = f.get(f'{_k}W')
+        if _sh is not None and _lg is not None:
+            f[f'{_k}_dev_long']  = float(_sh - _lg)            # 短期偏离长期
+            f[f'{_k}_dev_ratio'] = float((_sh - _lg) / (abs(_lg) + 1e-6))
+        else:
+            f[f'{_k}_dev_long'] = 0.0; f[f'{_k}_dev_ratio'] = 0.0
+        if _sh is not None and _md is not None:
+            f[f'{_k}_dev_mid'] = float(_sh - _md)              # 短期偏离中期
+        else:
+            f[f'{_k}_dev_mid'] = 0.0
+    # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
+    for _k in ['sm', 'sp']:
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+                                 (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
+
     return f
 
 
@@ -440,7 +490,11 @@ def fkl8(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
     f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+    # 时间尺度档位：短(3/5/10) 中(20/50) 中长(100) 长(300=WINDOW)
+    # 原来是 3/5/10/20/300，20到300之间是15倍断层，50和100这些中期尺度完全空白。
+    # 补上之后最大跨度降到3倍，短中长连续覆盖：
+    # 短窗口对最新开奖敏感，长窗口给出稳定的基线，中窗口衔接两者。
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(50,'50'),(100,'100'),(WINDOW,'W')]:
         chunk=w[-ws:]
         tots=[sum(x['numbers']) for x in chunk]
         odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
@@ -493,6 +547,26 @@ def fkl8(records, idx):
     f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
     # 快乐8每期开20个球，上期二值编码就是80维，维度偏大且信息稀疏，
     # 改用"上期号码按四区分布"这种压缩表示，兼顾跨期信息与维度控制
+    # ── 跨尺度趋势：短期相对长期的偏离方向和幅度 ──
+    # 光有各窗口的"水平值"不够——3期均值15、300期均值14，这个"高出多少"
+    # 才是走势方向。之前只有 sm_trend（最近两期比大小）这种极简趋势，
+    # 而多窗口的水平值之间的关系（短期是在偏离还是回归长期）完全没被表达。
+    for _k in ['sm', 'sp', 'odd', 'big']:
+        _sh = f.get(f'{_k}5');  _md = f.get(f'{_k}50');  _lg = f.get(f'{_k}W')
+        if _sh is not None and _lg is not None:
+            f[f'{_k}_dev_long']  = float(_sh - _lg)            # 短期偏离长期
+            f[f'{_k}_dev_ratio'] = float((_sh - _lg) / (abs(_lg) + 1e-6))
+        else:
+            f[f'{_k}_dev_long'] = 0.0; f[f'{_k}_dev_ratio'] = 0.0
+        if _sh is not None and _md is not None:
+            f[f'{_k}_dev_mid'] = float(_sh - _md)              # 短期偏离中期
+        else:
+            f[f'{_k}_dev_mid'] = 0.0
+    # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
+    for _k in ['sm', 'sp']:
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+                                 (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
+
     prev = w[-1]['numbers'] if w else []
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
