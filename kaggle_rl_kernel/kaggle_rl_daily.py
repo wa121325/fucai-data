@@ -1457,13 +1457,24 @@ def append_history(game, record):
 # 反而每天扰动权重；而冻结模式下权重不变、一期数据又不足以翻转排序，
 # 推荐会连续多天一模一样。每天全新随机初始化 + 全量重训，
 # 当天的新开奖直接进入训练数据，推荐号码自然会变。
-# 'fresh' = 每天从零全量训练。
-# 冻结模式下推荐连续多天完全相同：策略网络学到的是一个几乎不随输入变化的映射，
-# Top1/Top2 纹丝不动，而12注按联合概率取，Top1×Top1×Top1 必然排最前，
-# 所以前几注永远一样。这不是bug，是模型认为"输入不影响结果"的诚实表达，
-# 但对每天要看新推荐的实际用途来说没有价值。
-# 每天全新随机初始化重训，落在不同局部最优，推荐自然天天不同。
-TRAIN_MODE = 'fresh'
+# 'frozen' = 保留最优权重，只在挑战者明显更强时才更换。
+#
+# ── 为什么现在能用冻结模式了 ──
+# 之前冻结必然导致"推荐连续多天完全相同"，所以只能退回每日重训，
+# 但每日重训等于每天把学到的东西扔掉、永远无法变聪明。
+# 在这两个坏选项之间来回换了很多轮，从没问过根本问题：
+# 【为什么冻结权重就必然推荐一样？】
+#
+# 答案是：PPO训练的是【随机策略】——网络输出概率分布，动作本该从中采样。
+# 而选号一直用的是 argmax（取联合概率最高的前N种），
+# 于是 Top1×Top1×Top1 必然排第一，只要Top1不换人推荐就永远不变。
+# 这是把随机策略当确定性策略用，把模型自己表达的不确定性全扔了。
+#
+# 采样修好之后，冻结模式的唯一缺陷消失了：
+#   权重稳定 → 可以累积、可以越来越强
+#   采样输出 → 推荐每天不同，且比例忠实反映模型置信度
+# 两者第一次可以同时成立。
+TRAIN_MODE = 'frozen'
 
 # ══════════════════════════════════════════════════════
 #  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
@@ -3223,7 +3234,27 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
             print(f"  [挑战周期] {_why}")
             if _do:
                 _n_clean = max(len(records) - _hold_mid, 1)
-                _se_clean = math.sqrt(3*0.1*0.9) / math.sqrt(_n_clean)
+                # 挑战改用对数概率评判，标准误必须按对数概率自己的尺度算
+                # （命中数的0.0232 和 对数概率的0.0055 差4倍，用错了门槛就完全失效）。
+                # 直接从现任模型在干净区的逐期对数概率实测标准差，比套理论公式可靠。
+                try:
+                    _lps = []
+                    for _i in range(_hold_mid, len(records)):
+                        _st = build_state(_i)
+                        if _st is None: continue
+                        _obs, _ = model.policy.obs_to_tensor(np.array(_st).reshape(1, -1))
+                        with torch.no_grad():
+                            _dd = model.policy.get_distribution(_obs).distribution
+                        _act = records[_i]['digits']
+                        for _pi, _d in enumerate(_dd):
+                            _pp = _d.probs.detach().cpu().numpy()[0]
+                            _lps.append(math.log(float(_pp[_act[_pi]]) + 1e-12))
+                    _se_clean = float(np.std(_lps)) / math.sqrt(max(len(_lps), 1)) if _lps else 0.01
+                    print(f"    [挑战门槛] 对数概率实测标准误 {_se_clean:.5f}"
+                          f"（{len(_lps)}个样本），上位需超过 {CHALLENGE_MARGIN_K*_se_clean:.5f}")
+                except Exception as _e:
+                    _se_clean = 0.01
+                    print(f"    [挑战门槛] 标准误实测失败({_e})，使用默认 {_se_clean}")
                 def _mk():
                     m = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
                             n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
@@ -3234,10 +3265,17 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                                  n_chunks=16, patience=6,
                                                  reset_timesteps=True, warmup_chunks=5)
                 def _ev(m):
-                    return _eval_holdout(half='report', use_model=m)
+                    # 用【对数概率】而不是平均命中数来评判挑战者。
+                    # 命中数每期只有0/1/2/3四档：挑战者把正确数字的概率从10%提到18%，
+                    # 只要还不是最大值，这个指标完全看不见，好模型会被误判成"没提升"。
+                    # 对数概率用全部10个概率值，这种改善能被捕捉到，
+                    # 挑战机制才真的能把更强的模型选出来、让权重越来越好。
+                    return eval_logprob_3d(model, build_state, records,
+                                           range(_hold_mid, len(records)), use_model=m)
                 def _rc(m):
                     # 复检用另一半数据：对现任和挑战者是同一批题，公平比较
-                    return _eval_holdout(half='select', use_model=m)
+                    return eval_logprob_3d(model, build_state, records,
+                                           range(_hold_start, _hold_mid), use_model=m)
                 model, _swapped, _msg = run_challenge(
                     model, _mk, _tr, _ev, _se_clean, recheck_fn=_rc, label='3D')
                 print(f"  [挑战结果] {_msg}")
