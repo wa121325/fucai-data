@@ -316,7 +316,7 @@ def f3d(records, idx):
             f[f'{_k}_dev_mid'] = 0.0
     # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
     for _k in ['sm', 'sp']:
-        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) -
                                  (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
 
     return f
@@ -421,7 +421,7 @@ def fssq(records, idx):
             f[f'{_k}_dev_mid'] = 0.0
     # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
     for _k in ['sm', 'sp']:
-        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) -
                                  (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
 
     return f
@@ -505,7 +505,7 @@ def fkl8(records, idx):
             f[f'{_k}_dev_mid'] = 0.0
     # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
     for _k in ['sm', 'sp']:
-        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) -
                                  (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
 
     prev = w[-1]['numbers'] if w else []
@@ -3710,6 +3710,12 @@ else:
     gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✓ 完成")
 
-print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}") 
-  
-      
+print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+# ══════════════════════════════════════════════════════
+#  文件完整性标记
+#  上传/复制过程中若文件被截断或内容错位，这一段就不会完整存在。
+#  Kaggle 上按 Ctrl+End 跳到末尾，应当看到下面这行 EOF 标记，
+#  且行号为文件总行数。看不到 = 文件不完整，需重新上传。
+# ══════════════════════════════════════════════════════
+print("=== EOF: kaggle_rl_daily.py 已完整执行到最后一行 ===")
