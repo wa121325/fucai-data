@@ -3710,7 +3710,6 @@ else:
     gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✓ 完成")
 
-print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")    双色球环境 v3：红球全号码打分排序（33个全打分，不再预筛候选池）+ 蓝球打分
+print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}") 
   
       
-print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
