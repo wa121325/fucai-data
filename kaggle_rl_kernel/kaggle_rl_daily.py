@@ -1086,7 +1086,12 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
 #     T=1.0采样  4.68%   用到数字[7,7,5]   变化足够，但概率砍掉一半以上
 #     T=0.3采样  7.54%   用到数字[4,4,4]   ← 兼顾：概率接近Top12，两期仍变7/12注
 # 买彩票要的是把注数压在高概率区，不是均匀铺开，所以取 T=0.3。
-D3_SAMPLE_TEMP = 0.3
+# 采样温度。T=1.0 表示【原样使用模型输出的分布】，不做任何扭曲。
+# 之前设成0.3是想让推荐更集中，但那等于把分布人为压尖——
+# 实测 T=0.3 时前3个数字占了85.5%的概率质量，采12注基本只在那几个数字里打转，
+# 结果就是"采样了却还是天天一样"。
+# T=1.0 下前3只占48%，剩下52%会分给其它数字，推荐才真正跟着分布走。
+D3_SAMPLE_TEMP = 1.0
 
 
 def select_3d_by_policy(pos_probs, n_bets=12, verbose=True, seed=None, temp=D3_SAMPLE_TEMP):
@@ -1501,7 +1506,13 @@ def append_history(game, record):
 #   权重稳定 → 可以累积、可以越来越强
 #   采样输出 → 推荐每天不同，且比例忠实反映模型置信度
 # 两者第一次可以同时成立。
-TRAIN_MODE = 'frozen'
+# 'fresh' = 每天从零全量重训。
+# 为什么放弃冻结：模型学到的是【各数字的历史边际频率】而不是【状态→号码】的映射
+# （实测两次运行 百位8=18.0%/18.0%、个位0=29.3%/28.8%，Top3排序纹丝不动）。
+# 数据随机时，PPO的最优解本来就是常数策略——永远押历史最高频的数字，
+# 所以冻结权重必然天天给同一组号码，这不是bug而是模型的正确结论。
+# 既然如此，就每天全新随机初始化重训，让不同的局部最优给出不同的推荐。
+TRAIN_MODE = 'fresh'
 
 # ══════════════════════════════════════════════════════
 #  挑战者机制：定期训练一个新模型去挑战现任，赢了才换
@@ -2381,7 +2392,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                 mk_arr=mk_arr, by_arr=by_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    model = load_ppo('kl8')
+    model = None if TRAIN_MODE == 'fresh' else load_ppo('kl8')
     _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
     is_new = model is None
     t0 = time.time()
@@ -2846,7 +2857,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
                                 mk_arr=mk_arr, by_arr=by_arr)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    model = load_ppo('ssq')
+    model = None if TRAIN_MODE == 'fresh' else load_ppo('ssq')
     _do = False   # 是否触发了定期重训（冻结模式下由 should_retrain 决定）
     is_new = model is None
     t0 = time.time()
