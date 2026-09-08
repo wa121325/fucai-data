@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-08 15:47",
+  "updated_at": "2026-09-08 17:35",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8749,
-      "updated_at": "2026-09-08 15:33",
+      "updated_at": "2026-09-08 17:23",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -988,7 +988,7 @@
     },
     "ssq": {
       "data_count": 3501,
-      "updated_at": "2026-09-08 15:38",
+      "updated_at": "2026-09-08 17:27",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -1931,7 +1931,7 @@
     },
     "kl8": {
       "data_count": 2062,
-      "updated_at": "2026-09-08 15:43",
+      "updated_at": "2026-09-08 17:31",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -2974,7 +2974,7 @@
     "date": "2026-09-08",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-09-07 18:21",
+        "prediction_generated_at": "2026-09-08 15:33",
         "actual_qihao": "2026241",
         "actual_date": "2026-09-08",
         "actual": [
@@ -2986,7 +2986,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-09-07 18:26",
+        "prediction_generated_at": "2026-09-08 15:38",
         "actual_qihao": "2026104",
         "actual_date": "2026-09-08",
         "actual_red": [
@@ -3000,18 +3000,6 @@
         "actual_blue": 3,
         "group_results": [
           {
-            "red_hit": 0,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 2,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 1,
-            "blue_hit": 0
-          },
-          {
             "red_hit": 1,
             "blue_hit": 0
           },
@@ -3020,14 +3008,26 @@
             "blue_hit": 0
           },
           {
+            "red_hit": 0,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 0,
+            "blue_hit": 0
+          },
+          {
             "red_hit": 1,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 0,
             "blue_hit": 0
           }
         ],
-        "best_red_hit": 2
+        "best_red_hit": 1
       },
       "kl8": {
-        "prediction_generated_at": "2026-09-07 18:30",
+        "prediction_generated_at": "2026-09-08 15:43",
         "actual_qihao": "2026241",
         "actual_date": "2026-09-08",
         "actual": [
@@ -3058,12 +3058,12 @@
             "balls": 4,
             "groups": [
               {
-                "hit": 1,
+                "hit": 0,
                 "balls": 4,
                 "won": false
               },
               {
-                "hit": 1,
+                "hit": 0,
                 "balls": 4,
                 "won": false
               },
@@ -3081,28 +3081,15 @@
             "balls": 5,
             "groups": [
               {
-                "hit": 2,
+                "hit": 0,
                 "balls": 5,
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 0,
                 "balls": 5,
                 "won": false
               },
-              {
-                "hit": 2,
-                "balls": 5,
-                "won": false
-              }
-            ],
-            "any_won": false,
-            "best_hit": 2
-          },
-          "xuan5_fu": {
-            "name": "选五复式",
-            "balls": 5,
-            "groups": [
               {
                 "hit": 1,
                 "balls": 5,
@@ -3111,6 +3098,19 @@
             ],
             "any_won": false,
             "best_hit": 1
+          },
+          "xuan5_fu": {
+            "name": "选五复式",
+            "balls": 5,
+            "groups": [
+              {
+                "hit": 2,
+                "balls": 5,
+                "won": false
+              }
+            ],
+            "any_won": false,
+            "best_hit": 2
           },
           "xuan6": {
             "name": "选六",
@@ -3122,25 +3122,25 @@
                 "won": false
               },
               {
-                "hit": 1,
+                "hit": 0,
                 "balls": 6,
                 "won": false
               },
               {
-                "hit": 1,
+                "hit": 2,
                 "balls": 6,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 1
+            "best_hit": 2
           },
           "xuan9": {
             "name": "选九",
             "balls": 9,
             "groups": [
               {
-                "hit": 3,
+                "hit": 2,
                 "balls": 9,
                 "won": false
               },
@@ -3151,23 +3151,23 @@
               }
             ],
             "any_won": false,
-            "best_hit": 3
+            "best_hit": 2
           },
           "xuan10": {
             "name": "选十",
             "balls": 10,
             "groups": [
               {
-                "hit": 4,
+                "hit": 3,
                 "balls": 10,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 4
+            "best_hit": 3
           }
         },
-        "best_hit": 4
+        "best_hit": 3
       }
     }
   },
