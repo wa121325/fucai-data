@@ -1076,7 +1076,20 @@ def report_state_sensitivity(model, build_state_fn, idx_list, game, top_k=3):
 #  枚举1000种（而不是只看每位Top3的27种）仍然保留——
 #  它不引入任何外部假设，只是让排序覆盖完整的组合空间。
 # ══════════════════════════════════════════════════════
-def select_3d_by_policy(pos_probs, n_bets=12, verbose=True, seed=None):
+# 采样温度。T<1 让采样更集中于高概率组合，T=1 是原始分布。
+#
+# ── 为什么必须加温度 ──
+# 模型给的分布相当平坦（最高18%对均匀10%），直接按原始分布采12注，
+# 会用掉7~8个不同数字，等于把注数铺满整个空间。
+# 实测（用真实分布）：12注覆盖的总中奖概率
+#     取Top12   10.06%   用到数字[3,3,2]   但两期完全相同，永不变
+#     T=1.0采样  4.68%   用到数字[7,7,5]   变化足够，但概率砍掉一半以上
+#     T=0.3采样  7.54%   用到数字[4,4,4]   ← 兼顾：概率接近Top12，两期仍变7/12注
+# 买彩票要的是把注数压在高概率区，不是均匀铺开，所以取 T=0.3。
+D3_SAMPLE_TEMP = 0.3
+
+
+def select_3d_by_policy(pos_probs, n_bets=12, verbose=True, seed=None, temp=D3_SAMPLE_TEMP):
     """
     按策略网络的概率分布【采样】出n_bets注互不重复的组合。
 
@@ -1093,13 +1106,18 @@ def select_3d_by_policy(pos_probs, n_bets=12, verbose=True, seed=None):
     这才是随机策略的正确用法，不是人为制造变化。
     """
     P = np.asarray(pos_probs, dtype=np.float64).reshape(3, 10)
+    P = np.clip(P, 1e-12, None)
     P = P / P.sum(axis=1, keepdims=True)
+    # 采样用的是升温/降温后的分布 Q，但排序和展示仍用原始分布 P，
+    # 这样"模型认为的概率"不会被温度篡改，温度只影响注数的集中程度
+    Q = P ** (1.0 / max(temp, 1e-6))
+    Q = Q / Q.sum(axis=1, keepdims=True)
     rng = np.random.default_rng(seed)
 
     picks, seen, guard = [], set(), 0
     while len(picks) < n_bets and guard < n_bets * 200:
         guard += 1
-        c = [int(rng.choice(10, p=P[i])) for i in range(3)]
+        c = [int(rng.choice(10, p=Q[i])) for i in range(3)]
         t = tuple(c)
         if t not in seen:
             seen.add(t); picks.append(c)
@@ -1118,9 +1136,18 @@ def select_3d_by_policy(pos_probs, n_bets=12, verbose=True, seed=None):
     if verbose:
         _jp = [P[0][c[0]]*P[1][c[1]]*P[2][c[2]] for c in picks]
         _best = max(P[0].max()*P[1].max()*P[2].max(), 1e-12)
-        print(f"    [选号] 按策略分布采样{n_bets}注（PPO是随机策略，采样才是它的正确用法）")
+        # 这12注加起来的中奖概率，才是"买这组号码值不值"的直接指标
+        _cover = sum(_jp)
+        _allc = sorted((P[0][b]*P[1][s]*P[2][g]
+                        for b in range(10) for s in range(10) for g in range(10)), reverse=True)
+        _best_cover = sum(_allc[:n_bets])     # 取概率最高的n_bets注能覆盖多少
+        print(f"    [选号] 按策略分布采样{n_bets}注（温度T={temp}，越低越集中于高概率组合）")
         print(f"      各注联合概率 {min(_jp):.5f}~{max(_jp):.5f}  "
               f"理论最高{_best:.5f}  均匀基准0.00100")
+        print(f"      这{n_bets}注合计覆盖 {_cover*100:.2f}% 的中奖概率"
+              f"（理论上限{_best_cover*100:.2f}%，随机买{n_bets}注只有{n_bets/10:.1f}%）")
+        if _cover < _best_cover * 0.6:
+            print(f"      ⚠️ 覆盖率不足理论上限的60%，注数铺得过散，可把 D3_SAMPLE_TEMP 调更低")
         _ent = [float(-(p*np.log(p+1e-12)).sum()) for p in P]
         print(f"      分布熵 百{_ent[0]:.3f} 十{_ent[1]:.3f} 个{_ent[2]:.3f}"
               f"（均匀=2.303，越低说明模型越有主见）")
@@ -2721,7 +2748,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
             # 而且"符合条件更容易中"这个假设本身从未被验证过。
             # 种子绑定最新开奖：同数据可复现，新开奖必变
             _sd = abs(hash(f"{len(records)}-{'-'.join(map(str, records[-1]['numbers'][:5]))}-{_n}")) % (2**32)
-            _b, _c, _p = sample_picks(base_action, _n, _cnt, seed=_sd, temp=0.5, core_n=1)
+            _b, _c, _p = sample_picks(base_action, _n, _cnt, seed=_sd, temp=0.3, core_n=1)
             _play_bets[_n], _play_core[_n] = _b, _c
         else:
             _play_bets[_n], _play_core[_n] = [[] for _ in range(_cnt)], []
@@ -3095,7 +3122,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         # 完全按RL自己的球分选号（理由同快乐8：ML预测已在状态里，不在外面二次干预）
         # 种子绑定最新开奖：同数据可复现，新开奖必变
         _sd = abs(hash(f"{len(records)}-{'-'.join(map(str, records[-1]['red']))}")) % (2**32)
-        red_top6, red_core, red_pool = sample_picks(red_scores, 6, 6, seed=_sd, temp=0.5, core_n=1)
+        red_top6, red_core, red_pool = sample_picks(red_scores, 6, 6, seed=_sd, temp=0.3, core_n=1)
         if _ssq_conds:
             _cavg = sum(len([1 for k,(v,w) in _ssq_conds.items()
                              if _ssq_cond_feats(b).get(k)==v]) for b in red_top6) / max(len(red_top6),1)
