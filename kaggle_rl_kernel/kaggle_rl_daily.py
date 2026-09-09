@@ -976,15 +976,19 @@ def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
 # 比3D随机基准0.30的一半还大，早停在这个精度下等于抛硬币，
 # 它每次保留"训练前的随机权重"只是因为那次运气好，不代表模型更优。
 # 提到150期后标准误降到约0.042，早停才开始有判断力。
-HOLDOUT_N = 150
+# holdout上限。原来是150期，切成三段后B段只剩50期，标准误高达0.0735，
+# 2倍标准误的门槛换算成 0.30+0.147=0.447——比随机基准高49%，永远不可能达到。
+# 扩到1000期后B段有333期，标准误降到0.0285，门槛才落到合理区间。
+# 3D有8700+期，拿1000期做评估只占11%，完全负担得起。
+HOLDOUT_N = 1000
 
 # 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
 # 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
 D3_N_BETS = 12
 
 def holdout_size(n_records):
-    """按数据量自适应：至少80期保证测量精度，最多不超过总数的8%避免过度损失训练数据"""
-    return max(80, min(HOLDOUT_N, int(n_records * 0.08)))
+    """按数据量自适应：至少120期保证三段切分后每段够用，最多占总数12%"""
+    return max(120, min(HOLDOUT_N, int(n_records * 0.12)))
 
 # ══════════════════════════════════════════════════════
 #  熵系数（entropy coefficient）
@@ -1473,7 +1477,14 @@ PERIOD_SD   = {'3d': math.sqrt(3*0.1*0.9),
 
 # 目标线 = 随机基准 + K×标准误。用样本量自动算而不是写死0.40，
 # 因为门槛必须和评估样本量配套：同样0.40，在75期上纯靠运气就能达到，333期上才有意义。
-TARGET_K = 2.0
+# 目标线的严格程度。这是【挑选门槛】不是【能力证明】——
+# 即便模型毫无预测能力，5轮里也总能挑到运气好的那轮，K越大只是挑得越费劲。
+# 实测(3D，B段333期)真实水平0.30时，5轮内的达标率：
+#   K=2.0 → 10%（九成天数白跑5轮，最后还是取最好的一轮）
+#   K=1.0 → 58%（达标就停，省时间；没达标也拿到5轮最好的）
+# 所以用K=1.0：它的作用是"别用太差的那轮"，而不是"证明模型很强"。
+# 真正证明能力的是C段——那段从不参与挑选，看它是否稳定超过基准+2SE。
+TARGET_K = 1.0
 MAX_ATTEMPTS = 5
 
 
@@ -2273,12 +2284,16 @@ def run_kl8_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return tot/n if n else 0.0
 
     # 达标重训：每天从零全量训练，没达到目标线就换个随机初始化重来
+    model = None      # 先占位，避免闭包在赋值前引用
     def _mk():
         return PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                         n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2,
                    ent_coef=ENT_COEF['kl8'], verbose=0, device='cpu')
     def _tr(m):
-        return train_with_early_stop(m, 200000, _eval_holdout, '快乐8',
+        # 必须把正在训练的模型 m 绑进评估函数：
+        # 裸传 _eval_holdout 会让它回退到外层的 model，而此刻 model 还没赋值
+        # （正等着 train_until_target 的返回值），触发 NameError。
+        return train_with_early_stop(m, 200000, lambda **kw: _eval_holdout(use_model=m, **kw), '快乐8',
                                      n_chunks=16, patience=6,
                                              reset_timesteps=True, warmup_chunks=5)
     # 达标判定用B段：A段被早停占用，C段必须保持从不参与选择
@@ -2701,12 +2716,16 @@ def run_ssq_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return tot/n if n else 0.0
 
     # 达标重训：每天从零全量训练，没达到目标线就换个随机初始化重来
+    model = None      # 先占位，避免闭包在赋值前引用
     def _mk():
         return PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                         n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2,
                    ent_coef=ENT_COEF['ssq'], verbose=0, device='cpu')
     def _tr(m):
-        return train_with_early_stop(m, 150000, _eval_holdout, '双色球',
+        # 必须把正在训练的模型 m 绑进评估函数：
+        # 裸传 _eval_holdout 会让它回退到外层的 model，而此刻 model 还没赋值
+        # （正等着 train_until_target 的返回值），触发 NameError。
+        return train_with_early_stop(m, 150000, lambda **kw: _eval_holdout(use_model=m, **kw), '双色球',
                                      n_chunks=16, patience=6,
                                              reset_timesteps=True, warmup_chunks=5)
     # 达标判定用B段：A段被早停占用，C段必须保持从不参与选择
@@ -3061,12 +3080,16 @@ def run_3d_daily(records, ml_pred, prev_result=None, dl_pred=None):
         return tot/n if n else 0.0
 
     # 达标重训：每天从零全量训练，没达到目标线就换个随机初始化重来
+    model = None      # 先占位，避免闭包在赋值前引用
     def _mk():
         return PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
                         n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2,
                    ent_coef=ENT_COEF['3d'], verbose=0, device='cpu')
     def _tr(m):
-        return train_with_early_stop(m, 100000, _eval_holdout, '3D',
+        # 必须把正在训练的模型 m 绑进评估函数：
+        # 裸传 _eval_holdout 会让它回退到外层的 model，而此刻 model 还没赋值
+        # （正等着 train_until_target 的返回值），触发 NameError。
+        return train_with_early_stop(m, 100000, lambda **kw: _eval_holdout(use_model=m, **kw), '3D',
                                      n_chunks=16, patience=6,
                                              reset_timesteps=True, warmup_chunks=5)
     # 达标判定用B段：A段被早停占用，C段必须保持从不参与选择
