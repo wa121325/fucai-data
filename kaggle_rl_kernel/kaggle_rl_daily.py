@@ -1314,7 +1314,7 @@ def report_entropy(model, state, game, n_out=None):
 # ══════════════════════════════════════════════════════
 # 分段开关：把某段清零来测试它的贡献。清零不改变维度，切换不触发重训。
 SEGMENT_ENABLE = {
-    '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':False,
+    '3d':  {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
             '遗漏':True, '马尔可夫':True, '贝叶斯':True},
     'ssq': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
             '遗漏':True, '马尔可夫':True, '贝叶斯':True},
