@@ -1318,8 +1318,8 @@ SEGMENT_ENABLE = {
             '遗漏':False, '马尔可夫':True, '贝叶斯':True},
     'ssq': {'走势特征':False, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
             '遗漏':True, '马尔可夫':True, '贝叶斯':True},
-    'kl8': {'走势特征':True, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
-            '遗漏':True, '频率':True, '马尔可夫':True, '贝叶斯':True},
+    'kl8': {'走势特征':False, 'ML+DL概率':True, 'LSTM隐层':True, 'TFM隐层':True,
+            '遗漏':True, '频率':False, '马尔可夫':True, '贝叶斯':True},
 }
 
 
@@ -1459,11 +1459,22 @@ def train_with_early_stop(model, total_steps, eval_fn, label,
     返回 (model, best_score, history)
     """
     chunk = max(1, total_steps // n_chunks)
-    best_score = eval_fn()
-    best_params = copy.deepcopy(model.get_parameters())
-    history = [round(best_score, 4)]
+
+    # 训练前的基准分只是【随机初始化】网络在holdout上的评分，纯属参考。
+    # 之前的bug：这个分数直接被当成 best_score 参与比较，而holdout只有约75期，
+    # 标准误约0.06——随机网络完全可能"运气好"评到0.35+，
+    # 比如实测过 0.3467，距随机基准0.30只有0.78个标准误，就是噪声。
+    # 一旦把这个噪声当成"最佳基准"，后面刚开始训练的几段只要没有同样运气好，
+    # 就会被判定为"无提升"，patience耗尽后早停——训练还没真正开始就已经被判死刑，
+    # 返回的还是那份从没训练过的随机权重。
+    # 现在只记录它，不参与 best_score 的初始值和比较。
+    _init_score = eval_fn()
+    print(f"    [{label}] 训练前基准分: {_init_score:.4f}（随机初始化，仅供参考，不参与最佳权重评选）")
+
+    best_score = None
+    best_params = None
+    history = [round(_init_score, 4)]
     no_improve = 0
-    print(f"    [{label}] 训练前基准分: {best_score:.4f}")
 
     for i in range(n_chunks):
         model.learn(total_timesteps=chunk,
@@ -1471,7 +1482,7 @@ def train_with_early_stop(model, total_steps, eval_fn, label,
                     progress_bar=False)
         score = eval_fn()
         history.append(round(score, 4))
-        if score > best_score:
+        if best_score is None or score > best_score:
             best_score = score
             best_params = copy.deepcopy(model.get_parameters())
             no_improve = 0
@@ -1486,7 +1497,12 @@ def train_with_early_stop(model, total_steps, eval_fn, label,
             print(f"    [{label}] 连续{patience}段无提升，提前停止（省下{(n_chunks-i-1)*chunk}步）")
             break
 
-    # 恢复到最佳状态，而不是用最后一段训练完的（可能更差的）权重
+    if best_params is None:
+        # 极端情况：一段都没跑完就异常退出，退回随机初始化的当前权重
+        print(f"    [{label}] ⚠️ 没有任何一段完成评估，使用当前（未训练）权重")
+        return model, _init_score, history
+
+    # 恢复到训练过程中出现过的最佳状态，而不是随机初始化、也不是最后一段
     model.set_parameters(best_params)
     print(f"    [{label}] 已恢复到最佳权重，最终评分 {best_score:.4f}  评分轨迹: {history}")
     return model, best_score, history
