@@ -1941,7 +1941,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             names = ['百位','十位','个位']
             for ni, t in enumerate(top3):
                 print(f"  [{names[ni]}候选] " + "  ".join(f"{d}({pv*100:.1f}%)" for d, pv in t))
-            print(f"  [推荐6注] {groups}")
+            print(f"  [推荐{len(groups)}注] {groups}")
             print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
             _cov = [len(set(c[i] for c in groups)) for i in range(3)]
             print(f"    候选覆盖: 百位{_cov[0]}/3  十位{_cov[1]}/3  个位{_cov[2]}/3")
@@ -1953,8 +1953,8 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             action,_ = model.predict(state, deterministic=True)
             groups = [[int(action[0]),int(action[1]),int(action[2])]]
 
-        # 不足6注时（比如候选池不够8种或提取失败），用确定性预测补齐
-        while len(groups)<6:
+        # 不足D3_N_BETS注时（比如候选池不够、或概率分布提取失败），用确定性预测兜底补齐
+        while len(groups)<D3_N_BETS:
             if not groups:
                 action,_ = model.predict(state, deterministic=True)
                 groups.append([int(action[0]),int(action[1]),int(action[2])])
