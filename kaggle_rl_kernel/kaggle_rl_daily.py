@@ -794,6 +794,106 @@ def holdout_size(n_records):
     return max(80, min(300, int(n_records * 0.10)))
 
 
+# EMA混合比例：每天微调的结果按这个比例并入总权重，不管当天效果好坏。
+# α越小，单日影响越弱（更稳，但跟新数据的关联也越弱）；
+# α越大，跟得越紧，但单日噪声的影响也越大。0.15是折中值，可按需调整。
+EMA_ALPHA_FINETUNE = 0.15
+
+
+# 候选α值。每天都会把每个候选实际评一次分并记录下来，
+# 但【当前生效】的α只有攒够多天、且明显优于默认值时才会切换（见下方 choose_alpha）。
+EMA_ALPHA_CANDIDATES = [0.05, 0.10, 0.15, 0.20, 0.30]
+EMA_ALPHA_DEFAULT = 0.15
+
+
+def record_alpha_scores(game, scores_today):
+    """
+    把今天各候选α的holdout评分记录到持久化历史，用于日后判断哪个α更好。
+
+    只记录，不在这里做决策——决策交给 choose_alpha，
+    避免"用今天一天的噪声挑最好的候选"这种典型的过拟合。
+    """
+    path = f'{RL_LOCAL_DIR}/{game}_alpha_history.json'
+    hist = []
+    for p in (f'{RL_MOUNTED}/{game}_alpha_history.json', path):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: hist = json.load(f); break
+            except Exception: pass
+    hist.append({'date': str(date.today()), 'scores': {str(k): v for k, v in scores_today.items()}})
+    hist = hist[-400:]
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"    ! 写入α历史失败: {e}")
+    return hist
+
+
+def choose_alpha(hist, candidates, default_alpha, se_per_day, min_days=15, margin_k=2.0):
+    """
+    根据多天累积证据决定接下来用哪个α，而不是挑"今天表现最好"的那个。
+
+    ── 为什么不能直接挑今天最好的 ──
+    holdout样本有限，今天5个候选里随手就会有一个"恰好"评分最高，
+    这跟之前挑战者机制要解决的问题是同一件事——单日的"更好"大概率是噪声。
+
+    ── 做法 ──
+    每个候选都持续记录，攒够 min_days 天以后，比较各候选的【多天平均分】。
+    只有当某个候选的多天平均明显超过默认值（超过 margin_k 倍标准误），
+    才换成那个候选；否则一直用默认值 EMA_ALPHA_DEFAULT，不做武断切换。
+    """
+    if len(hist) < min_days:
+        return default_alpha, f"仅积累{len(hist)}天(<{min_days}天门槛)，暂用默认α={default_alpha}"
+
+    avgs, ns = {}, {}
+    for a in candidates:
+        vals = [h['scores'].get(str(a)) for h in hist if h['scores'].get(str(a)) is not None]
+        if vals:
+            avgs[a] = sum(vals) / len(vals); ns[a] = len(vals)
+    if not avgs:
+        return default_alpha, "候选评分历史数据不足，暂用默认值"
+
+    best_a = max(avgs, key=avgs.get)
+    best_avg = avgs[best_a]
+    default_avg = avgs.get(default_alpha, best_avg)
+    n_days = ns.get(best_a, len(hist))
+    se_avg = se_per_day / max(n_days, 1) ** 0.5
+    gap = best_avg - default_avg
+
+    _detail = "  ".join(f"α={a}:{avgs[a]:.4f}" for a in candidates if a in avgs)
+    if best_a != default_alpha and gap > margin_k * se_avg:
+        return best_a, (f"候选α={best_a} 累计{n_days}天平均{best_avg:.4f} 显著优于默认"
+                        f"(差距{gap:+.4f} > {margin_k}倍标准误{se_avg:.4f})  [{_detail}]")
+    return default_alpha, (f"候选间差异未达显著水平(需要差距>{margin_k}倍标准误{se_avg:.4f})，"
+                           f"保持默认α={default_alpha}  [{_detail}]")
+
+
+def blend_state_dicts(old_sd, new_sd, alpha):
+    """
+    按 alpha 比例把 new_sd 混入 old_sd，返回混合后的 state_dict（EMA滑动平均）。
+
+    ── 这是替代"门槛式accept/reject"的防过拟合方法 ──
+    之前的做法：微调结果 vs 微调前基准，赢了整个替换、输了整个丢弃。
+    问题：为了不让1天的数据把模型带偏，把学习率压到30%+严格KL裁剪，
+    结果单日移动幅度小到测不出来；而且"赢了就整个接受"的判断没有
+    显著性门槛，约89%的天数会把纯噪声当成"真提升"整个采纳。
+
+    EMA换了一种思路：不做"行/不行"的二元判断，每天都按固定比例α
+    把当天训练结果混入总权重——单日效果再差，也只占α的权重，
+    结构上不可能把模型带崩；但权重每天都在真实移动，不会被
+    保护参数压到几乎不变。旧的更新影响力随天数指数衰减，
+    真正一致的信号会持续累积，纯噪声则会被后续的天数慢慢稀释掉。
+    """
+    blended = {}
+    for k in old_sd:
+        if old_sd[k].dtype.is_floating_point:
+            blended[k] = alpha * new_sd[k] + (1 - alpha) * old_sd[k]
+        else:
+            blended[k] = new_sd[k]
+    return blended
+
+
 def train_with_early_stop(model, total_steps, eval_fn, label,
                           n_chunks=8, patience=3, reset_timesteps=True, warmup_chunks=0,
                           baseline_is_real=False):
@@ -1248,14 +1348,36 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
-        print("  增量微调（2万步，带防过拟合早停：微调不如微调前就保留原权重）…")
-        model.target_kl = 0.03    # 加载后同样限制单次更新幅度，防止1条新样本把权重带偏
-        for _g in model.policy.optimizer.param_groups:
-            _g['lr'] = _g['lr'] * 0.3   # 微调用更小学习率，降低对极少量新数据的过拟合风险
-        model, _best, _hist = train_with_early_stop(
+        print("  增量微调（2万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
+        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
+        _pre_score = _eval_holdout(model)
+        # 不再刻意压低学习率——EMA混合本身就把单日影响限制在α比例内，
+        # 不需要再靠"调小学习率+严格KL裁剪"把移动量压到几乎测不出来
+        model.target_kl = 0.05
+        # baseline_is_real=False：不把"微调前"当候选基准，只从这次会话
+        # 实际训练出的几段里挑最好的——不管它比昨天好还是差都无所谓，
+        # 因为"要不要接受"这件事已经交给下面的EMA混合处理，
+        # 这里只负责回答"今天训出来的最好版本是什么"
+        model, _session_best, _hist = train_with_early_stop(
             model, 20000, lambda: _eval_holdout(model), '快乐8微调',
             n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
-            baseline_is_real=True)
+            baseline_is_real=False)
+        _new_sd = model.policy.state_dict()
+        # 每个候选α都实测一次holdout评分，记录到历史（不在这里挑，避免用单日噪声选参数）
+        _alpha_scores = {}
+        for _a in EMA_ALPHA_CANDIDATES:
+            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
+            _alpha_scores[_a] = _eval_holdout(model)
+        _alpha_hist = record_alpha_scores('kl8', _alpha_scores)
+        _se_kl8 = math.sqrt(6*0.25*0.75) / max(len(records)-_hold_start, 1) ** 0.5
+        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
+                                                 EMA_ALPHA_DEFAULT, _se_kl8)
+        print(f"    [α自动选择] {_alpha_why}")
+        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
+        model.policy.load_state_dict(_blended_sd)
+        _best = _eval_holdout(model)
+        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
+              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
@@ -1577,14 +1699,29 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
-        print("  增量微调（1.5万步，带防过拟合早停：微调不如微调前就保留原权重）…")
-        model.target_kl = 0.03
-        for _g in model.policy.optimizer.param_groups:
-            _g['lr'] = _g['lr'] * 0.3
-        model, _best, _hist = train_with_early_stop(
+        print("  增量微调（1.5万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
+        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
+        _pre_score = _eval_holdout(model)
+        model.target_kl = 0.05
+        model, _session_best, _hist = train_with_early_stop(
             model, 15000, lambda: _eval_holdout(model), '双色球微调',
             n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
-            baseline_is_real=True)
+            baseline_is_real=False)
+        _new_sd = model.policy.state_dict()
+        _alpha_scores = {}
+        for _a in EMA_ALPHA_CANDIDATES:
+            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
+            _alpha_scores[_a] = _eval_holdout(model)
+        _alpha_hist = record_alpha_scores('ssq', _alpha_scores)
+        _se_ssq = math.sqrt(6*(6/33)*(27/33)) / max(len(records)-_hold_start, 1) ** 0.5
+        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
+                                                 EMA_ALPHA_DEFAULT, _se_ssq)
+        print(f"    [α自动选择] {_alpha_why}")
+        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
+        model.policy.load_state_dict(_blended_sd)
+        _best = _eval_holdout(model)
+        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
+              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
@@ -1822,14 +1959,29 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
-        print("  增量微调（1万步，带防过拟合早停：微调不如微调前就保留原权重）…")
-        model.target_kl = 0.03
-        for _g in model.policy.optimizer.param_groups:
-            _g['lr'] = _g['lr'] * 0.3
-        model, _best, _hist = train_with_early_stop(
+        print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
+        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
+        _pre_score = _eval_holdout(model)
+        model.target_kl = 0.05
+        model, _session_best, _hist = train_with_early_stop(
             model, 10000, lambda: _eval_holdout(model), '3D微调',
             n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
-            baseline_is_real=True)
+            baseline_is_real=False)
+        _new_sd = model.policy.state_dict()
+        _alpha_scores = {}
+        for _a in EMA_ALPHA_CANDIDATES:
+            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
+            _alpha_scores[_a] = _eval_holdout(model)
+        _alpha_hist = record_alpha_scores('3d', _alpha_scores)
+        _se_3d = math.sqrt(3*0.1*0.9) / max(len(records)-_hold_start, 1) ** 0.5
+        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
+                                                 EMA_ALPHA_DEFAULT, _se_3d)
+        print(f"    [α自动选择] {_alpha_why}")
+        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
+        model.policy.load_state_dict(_blended_sd)
+        _best = _eval_holdout(model)
+        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
+              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
