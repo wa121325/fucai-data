@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-11 17:19",
+  "updated_at": "2026-09-11 22:52",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8752,
-      "updated_at": "2026-09-11 17:07",
+      "updated_at": "2026-09-11 22:46",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -20,41 +20,41 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 64.0,
-            "xgb": 66.0,
-            "lgb": 66.0,
-            "ensemble": 66.0,
+            "xgb": 64.0,
+            "lgb": 62.0,
+            "ensemble": 64.0,
             "baseline": 64.0,
-            "lift_over_baseline": 2.0
+            "lift_over_baseline": 0.0
           },
           "feature_importance": [
             {
-              "name": "sm_accel",
-              "score": 0.014
+              "name": "gs10",
+              "score": 0.0226
             },
             {
-              "name": "gs10",
-              "score": 0.0136
+              "name": "bsW",
+              "score": 0.0218
             },
             {
               "name": "ss10",
-              "score": 0.0133
+              "score": 0.0215
             },
             {
-              "name": "bs50",
-              "score": 0.0129
+              "name": "sumtail_std20",
+              "score": 0.0198
             },
             {
-              "name": "ss20",
-              "score": 0.0127
+              "name": "gs20",
+              "score": 0.0197
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 67.1,
+            "confidence": 70.2,
             "probs": {
-              "0": 13.8,
-              "1": 67.1,
-              "2": 19.1
+              "0": 13.6,
+              "1": 70.2,
+              "2": 16.2
             }
           },
           "bt_detail": [
@@ -135,50 +135,50 @@
           "data_used": 8747,
           "backtest_periods": 50,
           "accuracy": {
-            "rf": 40.0,
-            "xgb": 32.0,
-            "lgb": 38.0,
+            "rf": 44.0,
+            "xgb": 40.0,
+            "lgb": 36.0,
             "ensemble": 38.0,
             "baseline": 38.0,
             "lift_over_baseline": 0.0
           },
           "feature_importance": [
             {
-              "name": "tailW",
-              "score": 0.0145
+              "name": "gs20",
+              "score": 0.0208
             },
             {
-              "name": "gsW",
-              "score": 0.0143
+              "name": "gs10",
+              "score": 0.02
             },
             {
               "name": "g_omit_std",
-              "score": 0.0128
+              "score": 0.0199
             },
             {
-              "name": "smW",
-              "score": 0.0126
+              "name": "sumtail_std20",
+              "score": 0.0191
             },
             {
-              "name": "odd_dev_ratio",
-              "score": 0.0125
+              "name": "ssW",
+              "score": 0.0187
             }
           ],
           "prediction": {
-            "value": 1,
-            "confidence": 43.8,
+            "value": 2,
+            "confidence": 42.5,
             "probs": {
-              "0": 10.9,
-              "1": 43.8,
-              "2": 37.6,
-              "3": 7.7
+              "0": 13.4,
+              "1": 37.1,
+              "2": 42.5,
+              "3": 7.0
             }
           },
           "bt_detail": [
             {
               "true": 2,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -186,41 +186,41 @@
               "true": 1,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 1
             },
             {
               "true": 1,
               "pred_rf": 1,
-              "pred_xgb": 2,
-              "pred_lgb": 1,
+              "pred_xgb": 1,
+              "pred_lgb": 2,
               "hit": 1
             },
             {
               "true": 2,
-              "pred_rf": 1,
+              "pred_rf": 2,
               "pred_xgb": 1,
               "pred_lgb": 2,
-              "hit": 0
+              "hit": 1
             },
             {
               "true": 0,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 0
             },
             {
               "true": 2,
-              "pred_rf": 1,
+              "pred_rf": 2,
               "pred_xgb": 1,
-              "pred_lgb": 1,
-              "hit": 0
+              "pred_lgb": 2,
+              "hit": 1
             },
             {
               "true": 0,
               "pred_rf": 2,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -234,16 +234,16 @@
             {
               "true": 2,
               "pred_rf": 2,
-              "pred_xgb": 1,
-              "pred_lgb": 1,
+              "pred_xgb": 2,
+              "pred_lgb": 2,
               "hit": 1
             },
             {
               "true": 1,
-              "pred_rf": 1,
+              "pred_rf": 2,
               "pred_xgb": 2,
               "pred_lgb": 2,
-              "hit": 1
+              "hit": 0
             }
           ]
         },
@@ -261,33 +261,33 @@
           },
           "feature_importance": [
             {
-              "name": "bs50",
-              "score": 0.0155
+              "name": "bsW",
+              "score": 0.0238
             },
             {
-              "name": "sm_accel",
-              "score": 0.0136
+              "name": "ss20",
+              "score": 0.0198
             },
             {
-              "name": "gbsW",
-              "score": 0.0134
+              "name": "smW",
+              "score": 0.0198
             },
             {
-              "name": "gmW",
-              "score": 0.0131
+              "name": "ss5",
+              "score": 0.0195
             },
             {
               "name": "g_omit_std",
-              "score": 0.0129
+              "score": 0.0193
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 81.7,
+            "confidence": 82.9,
             "probs": {
-              "0": 0.5,
-              "1": 17.9,
-              "2": 81.7
+              "0": 0.7,
+              "1": 16.4,
+              "2": 82.9
             }
           },
           "bt_detail": [
@@ -368,43 +368,43 @@
           "data_used": 8747,
           "backtest_periods": 50,
           "accuracy": {
-            "rf": 24.0,
-            "xgb": 38.0,
+            "rf": 22.0,
+            "xgb": 32.0,
             "lgb": 36.0,
-            "ensemble": 40.0,
+            "ensemble": 32.0,
             "baseline": 40.0,
-            "lift_over_baseline": 0.0
+            "lift_over_baseline": -8.0
           },
           "feature_importance": [
             {
               "name": "ssW",
-              "score": 0.0135
+              "score": 0.0198
             },
             {
-              "name": "gs100",
-              "score": 0.0132
+              "name": "bmW",
+              "score": 0.0189
             },
             {
-              "name": "sumtail_std20",
-              "score": 0.0132
+              "name": "gs10",
+              "score": 0.0189
             },
             {
-              "name": "sm_accel",
-              "score": 0.013
+              "name": "g_omit_std",
+              "score": 0.0189
             },
             {
-              "name": "sm_dev_mid",
-              "score": 0.0128
+              "name": "bsW",
+              "score": 0.0188
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 49.5,
+            "confidence": 50.6,
             "probs": {
-              "0": 10.4,
-              "1": 28.6,
-              "2": 49.5,
-              "3": 11.4
+              "0": 8.0,
+              "1": 28.9,
+              "2": 50.6,
+              "3": 12.5
             }
           },
           "bt_detail": [
@@ -417,10 +417,10 @@
             },
             {
               "true": 1,
-              "pred_rf": 1,
-              "pred_xgb": 2,
+              "pred_rf": 2,
+              "pred_xgb": 1,
               "pred_lgb": 1,
-              "hit": 1
+              "hit": 0
             },
             {
               "true": 2,
@@ -433,7 +433,7 @@
               "true": 3,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 1,
+              "pred_lgb": 3,
               "hit": 0
             },
             {
@@ -486,41 +486,41 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 36.0,
-            "xgb": 24.0,
-            "lgb": 32.0,
-            "ensemble": 26.0,
+            "xgb": 36.0,
+            "lgb": 30.0,
+            "ensemble": 32.0,
             "baseline": 36.0,
-            "lift_over_baseline": -10.0
+            "lift_over_baseline": -4.0
           },
           "feature_importance": [
             {
               "name": "sumtail_std20",
-              "score": 0.0138
+              "score": 0.0204
             },
             {
-              "name": "ssW",
-              "score": 0.0135
-            },
-            {
-              "name": "bs20",
-              "score": 0.013
-            },
-            {
-              "name": "sm_dev_ratio",
-              "score": 0.013
+              "name": "ss10",
+              "score": 0.0203
             },
             {
               "name": "gs10",
-              "score": 0.0121
+              "score": 0.0199
+            },
+            {
+              "name": "gsW",
+              "score": 0.0193
+            },
+            {
+              "name": "gs20",
+              "score": 0.0189
             }
           ],
           "prediction": {
-            "value": 1,
-            "confidence": 38.7,
+            "value": 2,
+            "confidence": 41.2,
             "probs": {
-              "0": 30.1,
-              "1": 38.7,
-              "2": 31.2
+              "0": 23.8,
+              "1": 35.0,
+              "2": 41.2
             }
           },
           "bt_detail": [
@@ -576,7 +576,7 @@
             {
               "true": 0,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -603,39 +603,39 @@
           "accuracy": {
             "rf": 52.0,
             "xgb": 52.0,
-            "lgb": 50.0,
+            "lgb": 48.0,
             "ensemble": 52.0,
             "baseline": 52.0,
             "lift_over_baseline": 0.0
           },
           "feature_importance": [
             {
-              "name": "gm100",
-              "score": 0.0155
+              "name": "ssW",
+              "score": 0.0223
+            },
+            {
+              "name": "gsgW",
+              "score": 0.0206
             },
             {
               "name": "sumtail_std20",
-              "score": 0.0141
+              "score": 0.0204
             },
             {
-              "name": "ss50",
-              "score": 0.014
+              "name": "ss10",
+              "score": 0.02
             },
             {
-              "name": "bs5",
-              "score": 0.0139
-            },
-            {
-              "name": "odd_dev_long",
-              "score": 0.0136
+              "name": "smW",
+              "score": 0.0194
             }
           ],
           "prediction": {
             "value": 0,
-            "confidence": 66.7,
+            "confidence": 67.4,
             "probs": {
-              "0": 66.7,
-              "1": 14.0,
+              "0": 67.4,
+              "1": 13.3,
               "2": 19.2
             }
           },
@@ -726,32 +726,32 @@
           },
           "feature_importance": [
             {
-              "name": "big100",
-              "score": 0.0167
+              "name": "bmW",
+              "score": 0.0241
             },
             {
-              "name": "sm_dev_ratio",
-              "score": 0.0166
+              "name": "gs10",
+              "score": 0.023
             },
             {
-              "name": "gs50",
-              "score": 0.0165
+              "name": "gsW",
+              "score": 0.0228
             },
             {
-              "name": "gsg100",
-              "score": 0.016
+              "name": "sm20",
+              "score": 0.0209
             },
             {
-              "name": "sm_accel",
-              "score": 0.0153
+              "name": "gm10",
+              "score": 0.0207
             }
           ],
           "prediction": {
             "value": 0,
-            "confidence": 85.9,
+            "confidence": 88.1,
             "probs": {
-              "0": 85.9,
-              "1": 14.1
+              "0": 88.1,
+              "1": 11.9
             }
           },
           "bt_detail": [
@@ -831,34 +831,34 @@
       "recommendation": {
         "groups": [
           [
-            6,
-            8,
-            3
+            9,
+            1,
+            6
           ],
           [
-            2,
-            6,
+            9,
+            0,
             7
+          ],
+          [
+            9,
+            5,
+            0
+          ],
+          [
+            0,
+            5,
+            7
+          ],
+          [
+            7,
+            6,
+            3
           ],
           [
             5,
             6,
-            0
-          ],
-          [
-            9,
-            8,
-            0
-          ],
-          [
-            9,
-            2,
-            6
-          ],
-          [
-            0,
-            8,
-            7
+            3
           ]
         ],
         "pos_candidates": [
@@ -908,26 +908,26 @@
           "group_bet": {
             "name": "组选类型",
             "pred": "组六",
-            "confidence": 81.7,
+            "confidence": 82.9,
             "suggest": "建议投注：组选6"
           },
           "sum_big_small": {
             "name": "和值大小",
             "pred": "大",
-            "confidence": 52.6,
-            "suggest": "建议投注：和值大（估计概率52.6%）"
+            "confidence": 51.3,
+            "suggest": "建议投注：和值大（估计概率51.3%）"
           },
           "sum_odd_even": {
             "name": "和值奇偶",
-            "pred": "奇",
-            "confidence": 43.8,
-            "suggest": "建议投注：和值奇（由奇数个数预测=1推算，数学恒等关系，非独立预测）"
+            "pred": "偶",
+            "confidence": 42.5,
+            "suggest": "建议投注：和值偶（由奇数个数预测=2推算，数学恒等关系，非独立预测）"
           },
           "span_bet": {
             "name": "跨度",
-            "pred": "中跨度(4-6)",
-            "confidence": 38.7,
-            "suggest": "建议投注：中跨度(4-6)"
+            "pred": "大跨度(7-9)",
+            "confidence": 41.2,
+            "suggest": "建议投注：大跨度(7-9)"
           }
         },
         "note": "综合ML概率+马尔可夫转移+遗漏分析三路投票，预测下一期特征生成参考号码，仅供娱乐。"
@@ -964,41 +964,41 @@
         "sum_pred": "中(10-17)",
         "recommend_groups": [
           [
-            6,
-            8,
-            3
+            9,
+            1,
+            6
           ],
           [
-            2,
-            6,
+            9,
+            0,
             7
+          ],
+          [
+            9,
+            5,
+            0
+          ],
+          [
+            0,
+            5,
+            7
+          ],
+          [
+            7,
+            6,
+            3
           ],
           [
             5,
             6,
-            0
-          ],
-          [
-            9,
-            8,
-            0
-          ],
-          [
-            9,
-            2,
-            6
-          ],
-          [
-            0,
-            8,
-            7
+            3
           ]
         ]
       }
     },
     "ssq": {
       "data_count": 3502,
-      "updated_at": "2026-09-11 17:11",
+      "updated_at": "2026-09-11 22:48",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -1006,45 +1006,45 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 22.0,
-            "xgb": 18.0,
-            "lgb": 24.0,
+            "xgb": 22.0,
+            "lgb": 18.0,
             "ensemble": 24.0,
             "baseline": 22.0,
             "lift_over_baseline": 2.0
           },
           "feature_importance": [
             {
-              "name": "bl_std50",
-              "score": 0.0148
+              "name": "b_omit_std",
+              "score": 0.0179
+            },
+            {
+              "name": "bl_stdW",
+              "score": 0.0176
+            },
+            {
+              "name": "r_omit_std",
+              "score": 0.0162
+            },
+            {
+              "name": "r_last_draw_omit_mean",
+              "score": 0.0158
             },
             {
               "name": "sm_std10",
-              "score": 0.0138
-            },
-            {
-              "name": "b_omit_std",
-              "score": 0.0137
-            },
-            {
-              "name": "b_last_draw_omit_mean",
-              "score": 0.0128
-            },
-            {
-              "name": "sm_mean100",
-              "score": 0.0124
+              "score": 0.0156
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 45.2,
+            "confidence": 43.7,
             "probs": {
               "0": 0.3,
-              "1": 3.2,
-              "2": 45.2,
-              "3": 22.5,
-              "4": 24.8,
-              "5": 3.7,
-              "6": 0.4
+              "1": 4.0,
+              "2": 43.7,
+              "3": 27.3,
+              "4": 20.0,
+              "5": 4.2,
+              "6": 0.6
             }
           },
           "bt_detail": [
@@ -1079,43 +1079,43 @@
             {
               "true": 4,
               "pred_rf": 3,
-              "pred_xgb": 4,
-              "pred_lgb": 4,
+              "pred_xgb": 3,
+              "pred_lgb": 2,
               "hit": 0
             },
             {
               "true": 3,
               "pred_rf": 3,
-              "pred_xgb": 4,
-              "pred_lgb": 3,
+              "pred_xgb": 3,
+              "pred_lgb": 4,
               "hit": 1
             },
             {
               "true": 3,
               "pred_rf": 3,
-              "pred_xgb": 4,
-              "pred_lgb": 2,
+              "pred_xgb": 3,
+              "pred_lgb": 4,
               "hit": 1
             },
             {
               "true": 2,
               "pred_rf": 3,
               "pred_xgb": 3,
-              "pred_lgb": 3,
+              "pred_lgb": 4,
               "hit": 0
             },
             {
               "true": 4,
               "pred_rf": 3,
               "pred_xgb": 3,
-              "pred_lgb": 2,
+              "pred_lgb": 3,
               "hit": 0
             },
             {
               "true": 2,
               "pred_rf": 3,
               "pred_xgb": 4,
-              "pred_lgb": 4,
+              "pred_lgb": 3,
               "hit": 0
             }
           ]
@@ -1126,41 +1126,41 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 54.0,
-            "xgb": 60.0,
-            "lgb": 56.0,
-            "ensemble": 58.0,
+            "xgb": 54.0,
+            "lgb": 46.0,
+            "ensemble": 50.0,
             "baseline": 54.0,
-            "lift_over_baseline": 4.0
+            "lift_over_baseline": -4.0
           },
           "feature_importance": [
             {
               "name": "sm_mean5",
-              "score": 0.02
+              "score": 0.0224
             },
             {
               "name": "sm_std3",
-              "score": 0.0182
-            },
-            {
-              "name": "sm_mean3",
-              "score": 0.0176
+              "score": 0.0195
             },
             {
               "name": "ac_std10",
-              "score": 0.0135
+              "score": 0.0195
             },
             {
               "name": "sm_std5",
-              "score": 0.0126
+              "score": 0.0184
+            },
+            {
+              "name": "sm_mean3",
+              "score": 0.0179
             }
           ],
           "prediction": {
-            "value": 2,
-            "confidence": 52.3,
+            "value": 1,
+            "confidence": 49.1,
             "probs": {
-              "0": 4.1,
-              "1": 43.6,
-              "2": 52.3
+              "0": 5.0,
+              "1": 49.1,
+              "2": 46.0
             }
           },
           "bt_detail": [
@@ -1202,14 +1202,14 @@
             {
               "true": 1,
               "pred_rf": 2,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 0
             },
             {
               "true": 1,
               "pred_rf": 2,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 0
             },
@@ -1250,24 +1250,24 @@
           },
           "feature_importance": [
             {
-              "name": "bl_std50",
-              "score": 0.0153
+              "name": "bl_stdW",
+              "score": 0.0195
             },
             {
-              "name": "sm_stdW",
-              "score": 0.0151
+              "name": "sm_std5",
+              "score": 0.0195
             },
             {
               "name": "sm_std20",
-              "score": 0.0146
+              "score": 0.0187
             },
             {
-              "name": "ac_stdW",
-              "score": 0.0145
+              "name": "sm_std3",
+              "score": 0.0185
             },
             {
               "name": "r_omit_mean",
-              "score": 0.0144
+              "score": 0.0179
             }
           ],
           "prediction": {
@@ -1275,7 +1275,7 @@
             "confidence": 92.9,
             "probs": {
               "0": 0.1,
-              "1": 7.0,
+              "1": 7.1,
               "2": 92.9
             }
           },
@@ -1358,41 +1358,41 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 44.0,
-            "xgb": 36.0,
-            "lgb": 36.0,
-            "ensemble": 38.0,
+            "xgb": 38.0,
+            "lgb": 34.0,
+            "ensemble": 36.0,
             "baseline": 44.0,
-            "lift_over_baseline": -6.0
+            "lift_over_baseline": -8.0
           },
           "feature_importance": [
             {
               "name": "sm_mean5",
-              "score": 0.0177
+              "score": 0.0213
             },
             {
-              "name": "sm_std3",
-              "score": 0.0136
+              "name": "bl_std5",
+              "score": 0.0185
             },
             {
               "name": "sm_mean10",
-              "score": 0.0129
+              "score": 0.0172
             },
             {
-              "name": "sm_stdW",
-              "score": 0.0129
+              "name": "bl_stdW",
+              "score": 0.0156
             },
             {
-              "name": "sm_std5",
-              "score": 0.0124
+              "name": "sm_std20",
+              "score": 0.0155
             }
           ],
           "prediction": {
             "value": 0,
-            "confidence": 42.5,
+            "confidence": 52.6,
             "probs": {
-              "0": 42.5,
-              "1": 35.7,
-              "2": 21.7
+              "0": 52.6,
+              "1": 26.3,
+              "2": 21.1
             }
           },
           "bt_detail": [
@@ -1400,7 +1400,7 @@
               "true": 0,
               "pred_rf": 0,
               "pred_xgb": 0,
-              "pred_lgb": 0,
+              "pred_lgb": 2,
               "hit": 1
             },
             {
@@ -1441,15 +1441,15 @@
             {
               "true": 0,
               "pred_rf": 0,
-              "pred_xgb": 0,
-              "pred_lgb": 0,
+              "pred_xgb": 2,
+              "pred_lgb": 2,
               "hit": 1
             },
             {
               "true": 2,
               "pred_rf": 0,
-              "pred_xgb": 1,
-              "pred_lgb": 0,
+              "pred_xgb": 0,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
@@ -1473,42 +1473,42 @@
           "data_used": 3497,
           "backtest_periods": 50,
           "accuracy": {
-            "rf": 46.0,
-            "xgb": 46.0,
-            "lgb": 60.0,
-            "ensemble": 50.0,
+            "rf": 44.0,
+            "xgb": 58.0,
+            "lgb": 48.0,
+            "ensemble": 52.0,
             "baseline": 42.0,
-            "lift_over_baseline": 8.0
+            "lift_over_baseline": 10.0
           },
           "feature_importance": [
             {
               "name": "bl_std10",
-              "score": 0.0156
+              "score": 0.0199
             },
             {
               "name": "sm_mean10",
-              "score": 0.0131
+              "score": 0.0188
             },
             {
-              "name": "ac_std10",
-              "score": 0.0129
+              "name": "bl_mean20",
+              "score": 0.0185
             },
             {
-              "name": "b_omit_mean",
-              "score": 0.0126
+              "name": "sm_stdW",
+              "score": 0.0171
             },
             {
-              "name": "sm_std5",
-              "score": 0.0126
+              "name": "sm_std10",
+              "score": 0.0161
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 73.4,
+            "confidence": 70.3,
             "probs": {
-              "0": 2.3,
-              "1": 73.4,
-              "2": 24.3
+              "0": 2.2,
+              "1": 70.3,
+              "2": 27.5
             }
           },
           "bt_detail": [
@@ -1516,7 +1516,7 @@
               "true": 2,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
@@ -1536,21 +1536,21 @@
             {
               "true": 2,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 0
             },
             {
               "true": 1,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 1
             },
             {
               "true": 2,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 0
             },
@@ -1564,14 +1564,14 @@
             {
               "true": 1,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 2,
               "hit": 1
             },
             {
               "true": 2,
               "pred_rf": 1,
-              "pred_xgb": 1,
+              "pred_xgb": 2,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -1590,45 +1590,45 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 38.0,
-            "xgb": 32.0,
-            "lgb": 26.0,
-            "ensemble": 30.0,
+            "xgb": 34.0,
+            "lgb": 34.0,
+            "ensemble": 34.0,
             "baseline": 38.0,
-            "lift_over_baseline": -8.0
+            "lift_over_baseline": -4.0
           },
           "feature_importance": [
             {
-              "name": "bl_std5",
-              "score": 0.0129
+              "name": "sm_mean10",
+              "score": 0.0182
             },
             {
-              "name": "sm_std3",
-              "score": 0.0127
+              "name": "sm_std10",
+              "score": 0.0171
             },
             {
-              "name": "sm_std5",
-              "score": 0.0123
+              "name": "bl_std20",
+              "score": 0.0164
             },
             {
-              "name": "bl_std10",
-              "score": 0.0122
+              "name": "b_omit_std",
+              "score": 0.0164
             },
             {
-              "name": "sm_mean5",
-              "score": 0.012
+              "name": "r_omit_std",
+              "score": 0.016
             }
           ],
           "prediction": {
             "value": 3,
-            "confidence": 30.3,
+            "confidence": 34.6,
             "probs": {
               "0": 0.3,
-              "1": 22.3,
-              "2": 19.0,
-              "3": 30.3,
-              "4": 22.0,
-              "5": 5.5,
-              "6": 0.5
+              "1": 8.9,
+              "2": 24.2,
+              "3": 34.6,
+              "4": 23.6,
+              "5": 8.1,
+              "6": 0.4
             }
           },
           "bt_detail": [
@@ -1636,7 +1636,7 @@
               "true": 3,
               "pred_rf": 3,
               "pred_xgb": 4,
-              "pred_lgb": 4,
+              "pred_lgb": 3,
               "hit": 1
             },
             {
@@ -1663,7 +1663,7 @@
             {
               "true": 2,
               "pred_rf": 3,
-              "pred_xgb": 2,
+              "pred_xgb": 3,
               "pred_lgb": 2,
               "hit": 0
             },
@@ -1671,7 +1671,7 @@
               "true": 2,
               "pred_rf": 3,
               "pred_xgb": 3,
-              "pred_lgb": 2,
+              "pred_lgb": 4,
               "hit": 0
             },
             {
@@ -1684,8 +1684,8 @@
             {
               "true": 4,
               "pred_rf": 3,
-              "pred_xgb": 4,
-              "pred_lgb": 4,
+              "pred_xgb": 2,
+              "pred_lgb": 2,
               "hit": 0
             },
             {
@@ -1710,43 +1710,43 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 62.0,
-            "xgb": 52.0,
-            "lgb": 54.0,
-            "ensemble": 58.0,
+            "xgb": 68.0,
+            "lgb": 52.0,
+            "ensemble": 66.0,
             "baseline": 62.0,
-            "lift_over_baseline": -4.0
+            "lift_over_baseline": 4.0
           },
           "feature_importance": [
             {
-              "name": "sm_std50",
-              "score": 0.0147
+              "name": "sm_stdW",
+              "score": 0.0201
             },
             {
               "name": "sm_mean5",
-              "score": 0.0138
+              "score": 0.0172
             },
             {
               "name": "sm_std3",
-              "score": 0.0133
-            },
-            {
-              "name": "b_last_draw_omit_mean",
-              "score": 0.0131
+              "score": 0.017
             },
             {
               "name": "bl_std10",
-              "score": 0.0129
+              "score": 0.0163
+            },
+            {
+              "name": "bl_stdW",
+              "score": 0.0162
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 55.2,
+            "confidence": 56.9,
             "probs": {
-              "0": 19.5,
-              "1": 55.2,
-              "2": 21.3,
-              "3": 3.9,
-              "4": 0.0
+              "0": 29.2,
+              "1": 56.9,
+              "2": 11.6,
+              "3": 2.2,
+              "4": 0.1
             }
           },
           "bt_detail": [
@@ -1754,14 +1754,14 @@
               "true": 0,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 1,
+              "pred_lgb": 0,
               "hit": 0
             },
             {
               "true": 1,
               "pred_rf": 1,
-              "pred_xgb": 0,
-              "pred_lgb": 1,
+              "pred_xgb": 1,
+              "pred_lgb": 0,
               "hit": 1
             },
             {
@@ -1774,21 +1774,21 @@
             {
               "true": 1,
               "pred_rf": 1,
-              "pred_xgb": 0,
-              "pred_lgb": 1,
+              "pred_xgb": 1,
+              "pred_lgb": 0,
               "hit": 1
             },
             {
               "true": 1,
               "pred_rf": 1,
-              "pred_xgb": 0,
+              "pred_xgb": 1,
               "pred_lgb": 0,
               "hit": 1
             },
             {
               "true": 3,
               "pred_rf": 1,
-              "pred_xgb": 0,
+              "pred_xgb": 1,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -1817,7 +1817,7 @@
               "true": 2,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 1,
+              "pred_lgb": 0,
               "hit": 0
             }
           ]
@@ -1828,66 +1828,66 @@
           {
             "red": [
               4,
-              11,
+              7,
+              14,
               16,
-              22,
-              23,
-              24
+              24,
+              25
             ],
             "blue": 4
           },
           {
             "red": [
-              1,
               4,
-              6,
               7,
+              8,
               14,
-              24
+              16,
+              23
             ],
             "blue": 2
           },
           {
             "red": [
-              1,
               5,
-              6,
+              8,
               16,
               18,
-              24
+              22,
+              23
             ],
             "blue": 5
           },
           {
             "red": [
               4,
-              7,
-              9,
-              10,
-              14,
-              22
+              5,
+              8,
+              18,
+              22,
+              23
             ],
             "blue": 6
           },
           {
             "red": [
-              4,
-              11,
+              9,
+              10,
+              14,
+              16,
               18,
-              22,
-              23,
-              24
+              25
             ],
             "blue": 3
           },
           {
             "red": [
-              6,
-              9,
-              13,
+              4,
+              7,
+              8,
               14,
-              16,
-              22
+              24,
+              25
             ],
             "blue": 4
           }
@@ -1916,7 +1916,7 @@
         "overdue_red": [],
         "overdue_blue": [],
         "odd_pred": 2,
-        "sum_pred": "高(≥100)",
+        "sum_pred": "中(70-99)",
         "note": "综合ML预测+遗漏分析+三区均衡选号，按奇偶/和值约束生成6注参考，仅供娱乐。"
       },
       "ai_context": {
@@ -1933,7 +1933,7 @@
         "overdue_red": [],
         "overdue_blue": [],
         "odd_pred": 2,
-        "sum_pred": "高(≥100)",
+        "sum_pred": "中(70-99)",
         "ac_pred": "高(≥6)",
         "red_zone_dom_pred": "一区(1-11)",
         "max_gap_pred": "中(6-10)"
@@ -1941,7 +1941,7 @@
     },
     "kl8": {
       "data_count": 2065,
-      "updated_at": "2026-09-11 17:16",
+      "updated_at": "2026-09-11 22:50",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -1949,41 +1949,41 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 64.0,
-            "xgb": 66.0,
-            "lgb": 68.0,
-            "ensemble": 66.0,
+            "xgb": 64.0,
+            "lgb": 66.0,
+            "ensemble": 64.0,
             "baseline": 64.0,
-            "lift_over_baseline": 2.0
+            "lift_over_baseline": 0.0
           },
           "feature_importance": [
             {
-              "name": "prev_heat_rate",
-              "score": 0.0119
-            },
-            {
               "name": "mx10",
-              "score": 0.0111
+              "score": 0.0179
             },
             {
               "name": "ts3",
-              "score": 0.0109
+              "score": 0.0175
             },
             {
-              "name": "gap_std20",
-              "score": 0.0102
+              "name": "ts20",
+              "score": 0.017
             },
             {
-              "name": "odd_dev_long",
-              "score": 0.01
+              "name": "n_omit_mean",
+              "score": 0.0168
+            },
+            {
+              "name": "ts10",
+              "score": 0.0167
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 56.6,
+            "confidence": 47.0,
             "probs": {
-              "0": 15.9,
-              "1": 56.6,
-              "2": 27.5
+              "0": 14.5,
+              "1": 47.0,
+              "2": 38.5
             }
           },
           "bt_detail": [
@@ -2054,7 +2054,7 @@
               "true": 2,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 0
             }
           ]
@@ -2065,8 +2065,8 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 36.0,
-            "xgb": 36.0,
-            "lgb": 28.0,
+            "xgb": 30.0,
+            "lgb": 30.0,
             "ensemble": 38.0,
             "baseline": 38.0,
             "lift_over_baseline": 0.0
@@ -2074,46 +2074,46 @@
           "feature_importance": [
             {
               "name": "ts3",
-              "score": 0.0123
+              "score": 0.0196
             },
             {
-              "name": "gap_std20",
-              "score": 0.0114
-            },
-            {
-              "name": "ts10",
-              "score": 0.011
-            },
-            {
-              "name": "tm3",
-              "score": 0.01
+              "name": "tm10",
+              "score": 0.0177
             },
             {
               "name": "ts5",
-              "score": 0.0098
+              "score": 0.016
+            },
+            {
+              "name": "tm5",
+              "score": 0.0159
+            },
+            {
+              "name": "tsW",
+              "score": 0.0153
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 35.6,
+            "confidence": 38.8,
             "probs": {
-              "0": 32.1,
-              "1": 35.6,
-              "2": 15.3,
-              "3": 17.0
+              "0": 22.2,
+              "1": 38.8,
+              "2": 14.3,
+              "3": 24.8
             }
           },
           "bt_detail": [
             {
               "true": 3,
-              "pred_rf": 0,
+              "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
               "true": 3,
-              "pred_rf": 0,
+              "pred_rf": 1,
               "pred_xgb": 1,
               "pred_lgb": 1,
               "hit": 0
@@ -2122,7 +2122,7 @@
               "true": 0,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
@@ -2141,22 +2141,22 @@
             },
             {
               "true": 1,
-              "pred_rf": 0,
-              "pred_xgb": 3,
-              "pred_lgb": 2,
-              "hit": 0
+              "pred_rf": 1,
+              "pred_xgb": 1,
+              "pred_lgb": 1,
+              "hit": 1
             },
             {
               "true": 0,
               "pred_rf": 0,
-              "pred_xgb": 3,
-              "pred_lgb": 2,
+              "pred_xgb": 1,
+              "pred_lgb": 3,
               "hit": 1
             },
             {
               "true": 2,
               "pred_rf": 0,
-              "pred_xgb": 2,
+              "pred_xgb": 1,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -2164,13 +2164,13 @@
               "true": 3,
               "pred_rf": 0,
               "pred_xgb": 0,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
               "true": 3,
-              "pred_rf": 2,
-              "pred_xgb": 1,
+              "pred_rf": 0,
+              "pred_xgb": 0,
               "pred_lgb": 2,
               "hit": 0
             }
@@ -2181,49 +2181,49 @@
           "data_used": 2060,
           "backtest_periods": 50,
           "accuracy": {
-            "rf": 40.0,
-            "xgb": 48.0,
-            "lgb": 40.0,
-            "ensemble": 44.0,
+            "rf": 50.0,
+            "xgb": 50.0,
+            "lgb": 44.0,
+            "ensemble": 46.0,
             "baseline": 58.0,
-            "lift_over_baseline": -14.0
+            "lift_over_baseline": -12.0
           },
           "feature_importance": [
             {
-              "name": "gap_std20",
-              "score": 0.0123
-            },
-            {
               "name": "n_last_draw_omit_mean",
-              "score": 0.0123
-            },
-            {
-              "name": "ts3",
-              "score": 0.0112
+              "score": 0.0174
             },
             {
               "name": "n_omit_std",
-              "score": 0.0108
+              "score": 0.0171
             },
             {
-              "name": "mnW",
-              "score": 0.0108
+              "name": "tm5",
+              "score": 0.0167
+            },
+            {
+              "name": "ts3",
+              "score": 0.0161
+            },
+            {
+              "name": "bigW",
+              "score": 0.0151
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 51.8,
+            "confidence": 49.8,
             "probs": {
               "0": 0.6,
-              "1": 47.6,
-              "2": 51.8
+              "1": 49.5,
+              "2": 49.8
             }
           },
           "bt_detail": [
             {
               "true": 2,
               "pred_rf": 1,
-              "pred_xgb": 2,
+              "pred_xgb": 1,
               "pred_lgb": 1,
               "hit": 0
             },
@@ -2245,7 +2245,7 @@
               "true": 1,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
+              "pred_lgb": 1,
               "hit": 1
             },
             {
@@ -2298,41 +2298,41 @@
           "backtest_periods": 50,
           "accuracy": {
             "rf": 58.0,
-            "xgb": 54.0,
-            "lgb": 50.0,
-            "ensemble": 56.0,
+            "xgb": 50.0,
+            "lgb": 38.0,
+            "ensemble": 52.0,
             "baseline": 58.0,
-            "lift_over_baseline": -2.0
+            "lift_over_baseline": -6.0
           },
           "feature_importance": [
             {
-              "name": "ts5",
-              "score": 0.0109
-            },
-            {
-              "name": "odd_dev_ratio",
-              "score": 0.0105
-            },
-            {
               "name": "n_omit_std",
-              "score": 0.0102
+              "score": 0.0193
             },
             {
-              "name": "odd_dev_mid",
-              "score": 0.0101
+              "name": "road0_mean20",
+              "score": 0.0168
             },
             {
-              "name": "ts100",
-              "score": 0.0101
+              "name": "ts20",
+              "score": 0.0167
+            },
+            {
+              "name": "sumtail_mean20",
+              "score": 0.0159
+            },
+            {
+              "name": "ts5",
+              "score": 0.0158
             }
           ],
           "prediction": {
             "value": 1,
-            "confidence": 47.0,
+            "confidence": 55.8,
             "probs": {
-              "0": 15.4,
-              "1": 47.0,
-              "2": 37.6
+              "0": 16.7,
+              "1": 55.8,
+              "2": 27.5
             }
           },
           "bt_detail": [
@@ -2413,50 +2413,50 @@
           "data_used": 2060,
           "backtest_periods": 50,
           "accuracy": {
-            "rf": 28.0,
-            "xgb": 18.0,
-            "lgb": 24.0,
-            "ensemble": 26.0,
+            "rf": 34.0,
+            "xgb": 28.0,
+            "lgb": 22.0,
+            "ensemble": 30.0,
             "baseline": 36.0,
-            "lift_over_baseline": -10.0
+            "lift_over_baseline": -6.0
           },
           "feature_importance": [
             {
               "name": "ts3",
-              "score": 0.0141
-            },
-            {
-              "name": "tm100",
-              "score": 0.0111
-            },
-            {
-              "name": "heat_rate_std",
-              "score": 0.0104
+              "score": 0.0198
             },
             {
               "name": "ts20",
-              "score": 0.0103
+              "score": 0.017
             },
             {
-              "name": "tm10",
-              "score": 0.0102
+              "name": "tmW",
+              "score": 0.0167
+            },
+            {
+              "name": "tm5",
+              "score": 0.016
+            },
+            {
+              "name": "n_omit_std",
+              "score": 0.0157
             }
           ],
           "prediction": {
             "value": 0,
-            "confidence": 35.6,
+            "confidence": 38.8,
             "probs": {
-              "0": 35.6,
-              "1": 15.9,
-              "2": 17.3,
-              "3": 25.9,
-              "4": 5.3
+              "0": 38.8,
+              "1": 29.3,
+              "2": 13.0,
+              "3": 13.8,
+              "4": 5.1
             }
           },
           "bt_detail": [
             {
               "true": 3,
-              "pred_rf": 1,
+              "pred_rf": 0,
               "pred_xgb": 3,
               "pred_lgb": 3,
               "hit": 0
@@ -2465,7 +2465,7 @@
               "true": 1,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 1,
+              "pred_lgb": 2,
               "hit": 1
             },
             {
@@ -2479,7 +2479,7 @@
               "true": 0,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 1,
+              "pred_lgb": 2,
               "hit": 0
             },
             {
@@ -2492,36 +2492,36 @@
             {
               "true": 0,
               "pred_rf": 1,
-              "pred_xgb": 2,
-              "pred_lgb": 3,
+              "pred_xgb": 1,
+              "pred_lgb": 1,
+              "hit": 0
+            },
+            {
+              "true": 3,
+              "pred_rf": 0,
+              "pred_xgb": 1,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
               "true": 3,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 2,
-              "hit": 0
-            },
-            {
-              "true": 3,
-              "pred_rf": 1,
-              "pred_xgb": 1,
-              "pred_lgb": 3,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
               "true": 2,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 3,
+              "pred_lgb": 1,
               "hit": 0
             },
             {
               "true": 0,
               "pred_rf": 1,
               "pred_xgb": 1,
-              "pred_lgb": 3,
+              "pred_lgb": 1,
               "hit": 0
             }
           ]
@@ -2540,33 +2540,33 @@
           },
           "feature_importance": [
             {
-              "name": "ts50",
-              "score": 0.0141
+              "name": "tsW",
+              "score": 0.0223
             },
             {
               "name": "n_omit_mean",
-              "score": 0.014
-            },
-            {
-              "name": "odd_dev_long",
-              "score": 0.0137
+              "score": 0.0221
             },
             {
               "name": "n_omit_std",
-              "score": 0.0124
+              "score": 0.0193
+            },
+            {
+              "name": "mx20",
+              "score": 0.0186
             },
             {
               "name": "ts5",
-              "score": 0.0123
+              "score": 0.0179
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 92.2,
+            "confidence": 92.7,
             "probs": {
-              "0": 0.2,
-              "1": 7.7,
-              "2": 92.2
+              "0": 0.1,
+              "1": 7.2,
+              "2": 92.7
             }
           },
           "bt_detail": [
@@ -2656,33 +2656,33 @@
           },
           "feature_importance": [
             {
-              "name": "prev_heat_rate",
-              "score": 0.0154
-            },
-            {
               "name": "mn10",
-              "score": 0.014
-            },
-            {
-              "name": "gap_std20",
-              "score": 0.0138
-            },
-            {
-              "name": "neighbor_mean20",
-              "score": 0.0125
+              "score": 0.0203
             },
             {
               "name": "ts10",
-              "score": 0.0117
+              "score": 0.0195
+            },
+            {
+              "name": "n_omit_std",
+              "score": 0.019
+            },
+            {
+              "name": "ts5",
+              "score": 0.0181
+            },
+            {
+              "name": "n_last_draw_omit_mean",
+              "score": 0.0178
             }
           ],
           "prediction": {
             "value": 2,
-            "confidence": 88.1,
+            "confidence": 79.5,
             "probs": {
-              "0": 0.4,
-              "1": 11.4,
-              "2": 88.1
+              "0": 0.3,
+              "1": 20.3,
+              "2": 79.5
             }
           },
           "bt_detail": [
@@ -2767,22 +2767,22 @@
             "tip": "4球全中，赔率最高",
             "groups": [
               [
-                3,
-                5,
-                24,
-                28
-              ],
-              [
-                5,
-                15,
-                24,
-                28
-              ],
-              [
-                3,
-                14,
                 21,
+                24,
+                28,
+                29
+              ],
+              [
+                5,
+                21,
+                22,
                 24
+              ],
+              [
+                21,
+                22,
+                25,
+                28
               ]
             ]
           },
@@ -2794,23 +2794,23 @@
               [
                 3,
                 5,
-                21,
                 24,
+                29,
+                36
+              ],
+              [
+                3,
+                5,
+                21,
+                29,
                 33
               ],
               [
-                5,
+                3,
                 15,
-                24,
+                27,
                 28,
-                36
-              ],
-              [
-                5,
-                14,
-                21,
-                33,
-                36
+                33
               ]
             ]
           },
@@ -2822,10 +2822,10 @@
               [
                 3,
                 5,
-                15,
                 21,
                 22,
                 24,
+                25,
                 28,
                 36
               ]
@@ -2837,28 +2837,28 @@
             "tip": "6球，主流推荐玩法",
             "groups": [
               [
-                3,
-                5,
-                15,
-                24,
-                28,
-                36
-              ],
-              [
-                5,
-                9,
-                15,
-                24,
-                28,
-                36
-              ],
-              [
-                13,
-                17,
+                19,
                 21,
                 24,
                 28,
+                35,
                 36
+              ],
+              [
+                19,
+                21,
+                24,
+                28,
+                32,
+                35
+              ],
+              [
+                5,
+                17,
+                21,
+                22,
+                24,
+                32
               ]
             ]
           },
@@ -2870,24 +2870,24 @@
               [
                 3,
                 5,
-                6,
-                11,
                 21,
                 22,
                 24,
                 25,
-                37
+                27,
+                28,
+                36
               ],
               [
                 3,
-                5,
-                6,
-                11,
+                13,
+                14,
                 21,
                 22,
                 24,
                 25,
-                28
+                28,
+                36
               ]
             ]
           },
@@ -2897,16 +2897,16 @@
             "tip": "10球，最高赔率",
             "groups": [
               [
-                10,
-                13,
-                17,
+                3,
+                5,
                 21,
                 22,
                 24,
                 25,
+                27,
                 28,
-                36,
-                37
+                30,
+                36
               ]
             ]
           }
@@ -2984,7 +2984,7 @@
     "date": "2026-09-11",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-09-11 14:21",
+        "prediction_generated_at": "2026-09-11 17:07",
         "actual_qihao": "2026244",
         "actual_date": "2026-09-11",
         "actual": [
@@ -2996,7 +2996,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-09-11 14:26",
+        "prediction_generated_at": "2026-09-11 17:11",
         "actual_qihao": "2026105",
         "actual_date": "2026-09-10",
         "actual_red": [
@@ -3037,7 +3037,7 @@
         "best_red_hit": 2
       },
       "kl8": {
-        "prediction_generated_at": "2026-09-11 14:30",
+        "prediction_generated_at": "2026-09-11 17:16",
         "actual_qihao": "2026244",
         "actual_date": "2026-09-11",
         "actual": [
