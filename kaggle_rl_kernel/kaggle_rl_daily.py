@@ -118,6 +118,12 @@ WINDOW = 50; SEQ_LEN = 20
 # 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
 D3_N_BETS = 12
 
+# 生成12注时，实际参与"联合概率最优"搜索的候选池大小。
+# 之前只在每位Top3里选(3×3×3=27种组合)，现在扩大到Top5(5×5×5=125种)，
+# 搜索空间更大，更有机会找到真正联合概率最高的组合——
+# 只是【显示】给人看的候选仍然维持Top3，不受这个影响。
+D3_POOL_N = 5
+
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
 #  补齐之前的空缺：遗漏统计、质合比、012路、和值尾数、重号/邻号、上期号码编码
@@ -2036,11 +2042,17 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             # 模型对第2、3候选的判断就被白白浪费了。
             # 改成"轮转+择优"：前3注让每位的3个候选各当一次主角（保证全部候选都露面），
             # 后3注再从27种组合里按联合概率择优补足。
+            # 每位取Top3候选用于显示；另外单独取一个更宽的候选池(D3_POOL_N)用于组合枚举，
+            # 两者分开：显示给人看的候选数不变，但生成12注时能从更大的空间里挑联合概率最优的。
             p_bai, p_shi, p_ge = pos_probs[0], pos_probs[1], pos_probs[2]
             top3 = []
             for p in (p_bai, p_shi, p_ge):
                 idx3 = np.argsort(p)[::-1][:3]
                 top3.append([(int(d), float(p[d])) for d in idx3])
+            pool_cands = []
+            for p in (p_bai, p_shi, p_ge):
+                idxN = np.argsort(p)[::-1][:D3_POOL_N]
+                pool_cands.append([(int(d), float(p[d])) for d in idxN])
 
             # ML的7条预测(和值/奇数/组型/大数/跨度/012路/斜连)已注入RL状态，
             # 这里在选号环节也做校验，让"这一注整体像不像模型预测的样子"参与排序
@@ -2063,21 +2075,57 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                     _d3_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
 
             picked, seen = [], set()
-            for i in range(3):   # 前3注：各位第i候选组合，确保候选全覆盖
-                c = [top3[0][i][0], top3[1][i][0], top3[2][i][0]]
-                pr = top3[0][i][1] * top3[1][i][1] * top3[2][i][1]
+            for i in range(D3_POOL_N):   # 保证候选池里每位的候选都至少露面一次
+                c = [pool_cands[0][i][0], pool_cands[1][i][0], pool_cands[2][i][0]]
+                pr = pool_cands[0][i][1] * pool_cands[1][i][1] * pool_cands[2][i][1]
                 picked.append((c, pr)); seen.add(tuple(c))
-            # 其余注数：从27种组合(每位Top3的全部组合)里按联合概率从高到低补足
-            all27 = sorted(
+            # 其余注数：从候选池组合(D3_POOL_N^3种)里按联合概率从高到低补足
+            all_combos = sorted(
                 (([b, s, g], pb*ps*pg)
-                 for b, pb in top3[0] for s, ps in top3[1] for g, pg in top3[2]),
+                 for b, pb in pool_cands[0] for s, ps in pool_cands[1] for g, pg in pool_cands[2]),
                 key=lambda x: -x[1])
-            for c, pr in all27:
+            for c, pr in all_combos:
                 if len(picked) >= D3_N_BETS: break
                 if tuple(c) not in seen:
                     picked.append((c, pr)); seen.add(tuple(c))
             picked.sort(key=lambda x: -x[1])
             groups = [c for c, _ in picked]
+
+            # ══════════════════════════════════════════════════════
+            #  【观测区·不参与推荐】按概率分布采样，跟Top3确定性选号做对比
+            #
+            #  Top3逻辑（groups）保持不动，仍然是正式推荐——这里只是并排
+            #  多算一份"如果换成按概率采样会得到什么"，纯展示，不影响任何决策。
+            #
+            #  为什么要对比：Top3是确定性的，只要每位候选和排序不变，
+            #  12注就不变；权重再怎么小幅移动，只要没能把第4名顶到前3，
+            #  外面就看不出变化。采样则是按完整的10个概率值直接抽签，
+            #  哪怕某个数字只有11%对12%的差距，也有机会被抽中，
+            #  更容易反映权重的细微变化。
+            #
+            #  用当天最新一期开奖数字做随机种子：同样的数据必然采出同样的结果
+            #  （可复现），换一期数据种子就变，采样结果也会跟着变。
+            # ══════════════════════════════════════════════════════
+            try:
+                _seed_src = f"{len(records)}-{''.join(map(str, records[-1]['digits']))}"
+                _seed = abs(hash(_seed_src)) % (2**32)
+                _rng = np.random.default_rng(_seed)
+                _sampled, _seen_s, _guard = [], set(), 0
+                while len(_sampled) < D3_N_BETS and _guard < D3_N_BETS * 200:
+                    _guard += 1
+                    _c = [int(_rng.choice(10, p=pos_probs[i])) for i in range(3)]
+                    if tuple(_c) not in _seen_s:
+                        _seen_s.add(tuple(_c)); _sampled.append(_c)
+                _same = len(set(map(tuple, groups)) & set(map(tuple, _sampled)))
+                _dig_det = set(x for g in groups for x in g)
+                _dig_samp = set(x for g in _sampled for x in g)
+                print(f"  [观测·采样对比]（不参与推荐，仅观察）种子来自最新开奖{records[-1]['digits']}")
+                print(f"    采样{len(_sampled)}注: {_sampled}")
+                print(f"    与确定性推荐(Top{D3_POOL_N}候选池择优)重合 {_same}/{D3_N_BETS} 注；"
+                      f"用到的数字 确定性法{len(_dig_det)}个 vs 采样法{len(_dig_samp)}个")
+            except Exception as _e:
+                print(f"  [观测·采样对比] 计算失败: {_e}")
+
             if _d3_conds:
                 _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
                                  if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
@@ -2096,7 +2144,8 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             print(f"  [推荐{len(groups)}注] {groups}")
             print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
             _cov = [len(set(c[i] for c in groups)) for i in range(3)]
-            print(f"    候选覆盖: 百位{_cov[0]}/3  十位{_cov[1]}/3  个位{_cov[2]}/3")
+            print(f"    候选覆盖: 百位{_cov[0]}/{D3_POOL_N}  十位{_cov[1]}/{D3_POOL_N}  个位{_cov[2]}/{D3_POOL_N}"
+                  f"（搜索池大小，显示仍为Top3，见上方[候选]行）")
             # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
             ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
             print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
