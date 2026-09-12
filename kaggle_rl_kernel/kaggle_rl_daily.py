@@ -2003,21 +2003,57 @@ def run_3d_daily(records, ml_pred, prev_result=None):
         om = omit_arr[idx]
         return normalize_state_segments(raw,ml_vec,lh,th,om)
 
-    # 回测最近30期：统计位命中数分布 + 全中次数
+    # 回测最近30期：统计位命中数分布 + 全中次数 + 逐位Top1/2/3命中率
+    # 30这个数字固定小于 holdout_size 的下限80，所以这30期必然落在训练完全没碰过的
+    # 区间里，不会有数据泄漏（但没有直接绑定 _hold_start，属于巧合而非结构保证——
+    # 如果以后 holdout_size 的下限被改小于30，这里就会悄悄开始泄漏且不会报错）。
     start=max(SEQ_LEN+5, len(records)-30); total=0
     match_dist={0:0,1:0,2:0,3:0}
-    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
-    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    # 之前只统计"逐位是否命中"(单一数字对不对)，看不出该位的排序质量——
+    # 比如百位真正开出的数字，模型是把它排第1、第2、第3，还是压根没排进前几名，
+    # 这才是判断"这一位的候选排序有没有价值"的关键，而不是只看Top1对不对。
+    # 命中X位(比如'2位命中1期')也只是计数，不说明是哪两位，
+    # 逐位Top1/2/3命中率才能看出模型是不是在某一位上确实学到了东西。
+    rank_hit = [[0,0,0,0] for _ in range(3)]   # 每位[Top1命中,Top2命中,Top3命中,前3都没中]次数
     for idx in range(start, len(records)):
         state = build_state(idx)
         if state is None: continue
-        action,_ = model.predict(state, deterministic=True)
-        pred=[int(action[0]),int(action[1]),int(action[2])]
         actual=records[idx]['digits']
+        try:
+            _obs, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+            with torch.no_grad():
+                _dist = model.policy.get_distribution(_obs)
+            _pp = [d.probs.detach().cpu().numpy()[0] for d in _dist.distribution]
+            pred = [int(np.argmax(p)) for p in _pp]   # Top1，跟原来deterministic预测等价
+            for i in range(3):
+                _ranked = np.argsort(_pp[i])[::-1]   # 该位10个数字按概率从高到低排序
+                _rank_of_actual = int(np.where(_ranked == actual[i])[0][0])  # 真实数字排第几
+                if _rank_of_actual < 3:
+                    rank_hit[i][_rank_of_actual] += 1
+                else:
+                    rank_hit[i][3] += 1
+        except Exception:
+            action,_ = model.predict(state, deterministic=True)
+            pred=[int(action[0]),int(action[1]),int(action[2])]
         m = sum(1 for i in range(3) if pred[i]==actual[i])
         match_dist[m]+=1; total+=1
     exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
     avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
+    # 逐位Top1/2/3命中率：真实数字被模型排在第1/2/3高概率位置的比例。
+    # Top1命中率≈随机基准10%但Top1+2+3明显超过30%，说明该位候选排序有价值，
+    # 只是没能精确押中第1名；三档都接近对应基准，说明该位大概率是在瞎猜。
+    names3 = ['百位','十位','个位']
+    print(f"  [逐位Top1/2/3命中率]（共{total}期，随机基准: Top1=10% Top1~3合计=30%）")
+    pos_hit_rate = {}
+    for i in range(3):
+        t1, t2, t3, other = rank_hit[i]
+        r1 = round(t1/total*100,1) if total else 0
+        r2 = round(t2/total*100,1) if total else 0
+        r3 = round(t3/total*100,1) if total else 0
+        r123 = round((t1+t2+t3)/total*100,1) if total else 0
+        pos_hit_rate[names3[i]] = {'top1':r1,'top2':r2,'top3':r3,'top1_3_合计':r123}
+        print(f"    {names3[i]}: Top1命中{t1}期({r1}%)  Top2命中{t2}期({r2}%)  "
+              f"Top3命中{t3}期({r3}%)  前3合计{r123}%  （前3之外{other}期）")
 
     # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
     # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
@@ -2168,6 +2204,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
 
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
+            'pos_hit_rate_pct':pos_hit_rate,   # 每位Top1/Top2/Top3命中率明细
             'ppo_pred':pred,'ppo_groups':groups,
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
