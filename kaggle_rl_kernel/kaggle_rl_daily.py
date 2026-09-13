@@ -1257,6 +1257,59 @@ def save_ppo(model, game):
     model.save(f'{RL_LOCAL_DIR}/{game}_ppo')
     print(f"  ✓ PPO模型已保存到本地: {RL_LOCAL_DIR}/{game}_ppo.zip")
 
+def sync_local_with_mounted():
+    """
+    推送前，把【挂载目录（上次版本）里有、但本地工作目录没有】的文件全部补齐。
+
+    ── 为什么必须做这一步 ──
+    push_rl_dataset() 会把本地工作目录的全部内容当作新版本推送到Kaggle，
+    Kaggle的Dataset版本更新是【整体替换】，不是合并——本地目录里没有的文件，
+    这次推送后就会从Dataset里彻底消失。
+
+    如果某个游戏这次跳过了训练（比如手动运行时没有新开奖数据、
+    或双色球恰好不是开奖日），carry_over_result 只会写一个
+    {game}_last_trained_n.json，模型文件根本没进本地工作目录——
+    这时如果直接推送，等于用"更瘦"的本地目录覆盖了Kaggle上原来的完整版本，
+    上次好不容易保存的PPO模型就这样被冲掉了，下次运行读不到模型，
+    只能被迫从头首训。这正是"手动运行→没有新数据→跳过训练→推送→
+    再自动运行时发现模型丢了"这个bug的根因。
+
+    这里在推送前统一补齐：挂载目录有、本地没有的文件都复制过来
+    （包括被Kaggle自动解压出的 xxx_ppo 目录，会重新打包成 xxx_ppo.zip），
+    保证不管这次训没训练、训了哪几个游戏，推送出去的始终是完整的一份，
+    不会遗漏任何游戏已经保存过的内容。
+    """
+    if not os.path.isdir(RL_MOUNTED):
+        return
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    local_files = set(os.listdir(RL_LOCAL_DIR))
+    synced = []
+    for entry in sorted(os.listdir(RL_MOUNTED)):
+        src = os.path.join(RL_MOUNTED, entry)
+        if os.path.isdir(src):
+            # 被Kaggle自动解压的模型目录（如 3d_ppo/），本地若没有对应的.zip就重新打包补上
+            zip_name = entry + '.zip'
+            if zip_name not in local_files:
+                try:
+                    tmp_base = f'/kaggle/working/_sync_{entry}'
+                    zip_path = shutil.make_archive(tmp_base, 'zip', src)
+                    shutil.copy(zip_path, os.path.join(RL_LOCAL_DIR, zip_name))
+                    synced.append(zip_name)
+                except Exception as e:
+                    print(f"    ! 同步{entry}失败: {e}")
+        else:
+            if entry not in local_files and entry != 'dataset-metadata.json':
+                try:
+                    shutil.copy(src, os.path.join(RL_LOCAL_DIR, entry))
+                    synced.append(entry)
+                except Exception as e:
+                    print(f"    ! 同步{entry}失败: {e}")
+    if synced:
+        print(f"  [推送前补齐] 本地缺失、已从挂载目录同步的文件: {synced}")
+    else:
+        print("  [推送前补齐] 本地文件已是完整的，无需从挂载目录同步")
+
+
 def push_rl_dataset():
     """把RL_LOCAL_DIR整体推送到Kaggle Dataset"""
     try:
@@ -2263,7 +2316,18 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
 
 # 推送RL模型到Kaggle Dataset
 print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
-push_rl_dataset()
+# 判断这次是不是"全部游戏都跳过了训练"（比如手动运行、没有任何新开奖数据）。
+# carry_over_result 会在结果里标 skipped=True；只要有一个游戏真的训练过，
+# 就不算"全部跳过"，因为那个游戏确实产生了要保存的新内容。
+_all_skipped = bool(rl_results) and all(r.get('skipped') for r in rl_results.values())
+if _all_skipped:
+    print("  本次全部游戏都无新数据、跳过了训练，本地也没有产生任何新的模型文件，"
+          "跳过推送——不做无意义的Dataset版本更新，也避免用不完整的本地目录覆盖已保存的内容。")
+else:
+    # 推送前先把"本地没有、但挂载目录（上次版本）里有"的文件补齐，
+    # 防止这次只训练了部分游戏时，把没训练的游戏已保存的模型文件覆盖掉。
+    sync_local_with_mounted()
+    push_rl_dataset()
 
 # ── 写入独立文件 dl_rl.json（不再读取/合并 prediction.json，速度更快）──
 out = {
