@@ -129,7 +129,7 @@ D3_POOL_N = 5
 # 永远不可能超出holdout边界，不会引入数据泄漏。
 # 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
 # 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 100
+D3_BACKTEST_N = 80
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -2267,13 +2267,21 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     # 记录本次训练时的期数，供下次运行判断是否有新数据
     save_last_trained_n('3d', len(records))
 
+    # 把逐位Top1/2/3命中率拼进note文字里——网页本来就会把note原样显示在3D卡片下方
+    # (index.html 第2623行 ${d3Rl.note||''})，不用改网页就能让这份数据露出来。
+    _pos_note = "；".join(
+        f"{n}Top1{pos_hit_rate[n]['top1']}%/Top2{pos_hit_rate[n]['top2']}%/"
+        f"Top3{pos_hit_rate[n]['top3']}%(前3合计{pos_hit_rate[n]['top1_3_合计']}%)"
+        for n in ['百位','十位','个位'])
+
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'pos_hit_rate_pct':pos_hit_rate,   # 每位Top1/Top2/Top3命中率明细
             'ppo_pred':pred,'ppo_groups':groups,
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
-            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）'}
+            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
+                   f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
