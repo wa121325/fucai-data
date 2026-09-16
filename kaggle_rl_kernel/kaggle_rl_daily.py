@@ -2004,8 +2004,8 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             tot += sum(1 for i in range(3) if pred[i]==actual[i]); n += 1
         return tot/n if n else 0.0
 
-    model = load_ppo('3d')
-    is_new = model is None
+    model = None
+    is_new = True
     t0 = time.time()
     if not is_new:
         try:
