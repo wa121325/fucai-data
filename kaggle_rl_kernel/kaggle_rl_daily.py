@@ -1393,8 +1393,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             tot += len(set(records[idx]['numbers']) & sel); n += 1
         return tot/n if n else 0.0
 
-    model = load_ppo('kl8')
-    is_new = model is None
+    model = None
+    is_new = True
     t0 = time.time()
     if not is_new:
         try:
@@ -1744,8 +1744,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             tot += rh + 0.5*bh; n += 1
         return tot/n if n else 0.0
 
-    model = load_ppo('ssq')
-    is_new = model is None
+    model = None
+    is_new = True
     t0 = time.time()
     if not is_new:
         try:
