@@ -788,12 +788,12 @@ for game, (feat_fn, targets) in configs.items():
 
         lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline, lstm_warm = train_encoder(
             lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20,
-            warm_start_path=lstm_warm_path, predict_X=predict_X)
+            warm_start_path=None, predict_X=predict_X)
         print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
 
         tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
             lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20,
-            warm_start_path=tfm_warm_path, predict_X=predict_X)
+            warm_start_path=None, predict_X=predict_X)
         print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
 
         if lstm_hidden_all is None:
