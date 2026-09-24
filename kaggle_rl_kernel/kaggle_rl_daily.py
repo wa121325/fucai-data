@@ -129,7 +129,7 @@ D3_POOL_N = 5
 # 永远不可能超出holdout边界，不会引入数据泄漏。
 # 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
 # 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 200
+D3_BACKTEST_N = 80
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -639,6 +639,9 @@ def precompute_omission_3d(records):
 #  ML概率向量 + 遗漏向量
 # ══════════════════════════════════════════════════════
 def extract_ml_prob_vec(ml_pred, game, verbose=True):
+    # ⚠️ 这里的 tk/nc 列表必须跟 kaggle_fucai.py 的 compute_ml_walkforward 调用处
+    # 完全一致——两边独立写死，任何一边改了目标顺序或分类数，另一边不会报错，
+    # 只会导致walk-forward数组和现场live概率的维度对不上、拼出来的state错位。
     vec = []
     models_data = ml_pred.get('models', {})
     # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
@@ -1001,13 +1004,14 @@ class IntegratedKL8Env(gym.Env):
     metadata={'render_modes':[]}
     PERBALL_WEIGHT = 2.0   # 逐球信号（遗漏+频率）额外加权，突出其重要性
 
-    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N):
+    def __init__(self, records, feat_fn, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N, ml_wf=None):
         super().__init__()
-        self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
+        self.records=records; self.feat_fn=feat_fn
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr; self.freq_arr=freq_arr
+        self.ml_wf=ml_wf   # 逐期ML概率(walk-forward)，数组第i行对应records[i+1]，即self.idx=i+1
         self.train_n=train_n
         self.start=SEQ_LEN+30; self.idx=self.start
         # 留出末段holdout训练时完全不碰，是真正的样本外评估数据
@@ -1016,7 +1020,10 @@ class IntegratedKL8Env(gym.Env):
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 80; freq_dim = 80
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim
+        # 逐期ML概率(walk-forward)：每期不同，且保证只用没见过那期(及之后)数据的模型算出，
+        # 训练时才有变化量可学，不是之前那种从头到尾不变的常数。
+        ml_wf_dim = ml_wf.shape[1] if ml_wf is not None else 0
+        self.state_dim = feat_dim+ml_wf_dim+lstm_dim+tfm_dim+omit_dim+freq_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
 
@@ -1024,6 +1031,13 @@ class IntegratedKL8Env(gym.Env):
         feat=self.feat_fn(self.records,self.idx)
         if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
         raw=np.array(list(feat.values()),dtype=np.float32)
+        # walk-forward数组第i行对应self.idx=i+1，取第(self.idx-1)行；越界时0占位。
+        # 必须插在raw之后、lh/th/om/fr之前——下面 state[-160:] 假设最后160维是
+        # 遗漏+频率，插在这个位置不会破坏那个切片。
+        if self.ml_wf is not None and 0 <= self.idx-1 < len(self.ml_wf):
+            mlv = self.ml_wf[self.idx-1]
+        else:
+            mlv = np.zeros(self.ml_wf.shape[1] if self.ml_wf is not None else 0, dtype=np.float32)
         if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
             lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
         else:
@@ -1035,8 +1049,9 @@ class IntegratedKL8Env(gym.Env):
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
         fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(80,dtype=np.float32)
 
-        state = normalize_state_segments(raw,self.ml_vec,lh,th,om,fr)
+        state = normalize_state_segments(raw,mlv,lh,th,om,fr)
         # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
+        # （mlv插在最前段，不影响这个"末尾160维"的判定）
         state = state.copy()
         state[-160:] *= self.PERBALL_WEIGHT
         return np.clip(state, -5, 5)
@@ -1076,13 +1091,14 @@ class IntegratedSSQEnv(gym.Env):
     奖励按双色球真实奖级结构分级，同时激励红球和蓝球命中。
     """
     metadata={'render_modes':[]}
-    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N):
+    def __init__(self, records, feat_fn, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N, ml_wf=None):
         super().__init__()
-        self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
+        self.records=records; self.feat_fn=feat_fn
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr
+        self.ml_wf=ml_wf   # 逐期ML概率(walk-forward)，数组第i行对应records[i+1]，即self.idx=i+1
         self.red_pick_n=red_pick_n
         self.start=SEQ_LEN+30; self.idx=self.start
         self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
@@ -1090,7 +1106,9 @@ class IntegratedSSQEnv(gym.Env):
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 49   # 33红球+16蓝球遗漏值，已含每个号码的差异化信息
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
+        # 逐期ML概率(walk-forward)：每期不同，且保证只用没见过那期(及之后)数据的模型算出。
+        ml_wf_dim = ml_wf.shape[1] if ml_wf is not None else 0
+        self.state_dim = feat_dim+ml_wf_dim+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.Box(low=-1.,high=1.,shape=(33+16,),dtype=np.float32)
 
@@ -1098,6 +1116,10 @@ class IntegratedSSQEnv(gym.Env):
         feat=self.feat_fn(self.records,self.idx)
         if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
         raw=np.array(list(feat.values()),dtype=np.float32)
+        if self.ml_wf is not None and 0 <= self.idx-1 < len(self.ml_wf):
+            mlv = self.ml_wf[self.idx-1]
+        else:
+            mlv = np.zeros(self.ml_wf.shape[1] if self.ml_wf is not None else 0, dtype=np.float32)
         if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
             lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
         else:
@@ -1108,7 +1130,7 @@ class IntegratedSSQEnv(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
 
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
+        return normalize_state_segments(raw,mlv,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1156,20 +1178,24 @@ class Integrated3DEnv(gym.Env):
     位置命中但顺序不对不加分（3D不看"组选"，只关心百十个精确对应）。
     """
     metadata={'render_modes':[]}
-    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr):
+    def __init__(self, records, feat_fn, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr, ml_wf=None):
         super().__init__()
-        self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
+        self.records=records; self.feat_fn=feat_fn
         self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
         self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
         self.omit_arr=omit_arr
+        self.ml_wf=ml_wf   # 逐期ML概率(walk-forward)，数组第i行对应records[i+1]，即self.idx=i+1
         self.start=SEQ_LEN+5; self.idx=self.start
         self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
         sample=feat_fn(records,self.start); feat_dim=len(sample)
         lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
         tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
         omit_dim = 30
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
+        # 逐期ML概率(walk-forward)：跟之前的常数ml_vec不同，这里每期都不一样，
+        # 且保证每期的值只来自没见过那期(及之后)数据的模型，训练时才有变化量可学。
+        ml_wf_dim = ml_wf.shape[1] if ml_wf is not None else 0
+        self.state_dim = feat_dim+ml_wf_dim+lstm_dim+tfm_dim+omit_dim
         self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
         self.action_space = spaces.MultiDiscrete([10,10,10])
 
@@ -1177,6 +1203,12 @@ class Integrated3DEnv(gym.Env):
         feat=self.feat_fn(self.records,self.idx)
         if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
         raw=np.array(list(feat.values()),dtype=np.float32)
+        # walk-forward数组第i行对应self.idx=i+1，所以取第(self.idx-1)行；
+        # 越界(数组还没覆盖到这期，或压根没有这个数组)时用0占位。
+        if self.ml_wf is not None and 0 <= self.idx-1 < len(self.ml_wf):
+            mlv = self.ml_wf[self.idx-1]
+        else:
+            mlv = np.zeros(self.ml_wf.shape[1] if self.ml_wf is not None else 0, dtype=np.float32)
         if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
             lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
         else:
@@ -1186,7 +1218,7 @@ class Integrated3DEnv(gym.Env):
         else:
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
+        return normalize_state_segments(raw,mlv,lh,th,om)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1339,7 +1371,7 @@ def push_rl_dataset():
 # ══════════════════════════════════════════════════════
 #  主流程：kl8 增量微调
 # ══════════════════════════════════════════════════════
-def run_kl8_daily(records, ml_pred, prev_result=None):
+def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
 
     # 新数据检测：快乐8虽然每天开奖，但手动重复触发时数据是完全相同的，
@@ -1349,7 +1381,6 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
         return carry_over_result('kl8', '快乐8', prev_result, len(records), last_trained_n,
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
-    ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
     _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
 
@@ -1369,17 +1400,20 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
     freq_arr = precompute_freq_kl8(records, window=30)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [频率向量] ✓已加载（80维，第二个逐球差异化信号）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 逐期ML概率(walk-forward)"
+          f"{ml_wf.shape[1] if ml_wf is not None else 0}维 + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
 
     def make_env():
-        return IntegratedKL8Env(records, fkl8, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
+        return IntegratedKL8Env(records, fkl8,
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr,
+                                ml_wf=ml_wf)
     vec_env = make_vec_env(make_env, n_envs=4)
 
     # 探针环境：跟训练环境用同一个 _state() 方法算状态，供早停评估复用，
     # 不重复实现一遍特征拼接逻辑，避免训练和评估用的状态出现细微不一致
-    _probe_env = IntegratedKL8Env(records, fkl8, ml_vec,
-                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
+    _probe_env = IntegratedKL8Env(records, fkl8,
+                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr,
+                                  ml_wf=ml_wf)
     _hold_start = _probe_env.train_end
     def _eval_holdout(m):
         """在holdout（训练时从未碰过的末段）上评分：选六标准的平均命中球数"""
@@ -1393,8 +1427,15 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             tot += len(set(records[idx]['numbers']) & sel); n += 1
         return tot/n if n else 0.0
 
+    # 关闭增量微调：不再加载旧权重，每次都从零全量训练。
+    # 原因：①的修复已经改变了状态维度，旧权重本来就用不了；
+    # 更根本的是，增量微调+EMA混合这套机制目前建立在
+    # '状态特征逐期正确对齐历史'这个前提上，而①暴露出这个前提
+    # 之前并不成立(ML概率块是常数)——现在改对了，但增量微调这套
+    # 机制本身还没有针对'状态改动后是否依然可靠'重新验证过，
+    # 先关掉，每天全新训练，行为更简单、更容易判断是否有效。
     model = None
-    is_new = True
+    is_new = model is None
     t0 = time.time()
     if not is_new:
         try:
@@ -1454,11 +1495,21 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
         feat = fkl8(records, idx)
         if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
+        # idx>=len(records)：现场预测下一期(尚未开奖)，用今天真实的ML概率——
+        # 这里不存在泄漏问题，这就是"今天能拿到的最新信息"，
+        # 跟历史训练样本"未来才有的信息"完全是两回事。
+        # idx<len(records)：历史期，从walk-forward数组取对应行(第idx-1行)。
+        if idx >= len(records):
+            mlv = extract_ml_prob_vec(ml_pred, 'kl8', verbose=False)
+        elif ml_wf is not None and 0 <= idx-1 < len(ml_wf):
+            mlv = ml_wf[idx-1]
+        else:
+            mlv = np.zeros(ml_wf.shape[1] if ml_wf is not None else 0, dtype=np.float32)
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         fr = freq_arr[idx]
-        state = normalize_state_segments(raw,ml_vec,lh,th,om,fr)
+        state = normalize_state_segments(raw,mlv,lh,th,om,fr)
         state = state.copy()
         state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
         return np.clip(state, -5, 5)
@@ -1693,7 +1744,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'}
 
 
-def run_ssq_daily(records, ml_pred, prev_result=None):
+def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
 
     # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据；
@@ -1703,7 +1754,6 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
         return carry_over_result('ssq', '双色球', prev_result, len(records), last_trained_n,
                                  '双色球周二/四/日开奖，本次运行无新开奖数据')
 
-    ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
 
@@ -1718,15 +1768,18 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
     omit_arr = precompute_omission_ssq(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 逐期ML概率(walk-forward)"
+          f"{ml_wf.shape[1] if ml_wf is not None else 0}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
 
     def make_env():
-        return IntegratedSSQEnv(records, fssq, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+        return IntegratedSSQEnv(records, fssq,
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                ml_wf=ml_wf)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    _probe_env = IntegratedSSQEnv(records, fssq, ml_vec,
-                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+    _probe_env = IntegratedSSQEnv(records, fssq,
+                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                  ml_wf=ml_wf)
     _hold_start = _probe_env.train_end
     def _eval_holdout(m):
         """在holdout上评分：红球平均命中数 + 蓝球命中率加权（蓝球0.5注权重）"""
@@ -1744,8 +1797,15 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             tot += rh + 0.5*bh; n += 1
         return tot/n if n else 0.0
 
+    # 关闭增量微调：不再加载旧权重，每次都从零全量训练。
+    # 原因：①的修复已经改变了状态维度，旧权重本来就用不了；
+    # 更根本的是，增量微调+EMA混合这套机制目前建立在
+    # '状态特征逐期正确对齐历史'这个前提上，而①暴露出这个前提
+    # 之前并不成立(ML概率块是常数)——现在改对了，但增量微调这套
+    # 机制本身还没有针对'状态改动后是否依然可靠'重新验证过，
+    # 先关掉，每天全新训练，行为更简单、更容易判断是否有效。
     model = None
-    is_new = True
+    is_new = model is None
     t0 = time.time()
     if not is_new:
         try:
@@ -1798,10 +1858,16 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
         feat = fssq(records, idx)
         if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
+        if idx >= len(records):
+            mlv = extract_ml_prob_vec(ml_pred, 'ssq', verbose=False)
+        elif ml_wf is not None and 0 <= idx-1 < len(ml_wf):
+            mlv = ml_wf[idx-1]
+        else:
+            mlv = np.zeros(ml_wf.shape[1] if ml_wf is not None else 0, dtype=np.float32)
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
+        return normalize_state_segments(raw,mlv,lh,th,om)
 
     # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
@@ -1958,7 +2024,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
 
 
-def run_3d_daily(records, ml_pred, prev_result=None):
+def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
 
     # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
@@ -1967,7 +2033,6 @@ def run_3d_daily(records, ml_pred, prev_result=None):
         return carry_over_result('3d', '福彩3D', prev_result, len(records), last_trained_n,
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
-    ml_vec = extract_ml_prob_vec(ml_pred, '3d')
     _cur_feat_dim = len(f3d(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
 
@@ -1982,15 +2047,18 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     omit_arr = precompute_omission_3d(records)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
 
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 逐期ML概率(walk-forward)"
+          f"{ml_wf.shape[1] if ml_wf is not None else 0}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
 
     def make_env():
-        return Integrated3DEnv(records, f3d, ml_vec,
-                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+        return Integrated3DEnv(records, f3d,
+                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                               ml_wf=ml_wf)
     vec_env = make_vec_env(make_env, n_envs=4)
 
-    _probe_env = Integrated3DEnv(records, f3d, ml_vec,
-                                 lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
+    _probe_env = Integrated3DEnv(records, f3d,
+                                 lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                 ml_wf=ml_wf)
     _hold_start = _probe_env.train_end
     def _eval_holdout(m):
         """在holdout上评分：平均命中位数"""
@@ -2004,8 +2072,15 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             tot += sum(1 for i in range(3) if pred[i]==actual[i]); n += 1
         return tot/n if n else 0.0
 
+    # 关闭增量微调：不再加载旧权重，每次都从零全量训练。
+    # 原因：①的修复已经改变了状态维度，旧权重本来就用不了；
+    # 更根本的是，增量微调+EMA混合这套机制目前建立在
+    # '状态特征逐期正确对齐历史'这个前提上，而①暴露出这个前提
+    # 之前并不成立(ML概率块是常数)——现在改对了，但增量微调这套
+    # 机制本身还没有针对'状态改动后是否依然可靠'重新验证过，
+    # 先关掉，每天全新训练，行为更简单、更容易判断是否有效。
     model = None
-    is_new = True
+    is_new = model is None
     t0 = time.time()
     if not is_new:
         try:
@@ -2022,7 +2097,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 100000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=1, patience=6, reset_timesteps=True, warmup_chunks=10,
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2058,10 +2133,16 @@ def run_3d_daily(records, ml_pred, prev_result=None):
         feat = f3d(records, idx)
         if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
+        if idx >= len(records):
+            mlv = extract_ml_prob_vec(ml_pred, '3d', verbose=False)
+        elif ml_wf is not None and 0 <= idx-1 < len(ml_wf):
+            mlv = ml_wf[idx-1]
+        else:
+            mlv = np.zeros(ml_wf.shape[1] if ml_wf is not None else 0, dtype=np.float32)
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
+        return normalize_state_segments(raw,mlv,lh,th,om)
 
     # 回测窗口直接绑定训练边界 _hold_start，而不是写死一个数字——
     # 之前用 len(records)-30 能"恰好"不泄漏，只是因为 30 小于 holdout_size 的下限80，
@@ -2126,7 +2207,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
     idx=len(records); state=build_state(idx)
-    groups=[]; pos_candidates=[]
+    groups=[]; pos_candidates=[]; _sampled=[]; _same=None
     if state is not None:
         # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
         # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
@@ -2225,6 +2306,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                 print(f"    与确定性推荐(Top{D3_POOL_N}候选池择优)重合 {_same}/{D3_N_BETS} 注；"
                       f"用到的数字 确定性法{len(_dig_det)}个 vs 采样法{len(_dig_samp)}个")
             except Exception as _e:
+                _sampled = []
                 print(f"  [观测·采样对比] 计算失败: {_e}")
 
             if _d3_conds:
@@ -2274,14 +2356,22 @@ def run_3d_daily(records, ml_pred, prev_result=None):
         f"Top3{pos_hit_rate[n]['top3']}%(前3合计{pos_hit_rate[n]['top1_3_合计']}%)"
         for n in ['百位','十位','个位'])
 
+    # 采样12注也拼进note——网页本来就会把note原样显示在3D卡片下方，
+    # 不用改网页就能让这份数据露出来（跟上面逐位命中率同样的思路）。
+    _sample_note = (f'；按概率分布采样的另一组12注（种子来自最新开奖{records[-1]["digits"]}，'
+                    f'同样数据必然采出同样结果）：{_sampled}，与确定性推荐重合{_same}注'
+                    if _sampled else '；本次概率采样计算失败，无采样对比数据')
+
     return {'games_tested':total,'match_distribution':match_dist,
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'pos_hit_rate_pct':pos_hit_rate,   # 每位Top1/Top2/Top3命中率明细
             'ppo_pred':pred,'ppo_groups':groups,
+            'sampled_groups':_sampled,   # 按概率分布采样的12注，供前端展示/对比
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
             'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
-                   f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'}
+                   f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'
+                   f'{_sample_note}'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
@@ -2298,6 +2388,24 @@ ml_preds = {}
 if raw_ml:
     try: ml_preds = json.loads(raw_ml).get('predictions', {})
     except Exception: pass
+
+# 读取逐期ML概率（walk-forward，kaggle_fucai.py新产出）：每期的概率来自
+# 只用该期之前历史训练出的模型，不是"今天的概率广播给全部历史"这个常数问题。
+# 结构：{'tkeys':[...], 'nc':[...], 'n_periods':N, 'probs':[[...每期一行...]]}
+# 数组第i行 ↔ records[i+1]（跟kaggle_fucai.py build_dataset的X[i]对齐关系完全一致）。
+ml_walkforward = {}
+for _g in ['3d', 'ssq', 'kl8']:
+    _raw_wf = gh_raw(f'{_g}_ml_walkforward.json')
+    if _raw_wf:
+        try:
+            _wf = json.loads(_raw_wf)
+            ml_walkforward[_g] = np.array(_wf['probs'], dtype=np.float32)
+            print(f"✓ 已读取{_g}逐期ML概率walk-forward数组，形状{ml_walkforward[_g].shape}")
+        except Exception as e:
+            print(f"! 解析{_g}_ml_walkforward.json失败: {e}，该游戏本次训练状态里将不含逐期ML概率")
+    else:
+        print(f"! 未读取到{_g}_ml_walkforward.json（kaggle_fucai.py尚未产出时属正常），"
+              f"该游戏本次训练状态里将不含逐期ML概率")
 
 # 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
 # （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
@@ -2317,7 +2425,7 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
     ml_pred = ml_preds.get(game, {})
     try:
         # 三个游戏统一传入上次结果，无新数据时沿用，避免重复训练造成过拟合
-        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game))
+        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game), ml_walkforward.get(game))
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"{game} 失败: {e}")
