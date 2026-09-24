@@ -2621,14 +2621,14 @@ function renderDLResult(dlResult){
         const _d3Ball = (cls,n)=>`<span class="${cls}" style="width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;${cls==='ball-r'?'background:#8b1a1a;':''}">${n}</span>`;
         html += `<div style="display:flex; flex-wrap:nowrap; gap:8px; align-items:flex-start;">`;
         html += `<div style="flex:1 1 0; min-width:0;">`;
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
         d3Rl.ppo_groups.forEach((g,i)=>{
           html += `<div class="rec-group" style="white-space:nowrap; padding:4px 6px; margin:3px 0; display:block;"><span style="margin-right:4px;">${i+1}.</span>${g.map(n=>_d3Ball('ball-r',n)).join('')}</div>`;
         });
         html += `</div>`;
         if(d3Rl.sampled_groups?.length){
           html += `<div style="flex:1 1 0; min-width:0;">`;
-          html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">按概率采样（${d3Rl.sampled_groups.length}注，随新开奖变化）：</span></div>`;
+          html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">采样（${d3Rl.sampled_groups.length}注）：</span></div>`;
           d3Rl.sampled_groups.forEach((g,i)=>{
             html += `<div class="rec-group" style="white-space:nowrap; padding:4px 6px; margin:3px 0; display:block;"><span style="margin-right:4px;">${i+1}.</span>${g.map(n=>_d3Ball('ball-g',n)).join('')}</div>`;
           });
@@ -2636,7 +2636,7 @@ function renderDLResult(dlResult){
         }
         html += `</div>`;
       } else if(d3Rl.ppo_pred){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO预测组合：</span></div>`;
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">预测组合：</span></div>`;
         html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
       }
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${d3Rl.note||''}</div>`;
