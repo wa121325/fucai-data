@@ -264,7 +264,12 @@ except ImportError:
 
 print(f"\n依赖: sklearn={'✓' if HAS_SKL else '✗'}  xgb={'✓' if HAS_XGB else '✗'}  lgb={'✓' if HAS_LGB else '✗'}")
 
-WINDOW = 50
+# 特征窗口。原来是50期——8742期历史里99.4%的数据从没进过特征，
+# 每条统计量都只看最近50期，模型的"视野"极短。
+# 加到300期后，长周期统计量（road/prime/repeat等）才有足够样本，
+# 短窗口(3/5/10/20)照常保留对最新开奖的敏感度，两头都要。
+# 注意：窗口只影响统计量的计算范围，不增减特征个数，维度仍是82/133/131。
+WINDOW = 300
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -337,15 +342,16 @@ def _repeat_neighbor(cur, prev):
     nb = sum(1 for n in cur if (n-1 in ps or n+1 in ps) and n not in ps)
     return rep, nb
 
-def _feat_window(w):
-    return w
-
 
 def f3d(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
     f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+    # 时间尺度档位：短(3/5/10) 中(20/50) 中长(100) 长(300=WINDOW)
+    # 原来是 3/5/10/20/300，20到300之间是15倍断层，50和100这些中期尺度完全空白。
+    # 补上之后最大跨度降到3倍，短中长连续覆盖：
+    # 短窗口对最新开奖敏感，长窗口给出稳定的基线，中窗口衔接两者。
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(50,'50'),(100,'100'),(WINDOW,'W')]:
         chunk=w[-ws:]
         sms=[sum(x['digits']) for x in chunk]
         sps=[max(x['digits'])-min(x['digits']) for x in chunk]
@@ -416,6 +422,27 @@ def f3d(records, idx):
     for pi in range(3):
         f[f'prev_pos{pi}'] = float(last[pi]) if pi < len(last) else 0.0
 
+
+    # ── 跨尺度趋势：短期相对长期的偏离方向和幅度 ──
+    # 光有各窗口的"水平值"不够——3期均值15、300期均值14，这个"高出多少"
+    # 才是走势方向。之前只有 sm_trend（最近两期比大小）这种极简趋势，
+    # 而多窗口的水平值之间的关系（短期是在偏离还是回归长期）完全没被表达。
+    for _k in ['sm', 'sp', 'odd', 'big']:
+        _sh = f.get(f'{_k}5');  _md = f.get(f'{_k}50');  _lg = f.get(f'{_k}W')
+        if _sh is not None and _lg is not None:
+            f[f'{_k}_dev_long']  = float(_sh - _lg)            # 短期偏离长期
+            f[f'{_k}_dev_ratio'] = float((_sh - _lg) / (abs(_lg) + 1e-6))
+        else:
+            f[f'{_k}_dev_long'] = 0.0; f[f'{_k}_dev_ratio'] = 0.0
+        if _sh is not None and _md is not None:
+            f[f'{_k}_dev_mid'] = float(_sh - _md)              # 短期偏离中期
+        else:
+            f[f'{_k}_dev_mid'] = 0.0
+    # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
+    for _k in ['sm', 'sp']:
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+                                 (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
+
     return f
 
 
@@ -423,7 +450,11 @@ def fssq(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
     f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+    # 时间尺度档位：短(3/5/10) 中(20/50) 中长(100) 长(300=WINDOW)
+    # 原来是 3/5/10/20/300，20到300之间是15倍断层，50和100这些中期尺度完全空白。
+    # 补上之后最大跨度降到3倍，短中长连续覆盖：
+    # 短窗口对最新开奖敏感，长窗口给出稳定的基线，中窗口衔接两者。
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(50,'50'),(100,'100'),(WINDOW,'W')]:
         chunk=w[-ws:]
         sms=[sum(x['red']) for x in chunk]
         bls=[x['blue'] for x in chunk]
@@ -496,6 +527,27 @@ def fssq(records, idx):
         f[f'prev_r{n}'] = 1.0 if n in prev_red else 0.0
     f['prev_blue'] = float(w[-1]['blue']) if w else 0.0
 
+
+    # ── 跨尺度趋势：短期相对长期的偏离方向和幅度 ──
+    # 光有各窗口的"水平值"不够——3期均值15、300期均值14，这个"高出多少"
+    # 才是走势方向。之前只有 sm_trend（最近两期比大小）这种极简趋势，
+    # 而多窗口的水平值之间的关系（短期是在偏离还是回归长期）完全没被表达。
+    for _k in ['sm', 'sp', 'odd', 'big']:
+        _sh = f.get(f'{_k}5');  _md = f.get(f'{_k}50');  _lg = f.get(f'{_k}W')
+        if _sh is not None and _lg is not None:
+            f[f'{_k}_dev_long']  = float(_sh - _lg)            # 短期偏离长期
+            f[f'{_k}_dev_ratio'] = float((_sh - _lg) / (abs(_lg) + 1e-6))
+        else:
+            f[f'{_k}_dev_long'] = 0.0; f[f'{_k}_dev_ratio'] = 0.0
+        if _sh is not None and _md is not None:
+            f[f'{_k}_dev_mid'] = float(_sh - _md)              # 短期偏离中期
+        else:
+            f[f'{_k}_dev_mid'] = 0.0
+    # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
+    for _k in ['sm', 'sp']:
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+                                 (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
+
     return f
 
 
@@ -503,7 +555,11 @@ def fkl8(records, idx):
     w=records[max(0,idx-WINDOW):idx]
     if len(w)<5: return None
     f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+    # 时间尺度档位：短(3/5/10) 中(20/50) 中长(100) 长(300=WINDOW)
+    # 原来是 3/5/10/20/300，20到300之间是15倍断层，50和100这些中期尺度完全空白。
+    # 补上之后最大跨度降到3倍，短中长连续覆盖：
+    # 短窗口对最新开奖敏感，长窗口给出稳定的基线，中窗口衔接两者。
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(50,'50'),(100,'100'),(WINDOW,'W')]:
         chunk=w[-ws:]
         tots=[sum(x['numbers']) for x in chunk]
         odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
@@ -556,11 +612,159 @@ def fkl8(records, idx):
     f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
     # 快乐8每期开20个球，上期二值编码就是80维，维度偏大且信息稀疏，
     # 改用"上期号码按四区分布"这种压缩表示，兼顾跨期信息与维度控制
+    # ── 跨尺度趋势：短期相对长期的偏离方向和幅度 ──
+    # 光有各窗口的"水平值"不够——3期均值15、300期均值14，这个"高出多少"
+    # 才是走势方向。之前只有 sm_trend（最近两期比大小）这种极简趋势，
+    # 而多窗口的水平值之间的关系（短期是在偏离还是回归长期）完全没被表达。
+    for _k in ['sm', 'sp', 'odd', 'big']:
+        _sh = f.get(f'{_k}5');  _md = f.get(f'{_k}50');  _lg = f.get(f'{_k}W')
+        if _sh is not None and _lg is not None:
+            f[f'{_k}_dev_long']  = float(_sh - _lg)            # 短期偏离长期
+            f[f'{_k}_dev_ratio'] = float((_sh - _lg) / (abs(_lg) + 1e-6))
+        else:
+            f[f'{_k}_dev_long'] = 0.0; f[f'{_k}_dev_ratio'] = 0.0
+        if _sh is not None and _md is not None:
+            f[f'{_k}_dev_mid'] = float(_sh - _md)              # 短期偏离中期
+        else:
+            f[f'{_k}_dev_mid'] = 0.0
+    # 加速度：短期偏离中期 与 中期偏离长期 的差，反映趋势在加强还是减弱
+    for _k in ['sm', 'sp']:
+        f[f'{_k}_accel'] = float(f.get(f'{_k}_dev_mid', 0.0) - 
+                                 (f.get(f'{_k}50', 0.0) - f.get(f'{_k}W', 0.0)))
+
     prev = w[-1]['numbers'] if w else []
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
 
+    # ══════════════════════════════════════════════════════
+    #  快乐8专属新增特征（仅本游戏，3D/双色球不加）
+    # ══════════════════════════════════════════════════════
+
+    # ── ① 冷热变化率：这是维度上的真正空白 ──
+    # 现有信号（频率、遗漏）回答的都是"现在怎样"，没有一个回答"正在往哪变"。
+    # 一个球从冷转热、和一直是热的，含义完全不同，但之前的特征区分不出来。
+    _f10 = Counter(n for r in w[-10:] for n in r['numbers'])
+    _f50 = Counter(n for r in w[-50:] for n in r['numbers'])
+    _n10, _n50 = max(len(w[-10:]),1), max(len(w[-50:]),1)
+    _rates = [ _f10.get(n,0)/_n10 - _f50.get(n,0)/_n50 for n in range(1,81) ]
+    _rates = np.array(_rates, dtype=np.float32)
+    f['heat_rate_mean'] = float(_rates.mean())          # 整体升温还是降温
+    f['heat_rate_std']  = float(_rates.std())           # 冷热分化程度
+    f['heat_rising_cnt']  = float((_rates > 0.05).sum())  # 明显转热的球数
+    f['heat_falling_cnt'] = float((_rates < -0.05).sum()) # 明显转冷的球数
+    # 上期开出的号码，此前是在升温还是降温（判断"追热"还是"追冷"更奏效）
+    _prev_nums = w[-1]['numbers'] if w else []
+    f['prev_heat_rate'] = float(np.mean([_rates[n-1] for n in _prev_nums])) if _prev_nums else 0.0
+
+    # ── ② 尾数分布：80球按尾数正好分10组各8个，是干净的统计维度 ──
+    _tail_cnt = [0]*10
+    for n in _prev_nums: _tail_cnt[n % 10] += 1
+    for t in range(10): f[f'tail{t}'] = float(_tail_cnt[t])
+    f['tail_std']  = float(np.std(_tail_cnt))            # 尾数分布均匀还是集中
+    f['tail_zero'] = float(sum(1 for c in _tail_cnt if c == 0))  # 有几个尾数完全没出
+
+    # ── ③ 间隔分布：之前只有"连续号组数"，丢了间隔的整体形态 ──
+    _gaps_all = []
+    for x in w[-20:]:
+        s = sorted(x['numbers'])
+        _gaps_all.append([s[i+1]-s[i] for i in range(len(s)-1)])
+    if _gaps_all:
+        _flat = [g for gs in _gaps_all for g in gs]
+        f['gap_mean20'] = float(np.mean(_flat))
+        f['gap_std20']  = float(np.std(_flat))
+        f['gap_max20']  = float(np.mean([max(gs) for gs in _gaps_all if gs]))
+    else:
+        f['gap_mean20'] = f['gap_std20'] = f['gap_max20'] = 0.0
+
+    # ── ④ AC值：两两差值的离散度，双色球有、快乐8之前没有 ──
+    if _prev_nums and len(_prev_nums) > 1:
+        _d = set()
+        _ps = sorted(_prev_nums)
+        for i in range(len(_ps)):
+            for j in range(i+1, len(_ps)): _d.add(_ps[j]-_ps[i])
+        f['ac_value'] = float(len(_d) - (len(_ps)-1))
+    else:
+        f['ac_value'] = 0.0
+
+    # ── ⑤ 同尾号对数：彩民常看的形态维度 ──
+    f['same_tail_pairs'] = float(sum(c*(c-1)//2 for c in _tail_cnt))
+
+    # ── ⑥ 区间转移：号码在四个区之间的流动方向 ──
+    # 比"各区多少个"多一层信息：是从哪个区流向哪个区
+    if len(w) >= 2:
+        _pz = [sum(1 for n in w[-2]['numbers'] if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        _cz = [sum(1 for n in _prev_nums          if lo<=n<=hi) for lo,hi in [(1,20),(21,40),(41,60),(61,80)]]
+        for zi in range(4): f[f'zone_delta{zi}'] = float(_cz[zi] - _pz[zi])
+    else:
+        for zi in range(4): f[f'zone_delta{zi}'] = 0.0
+
+    # ── ⑦ 重号的区间分布：比"重了几个"更细 ──
+    if len(w) >= 2:
+        _rep = set(w[-1]['numbers']) & set(w[-2]['numbers'])
+        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+            f[f'repeat_z{zi}'] = float(sum(1 for n in _rep if lo<=n<=hi))
+    else:
+        for zi in range(4): f[f'repeat_z{zi}'] = 0.0
+
+
     return f
+
+
+# ══════════════════════════════════════════════════════
+#  逐期ML概率（walk-forward）：给RL用的、按历史时间正确对齐的ML概率
+#
+#  ── 要修的问题 ──
+#  RL训练时，每一期历史样本的"ML概率"这部分特征，用的都是【今天】跑ML脚本
+#  得到的概率，是一个从头到尾不变的常数。10年前那期训练样本，也看到了
+#  "今天"ML模型的判断——这在时间上完全不成立，而且常数特征在训练时
+#  没有任何变化量，网络根本学不出"ML概率是X时该怎么调整"这种关系。
+#
+#  ── 正确做法（逐期真正重训）成本太高 ──
+#  3D约8700期 × 7个目标 × 3种模型(RF/XGB/LGB) = 18万+次训练，不现实。
+#
+#  ── 这里用的折中：滚动重训(walk-forward) ──
+#  每隔 stride 期重训一次，只用【当时能拿到的历史】训练，这个"冻结"的模型
+#  只负责预测接下来 stride 期，到下个检查点再重训。这样任何一期的概率
+#  都绝对来自没见过那期(及之后)数据的模型，时间对齐问题解决了。
+#  代价：只用RF一种模型（不是生产环境RF+XGB+LGB三模型集成），牺牲一点精度
+#  换取速度；最早 min_train 期左右没有可用历史，用均匀分布占位。
+# ══════════════════════════════════════════════════════
+def compute_ml_walkforward(X, Y, keys, nc_map, stride=500, min_train=300):
+    """
+    返回 {target_name: (n, n_classes)数组}，每一行是【该期特征对应的下一期】
+    在"当时"可用的模型下的概率分布，不含任何该期或之后的信息。
+
+    X, Y 的对齐关系跟 build_dataset 一致：X[i]用第i期及之前的历史，
+    Y[k][i]是第i+1期的真实标签——所以这里"训练到第checkpoint行"、
+    "预测第checkpoint到end行"，天然就是walk-forward安全的。
+    """
+    n = X.shape[0]
+    out = {k: np.full((n, nc_map[k]), 1.0/nc_map[k], dtype=np.float32) for k in keys}
+    if not HAS_SKL or n <= min_train:
+        return out
+    checkpoint = min_train
+    n_ckpt = 0
+    while checkpoint < n:
+        end = min(checkpoint + stride, n)
+        for k in keys:
+            y_train = np.array(Y[k][:checkpoint])
+            if len(set(y_train.tolist())) < 2:
+                continue
+            try:
+                m = RandomForestClassifier(n_estimators=150, max_depth=8, min_samples_leaf=3,
+                                           random_state=42, n_jobs=-1)
+                m.fit(X[:checkpoint], y_train)
+                p = m.predict_proba(X[checkpoint:end])
+                for ci, cls in enumerate(m.classes_):
+                    cls = int(cls)
+                    if 0 <= cls < nc_map[k]:
+                        out[k][checkpoint:end, cls] = p[:, ci]
+            except Exception as e:
+                print(f"      ! walk-forward重训失败(目标{k}, 检查点{checkpoint}): {e}")
+        checkpoint = end; n_ckpt += 1
+    print(f"    [walk-forward] 共{n_ckpt}个滚动检查点，每{stride}期重训一次"
+          f"（前{min_train}期左右无足够历史，用均匀分布占位）")
+    return out
 
 
 def build_dataset(records, feat_fn, tgt_fn, keys):
@@ -1422,30 +1626,6 @@ def cond_filtered_picks(scores, n_pick, n_bets, conds, feat_fn, pool_mult=2.6, o
     return bets, scored[:len(bets)]
 
 
-def picks_from_scores(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
-    """
-    按分数选号：胆码 + 拖码轮转（与强化学习脚本同一套思路）。
-    分数最高的少数球作为胆码进每一注，其余候选轮转填充，
-    既保证号码有依据（全部按分数排序而来），又让各注之间有实质差异。
-    """
-    order = [n for n, _ in sorted(scores.items(), key=lambda x: -x[1])]
-    pool_size = min(len(order), max(n_pick + 2, int(round(n_pick * pool_mult))))
-    pool = order[:pool_size]
-    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
-    core, rest = pool[:core_n], pool[core_n:]
-    bets, ri = [], 0
-    for _ in range(n_bets):
-        sel = list(core); guard = 0
-        while len(sel) < n_pick and rest and guard < len(rest) * 3:
-            c = rest[ri % len(rest)]; ri += 1; guard += 1
-            if c not in sel: sel.append(c)
-        oi = 0
-        while len(sel) < n_pick and oi < len(order):
-            if order[oi] not in sel: sel.append(order[oi])
-            oi += 1
-        bets.append(sorted(sel))
-    return bets, sorted(core), sorted(pool)
-
 
 def reckl8(records, ml, om):
     """
@@ -1649,6 +1829,33 @@ def run_ml(history):
             print(f"\n── {game}: 数据不足({len(records) if isinstance(records,list) else 0}期)，跳过"); continue
         print(f"\n── {game}: {len(records)}期数据")
         X, Y, names, last_X = build_dataset(records, feat_fn, tgt_fn, tkeys)
+
+        # 逐期ML概率（walk-forward）：给RL用，替代"今天的概率广播给全部历史"这个常数问题
+        # ⚠️ 下面这份 nc 列表必须跟 kaggle_rl_daily.py 的 extract_ml_prob_vec 完全一致——
+        # 两边独立写死，任何一边改了目标顺序或分类数，另一边不会报错，
+        # 只会导致这里产出的walk-forward数组和RL现场用的live概率维度对不上、状态错位。
+        _nc_map = {'3d':  dict(zip(['sum_grp','odd','group_type','big','span_grp','road_dom','arith'],
+                                    [3,4,3,4,3,3,2])),
+                   'ssq': dict(zip(['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec'],
+                                    [7,3,3,3,3,7,6])),
+                   'kl8': dict(zip(['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp'],
+                                    [3,4,3,3,5,3,3]))}[game]
+        print(f"    计算逐期ML概率(walk-forward，供RL使用)…")
+        _wf = compute_ml_walkforward(X, Y, tkeys, _nc_map)
+        # 按固定顺序拼接成"每期一个概率向量"，顺序必须跟RL的extract_ml_prob_vec完全一致
+        _wf_concat = np.concatenate([_wf[k] for k in tkeys], axis=1)   # shape (n, sum(nc))
+        _wf_payload = {'game': game, 'tkeys': tkeys,
+                       'nc': [_nc_map[k] for k in tkeys],
+                       'n_periods': int(_wf_concat.shape[0]),
+                       # X[i]对应"用第i期及之前特征，预测第i+1期"——概率数组第i行也是预测第i+1期，
+                       # 跟records的下标关系是：概率数组行i ↔ records[i+1]（即f3d(records, i+1)用到的窗口）
+                       'probs': np.round(_wf_concat, 5).tolist()}
+        try:
+            gh_put(f'{game}_ml_walkforward.json', json.dumps(_wf_payload), f'update {game} ML walkforward probs')
+            print(f"    ✓ 逐期ML概率已推送 {game}_ml_walkforward.json（{_wf_concat.shape[0]}期×{_wf_concat.shape[1]}维）")
+        except Exception as e:
+            print(f"    ! 推送{game}_ml_walkforward.json失败: {e}")
+
         ml_res={'data_count':len(records),'updated_at':datetime.now().strftime('%Y-%m-%d %H:%M'),'models':{}}
         for tname in tkeys:
             y = np.array(Y[tname])
