@@ -2097,7 +2097,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 100000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=10,
+            n_chunks=1, patience=6, reset_timesteps=True, warmup_chunks=10,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
