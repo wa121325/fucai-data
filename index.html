@@ -2635,14 +2635,6 @@ function renderDLResult(dlResult){
           html += `</div>`;
         }
         html += `</div>`;
-        // 采样注数如果设得比展示数量多(D3_SAMPLE_N > D3_SAMPLE_DISPLAY_N)，
-        // 超出的部分不在上面两栏里显示，用小字列在下面，自己参考用
-        if(d3Rl.sampled_extra?.length){
-          html += `<div style="font-size:10px;color:#999;margin-top:6px;line-height:1.6;">`;
-          html += `采样其余${d3Rl.sampled_extra.length}注（仅供参考，不在上方展示）：`;
-          html += d3Rl.sampled_extra.map(g=>g.join('')).join('　');
-          html += `</div>`;
-        }
       } else if(d3Rl.ppo_pred){
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO预测组合：</span></div>`;
         html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
