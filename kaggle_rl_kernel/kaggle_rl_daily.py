@@ -2098,14 +2098,14 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
             model = None; is_new = True
 
     if is_new:
-        print("  首次训练（20万步，MultiDiscrete([10,10,10])共1000种组合）…")
+        print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
                     n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=2, patience=6, reset_timesteps=True, warmup_chunks=5,
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=1, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
