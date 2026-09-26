@@ -124,12 +124,20 @@ D3_N_BETS = 12
 # 只是【显示】给人看的候选仍然维持Top3，不受这个影响。
 D3_POOL_N = 5
 
+# 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
+# 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
+# 改这里就行，不用碰 D3_N_BETS。
+D3_SAMPLE_N = 12
+# 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
+# D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
+D3_SAMPLE_DISPLAY_N = 12
+
 # 3D回测用的期数。想改期数，改这一个数字就行——
 # 不管改成多少，代码里会自动取 min(这个数, 当前holdout大小)，
 # 永远不可能超出holdout边界，不会引入数据泄漏。
 # 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
 # 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 200
+D3_BACKTEST_N = 80
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -2090,14 +2098,14 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
             model = None; is_new = True
 
     if is_new:
-        print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
+        print("  首次训练（20万步，MultiDiscrete([10,10,10])共1000种组合）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
                     n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 100000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=1, patience=6, reset_timesteps=True, warmup_chunks=10,
+            model, 200000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=2, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2293,7 +2301,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                 _seed = abs(hash(_seed_src)) % (2**32)
                 _rng = np.random.default_rng(_seed)
                 _sampled, _seen_s, _guard = [], set(), 0
-                while len(_sampled) < D3_N_BETS and _guard < D3_N_BETS * 200:
+                while len(_sampled) < D3_SAMPLE_N and _guard < D3_SAMPLE_N * 200:
                     _guard += 1
                     _c = [int(_rng.choice(10, p=pos_probs[i])) for i in range(3)]
                     if tuple(_c) not in _seen_s:
@@ -2302,8 +2310,9 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                 _dig_det = set(x for g in groups for x in g)
                 _dig_samp = set(x for g in _sampled for x in g)
                 print(f"  [观测·采样对比]（不参与推荐，仅观察）种子来自最新开奖{records[-1]['digits']}")
-                print(f"    采样{len(_sampled)}注: {_sampled}")
-                print(f"    与确定性推荐(Top{D3_POOL_N}候选池择优)重合 {_same}/{D3_N_BETS} 注；"
+                # 完整采样列表打印在日志里，供自己参考；网页只展示前 D3_SAMPLE_DISPLAY_N 注
+                print(f"    采样{len(_sampled)}注(完整列表，网页只展示前{D3_SAMPLE_DISPLAY_N}注): {_sampled}")
+                print(f"    与确定性推荐(Top{D3_POOL_N}候选池择优)重合 {_same}/{len(_sampled)} 注；"
                       f"用到的数字 确定性法{len(_dig_det)}个 vs 采样法{len(_dig_samp)}个")
             except Exception as _e:
                 _sampled = []
@@ -2366,7 +2375,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
             'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
             'pos_hit_rate_pct':pos_hit_rate,   # 每位Top1/Top2/Top3命中率明细
             'ppo_pred':pred,'ppo_groups':groups,
-            'sampled_groups':_sampled,   # 按概率分布采样的12注，供前端展示/对比
+            'sampled_groups':_sampled[:D3_SAMPLE_DISPLAY_N],   # 网页主展示区：前N注
+            'sampled_extra':_sampled[D3_SAMPLE_DISPLAY_N:],    # 超出展示数量的部分，网页用小字单独显示
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
             'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
