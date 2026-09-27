@@ -783,7 +783,7 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
 #  等于给模型看了一份它没训练过的输入，等于白训练。所以两边共用这同一份配置。
 # ══════════════════════════════════════════════════════
 SEGMENT_ENABLE = {
-    '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':False},
+    '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':False},
 }
