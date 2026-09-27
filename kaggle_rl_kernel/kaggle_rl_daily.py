@@ -768,6 +768,44 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
     return {'skipped': True, 'games_tested': 0, 'reason': reason,
             'note': f'{reason}，且未找到上次训练结果可沿用（可能是首次运行）'}
 
+# ══════════════════════════════════════════════════════
+#  分段开关：可以单独关闭状态向量里的某一段（比如"遗漏"），不用重新设计模型。
+#
+#  ── 关闭是清零，不是删除 ──
+#  关掉某段不会把它从state向量里拿掉，而是把这段数值全部置0。
+#  这样state_dim(总维度)永远不变，不管开关怎么切换，都不会跟已保存的模型
+#  产生维度不匹配——纯粹是"喂给模型的这段信息变成了全0"，模型该怎么学还怎么学，
+#  只是这段不再携带任何真实信息。
+#
+#  ── 为什么训练和预测必须用同一份开关 ──
+#  训练时(Env的_state())和现场预测/回测时(build_state函数)如果开关不一致，
+#  模型见到的输入分布就不一样——训练时以为某段是有效信号，预测时却被清零，
+#  等于给模型看了一份它没训练过的输入，等于白训练。所以两边共用这同一份配置。
+# ══════════════════════════════════════════════════════
+SEGMENT_ENABLE = {
+    '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':False},
+    'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':False},
+}
+
+
+def apply_segment_switches(named_segments, game):
+    """
+    named_segments: 按顺序排列的 [(段名, 数组), ...]，顺序必须跟
+    normalize_state_segments() 实际拼接的顺序完全一致。
+    根据 SEGMENT_ENABLE[game] 里的开关，把关闭的段替换成同样长度的全0数组，
+    其余原样返回——只做清零，不改变任何一段的长度。
+    """
+    cfg = SEGMENT_ENABLE.get(game, {})
+    out = []
+    for name, arr in named_segments:
+        arr = np.asarray(arr, dtype=np.float32)
+        if not cfg.get(name, True):
+            arr = np.zeros_like(arr)
+        out.append(arr)
+    return out
+
+
 def normalize_state_segments(*segments):
     """
     分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
@@ -1057,7 +1095,13 @@ class IntegratedKL8Env(gym.Env):
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
         fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(80,dtype=np.float32)
 
-        state = normalize_state_segments(raw,mlv,lh,th,om,fr)
+        # 分段开关在这里对未归一化的原始数组操作，只清零数值不改变长度，
+        # 所以下面"末尾160维是遗漏+频率"这个切片假设依然成立
+        # （关掉的段清零后乘以PERBALL_WEIGHT还是0，不影响结果）
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th),
+             ('遗漏',om), ('频率',fr)], 'kl8')
+        state = normalize_state_segments(*segs)
         # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
         # （mlv插在最前段，不影响这个"末尾160维"的判定）
         state = state.copy()
@@ -1138,7 +1182,9 @@ class IntegratedSSQEnv(gym.Env):
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
 
-        return normalize_state_segments(raw,mlv,lh,th,om)
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], 'ssq')
+        return normalize_state_segments(*segs)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1226,7 +1272,9 @@ class Integrated3DEnv(gym.Env):
         else:
             th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
         om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
-        return normalize_state_segments(raw,mlv,lh,th,om)
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], '3d')
+        return normalize_state_segments(*segs)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed); self.idx=self.start
@@ -1517,7 +1565,10 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
         fr = freq_arr[idx]
-        state = normalize_state_segments(raw,mlv,lh,th,om,fr)
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th),
+             ('遗漏',om), ('频率',fr)], 'kl8')
+        state = normalize_state_segments(*segs)
         state = state.copy()
         state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
         return np.clip(state, -5, 5)
@@ -1875,7 +1926,9 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,mlv,lh,th,om)
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], 'ssq')
+        return normalize_state_segments(*segs)
 
     # 回测最近30期：红球命中数分布 + 蓝球命中率
     start=max(SEQ_LEN+30, len(records)-30)
@@ -2150,7 +2203,9 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
         lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
         th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
         om = omit_arr[idx]
-        return normalize_state_segments(raw,mlv,lh,th,om)
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], '3d')
+        return normalize_state_segments(*segs)
 
     # 回测窗口直接绑定训练边界 _hold_start，而不是写死一个数字——
     # 之前用 len(records)-30 能"恰好"不泄漏，只是因为 30 小于 holdout_size 的下限80，
