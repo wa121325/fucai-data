@@ -127,7 +127,7 @@ D3_POOL_N = 5
 # 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
 # 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
 # 改这里就行，不用碰 D3_N_BETS。
-D3_SAMPLE_N = 12
+D3_SAMPLE_N = 30
 # 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
 # D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
 D3_SAMPLE_DISPLAY_N = 12
@@ -144,8 +144,9 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
 
     返回值全部是Python原生类型(int/str/list)，可直接json序列化。
       digit_count : 0~9每个数字在全部采样注里出现的总次数（三位合计）
-      pair_top    : 同一注内两个数字共现的次数，如"3-7"；同注内每对最多算1次，
-                    331这注算 3-3 和 1-3 各1次；只列出现≥2次的，按次数降序
+      pair_top    : 同一注内两个数字共现的次数，如"3-7"；按位置两两配对、不去重，
+                    每注固定贡献3对：797 算 7-9×2 + 7-7×1，888 算 8-8×3；
+                    全部采样注的配对总数恒等于 3×注数；只列出现≥2次的，按次数降序
       sum_count   : 和值(三位之和)出现次数，只列出现过的，按和值升序
       span_count  : 跨度(最大-最小)出现次数，只列出现过的，按跨度升序
       group       : 组六(三位互不相同)/组三(恰有两位相同)/豹子(三位全同)的注数
@@ -164,8 +165,9 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
     for bet in sampled:
         b = [int(x) for x in bet]
         digit_cnt.update(b)
-        # 同一注内的两两组合(按位置取)，映射成有序数字对后同注去重，每对每注最多1次
-        pair_cnt.update({f"{min(x, y)}-{max(x, y)}" for x, y in combinations(b, 2)})
+        # 同一注内按位置两两配对(百十、百个、十个，每注固定3对)，映射成"小-大"的数字对，
+        # 不去重：797 的 百十=7-9、十个=9-7 是两对，所以 7-9 算2次，百个=7-7 算1次
+        pair_cnt.update([f"{min(x, y)}-{max(x, y)}" for x, y in combinations(b, 2)])
         sum_cnt[sum(b)] += 1
         span_cnt[max(b) - min(b)] += 1
         grp[{1: 'baozi', 2: 'zu3', 3: 'zu6'}[len(set(b))]] += 1
@@ -194,7 +196,7 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
 # 永远不可能超出holdout边界，不会引入数据泄漏。
 # 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
 # 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 80
+D3_BACKTEST_N = 200
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
