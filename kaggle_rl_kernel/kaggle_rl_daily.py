@@ -132,12 +132,69 @@ D3_SAMPLE_N = 12
 # D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
 D3_SAMPLE_DISPLAY_N = 12
 
+# 采样统计里"两号共现"最多列出多少对（只列同一注内出现≥2次的对，1次的太多没有意义）
+D3_STAT_PAIR_TOP = 12
+
+
+def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
+    """
+    对3D【采样注】做频率统计（只统计传入的采样注，不含确定性推荐那12注）。
+    统计的是传入的全部采样注(D3_SAMPLE_N注)，网页只展示其中前D3_SAMPLE_DISPLAY_N注，
+    所以调大D3_SAMPLE_N样本更多、统计更有参考价值。
+
+    返回值全部是Python原生类型(int/str/list)，可直接json序列化。
+      digit_count : 0~9每个数字在全部采样注里出现的总次数（三位合计）
+      pair_top    : 同一注内两个数字共现的次数，如"3-7"；同注内每对最多算1次，
+                    331这注算 3-3 和 1-3 各1次；只列出现≥2次的，按次数降序
+      sum_count   : 和值(三位之和)出现次数，只列出现过的，按和值升序
+      span_count  : 跨度(最大-最小)出现次数，只列出现过的，按跨度升序
+      group       : 组六(三位互不相同)/组三(恰有两位相同)/豹子(三位全同)的注数
+      bigsmall    : 每注的大小比(大:小，5~9为大)分布 + 全部号码里大/小的个数
+      oddeven     : 每注的奇偶比(奇:偶)分布 + 全部号码里奇/偶的个数
+    """
+    from itertools import combinations
+    from collections import Counter
+    n = len(sampled)
+    if n == 0:
+        return {}
+    digit_cnt, pair_cnt = Counter(), Counter()
+    sum_cnt, span_cnt = Counter(), Counter()
+    grp = Counter(); bs_ratio = Counter(); oe_ratio = Counter()
+    big_d = odd_d = 0
+    for bet in sampled:
+        b = [int(x) for x in bet]
+        digit_cnt.update(b)
+        # 同一注内的两两组合(按位置取)，映射成有序数字对后同注去重，每对每注最多1次
+        pair_cnt.update({f"{min(x, y)}-{max(x, y)}" for x, y in combinations(b, 2)})
+        sum_cnt[sum(b)] += 1
+        span_cnt[max(b) - min(b)] += 1
+        grp[{1: 'baozi', 2: 'zu3', 3: 'zu6'}[len(set(b))]] += 1
+        big = sum(1 for x in b if x >= 5)
+        odd = sum(1 for x in b if x % 2 == 1)
+        bs_ratio[f"{big}:{3 - big}"] += 1
+        oe_ratio[f"{odd}:{3 - odd}"] += 1
+        big_d += big; odd_d += odd
+    ratios = ['3:0', '2:1', '1:2', '0:3']
+    return {
+        'n': n,
+        'digit_count': [digit_cnt.get(d, 0) for d in range(10)],
+        'pair_top': [[k, v] for k, v in sorted(pair_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
+                     if v >= 2][:pair_top],
+        'sum_count': [[k, sum_cnt[k]] for k in sorted(sum_cnt)],
+        'span_count': [[k, span_cnt[k]] for k in sorted(span_cnt)],
+        'group': {'zu6': grp['zu6'], 'zu3': grp['zu3'], 'baozi': grp['baozi']},
+        'bigsmall': {'ratio': [[r, bs_ratio.get(r, 0)] for r in ratios],
+                     'big_digits': big_d, 'small_digits': 3 * n - big_d},
+        'oddeven': {'ratio': [[r, oe_ratio.get(r, 0)] for r in ratios],
+                    'odd_digits': odd_d, 'even_digits': 3 * n - odd_d},
+    }
+
 # 3D回测用的期数。想改期数，改这一个数字就行——
 # 不管改成多少，代码里会自动取 min(这个数, 当前holdout大小)，
 # 永远不可能超出holdout边界，不会引入数据泄漏。
 # 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
 # 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 200
+D3_BACKTEST_N = 80
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -785,7 +842,7 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
 SEGMENT_ENABLE = {
     '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
-    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':False},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':True},
 }
 
 
@@ -2157,8 +2214,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=2, patience=6, reset_timesteps=True, warmup_chunks=5,
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2373,6 +2430,16 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                 _sampled = []
                 print(f"  [观测·采样对比] 计算失败: {_e}")
 
+            # 采样注的频率统计（号码次数/两号共现/和值/跨度/组三组六/大小/奇偶），
+            # 只统计采样注；统计失败不能影响推荐本身，所以单独包一层try
+            try:
+                _sample_stats = compute_d3_sample_stats(_sampled)
+                if _sample_stats:
+                    print(f"  [采样统计] 已基于{_sample_stats['n']}注采样计算频率统计，随结果写入网页")
+            except Exception as _e:
+                _sample_stats = {}
+                print(f"  [采样统计] 计算失败: {_e}")
+
             if _d3_conds:
                 _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
                                  if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
@@ -2432,6 +2499,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
             'ppo_pred':pred,'ppo_groups':groups,
             'sampled_groups':_sampled[:D3_SAMPLE_DISPLAY_N],   # 网页主展示区：前N注
             'sampled_extra':_sampled[D3_SAMPLE_DISPLAY_N:],    # 超出展示数量的部分，网页用小字单独显示
+            'sampled_stats':_sample_stats,   # 采样注的频率统计，网页在两栏推荐下方展示
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
             'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
