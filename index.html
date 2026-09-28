@@ -2536,6 +2536,31 @@ function renderBacktest(bt){
 
 function factorial(n){ let r=1; for(let i=2;i<=n;i++) r*=i; return r; }
 
+/* 3D采样注的频率统计卡片：显示在"推荐/采样"两栏下方，数据来自RL脚本返回的 sampled_stats。
+   每个统计项做成不可拆分的小块(nowrap)：一行放不下时整块换到下一行，不会把"3-7×4"从中间断开。 */
+function renderD3SampleStats(st, shownCount){
+  if(!st || !st.n) return '';
+  const cnt = v => `<span style="color:#2dd4bf;font-weight:700;">×${v}</span>`;
+  const chip = (k, v, dim) => `<span style="display:inline-block;white-space:nowrap;margin:1px 10px 1px 0;${dim?'opacity:.35;':''}">${k}${cnt(v)}</span>`;
+  const row = (label, inner) => `<div style="display:flex;gap:8px;margin:5px 0;align-items:baseline;"><div style="flex:0 0 58px;color:#888;font-size:11px;white-space:nowrap;">${label}</div><div style="flex:1;min-width:0;line-height:1.75;">${inner}</div></div>`;
+  const note = t => `<span style="color:#666;font-size:10px;white-space:nowrap;">${t}</span>`;
+  const g = st.group || {}, bs = st.bigsmall || {}, oe = st.oddeven || {};
+  const pairs = (st.pair_top||[]).length
+    ? st.pair_top.map(p=>chip(p[0],p[1],false)).join('') + note('仅列同注出现≥2次')
+    : note('无（各对均只出现1次）');
+  let h = `<div style="font-size:12px;color:#666;margin:10px 0 4px;">采样统计（共${st.n}注${st.n>shownCount?`，上方仅展示前${shownCount}注`:''}）：</div>`;
+  h += `<div style="background:#1a1a2e;border-radius:8px;padding:4px 10px;color:#ccc;font-size:12px;">`;
+  h += row('号码次数', (st.digit_count||[]).map((c,d)=>chip(d,c,c===0)).join(''));
+  h += row('两号共现', pairs);
+  h += row('和值', (st.sum_count||[]).map(p=>chip(p[0],p[1],false)).join(''));
+  h += row('跨度', (st.span_count||[]).map(p=>chip(p[0],p[1],false)).join(''));
+  h += row('组选', chip('组六',g.zu6||0,!g.zu6) + chip('组三',g.zu3||0,!g.zu3) + (g.baozi?chip('豹子',g.baozi,false):''));
+  h += row('大小比', (bs.ratio||[]).map(p=>chip(p[0],p[1],p[1]===0)).join('') + note(`号码共 大${bs.big_digits||0} 小${bs.small_digits||0}`));
+  h += row('奇偶比', (oe.ratio||[]).map(p=>chip(p[0],p[1],p[1]===0)).join('') + note(`号码共 奇${oe.odd_digits||0} 偶${oe.even_digits||0}`));
+  h += `</div>`;
+  return h;
+}
+
 function renderDLResult(dlResult){
   const panel = document.getElementById('dlResultPanel');
   const meta  = document.getElementById('dlResultMeta');
@@ -2635,6 +2660,7 @@ function renderDLResult(dlResult){
           html += `</div>`;
         }
         html += `</div>`;
+        html += renderD3SampleStats(d3Rl.sampled_stats, (d3Rl.sampled_groups||[]).length);
       } else if(d3Rl.ppo_pred){
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO预测组合：</span></div>`;
         html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
