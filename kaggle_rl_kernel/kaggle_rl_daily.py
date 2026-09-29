@@ -149,10 +149,10 @@ def compute_d3_sample_stats(sampled, extra_bets=None, pair_top=D3_STAT_PAIR_TOP)
                     每注固定贡献3对：797 算 7-9×2 + 7-7×1，888 算 8-8×3；
                     全部采样注的配对总数恒等于 3×注数；只列出现≥2次的，按次数降序
       pos_pair_top: 位置共现——"十位4-个位7"专指这两个位置分别是4和7，跟数字对(pair_top)
-                    不是一回事(数字对不认位置，这个认)。统计范围是【采样注+推荐12注(extra_bets)】
-                    合并的池子，不只是采样注。只列出现≥2次的，每条额外带
-                    related_a/related_b：把其中一半条件(比如"十位=4")单独拿出来，
-                    在合并池子里找出所有符合这一半的注，供交叉验证这个信号
+                    不是一回事(数字对不认位置，这个认)。够不够格(≥2次)只由【采样注】决定，
+                    推荐12注(extra_bets)不参与计数；但每条信号的related_a/related_b钻取
+                    (把其中一半条件比如"十位=4"单独拿出来找相符的注)会在【采样+推荐】
+                    合并池子里找，让推荐注在这一步起验证/印证作用
       sum_count   : 和值(三位之和)出现次数，只列出现过的，按和值升序
       span_count  : 跨度(最大-最小)出现次数，只列出现过的，按跨度升序
       group       : 组六(三位互不相同)/组三(恰有两位相同)/豹子(三位全同)的注数
@@ -184,16 +184,17 @@ def compute_d3_sample_stats(sampled, extra_bets=None, pair_top=D3_STAT_PAIR_TOP)
         big_d += big; odd_d += odd
     ratios = ['3:0', '2:1', '1:2', '0:3']
 
-    # 位置共现：单独用【采样注 + 推荐12注】合并的池子统计，跟上面几项(只看采样注)不是同一批数据。
+    # 位置共现：找信号(计数、判断够不够≥2次强度)只用【采样注】，推荐12注不参与计数——
+    # 强度是不是够格，得由采样这批真正反映概率分布的数据说了算，推荐注不能掺进来影响判断。
     # "十位4-个位7"专指这两个位置分别是4和7，跟不认位置的数字对(pair_cnt)也不是一回事。
-    pos_pool = [[int(x) for x in bet] for bet in list(sampled) + list(extra_bets or [])]
+    sampled_int = [[int(x) for x in bet] for bet in sampled]
     pos_pair_cnt = Counter()
-    for b in pos_pool:
+    for b in sampled_int:
         for i, j in combinations(range(3), 2):
             pos_pair_cnt[f"{_D3_POS_NAMES[i]}{b[i]}-{_D3_POS_NAMES[j]}{b[j]}"] += 1
-    # 强信号(≥2次)才做钻取：把"其中一半条件"(某位=某数字)单独拿出来，
-    # 在【合并池子】里再找一遍谁还符合这一半，方便看这个信号周边有没有别的注印证
-    # （包括推荐12注里的，不只是采样注）。
+    # 验证/钻取则把【采样注 + 推荐12注】合并起来找：信号已经由采样注确认够格了，
+    # 这一步只是看这个信号在推荐注里有没有得到印证，推荐注在这里只当验证材料，不影响计数。
+    verify_pool = sampled_int + [[int(x) for x in bet] for bet in (extra_bets or [])]
     pos_pair_top = []
     for key, cnt_v in sorted(pos_pair_cnt.items(), key=lambda kv: (-kv[1], kv[0])):
         if cnt_v < 2:
@@ -204,15 +205,15 @@ def compute_d3_sample_stats(sampled, extra_bets=None, pair_top=D3_STAT_PAIR_TOP)
         idx_a = _D3_POS_NAMES.index(pos_a); idx_b = _D3_POS_NAMES.index(pos_b)
         pos_pair_top.append({
             'label': key, 'count': cnt_v,
-            'pos_a': pos_a, 'val_a': val_a, 'related_a': [b for b in pos_pool if b[idx_a] == val_a],
-            'pos_b': pos_b, 'val_b': val_b, 'related_b': [b for b in pos_pool if b[idx_b] == val_b],
+            'pos_a': pos_a, 'val_a': val_a, 'related_a': [b for b in verify_pool if b[idx_a] == val_a],
+            'pos_b': pos_b, 'val_b': val_b, 'related_b': [b for b in verify_pool if b[idx_b] == val_b],
         })
         if len(pos_pair_top) >= pair_top:
             break
 
     return {
         'n': n,
-        'n_pos_pool': len(pos_pool),
+        'n_pos_pool': len(verify_pool),  # 验证池子大小(采样+推荐)，不是计数用的采样数——计数只用sampled
         'pos_pair_top': pos_pair_top,
         'digit_count': [digit_cnt.get(d, 0) for d in range(10)],
         'pair_top': [[k, v] for k, v in sorted(pair_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -2251,7 +2252,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 300000, lambda: _eval_holdout(model), '3D首训',
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
