@@ -127,13 +127,14 @@ D3_POOL_N = 5
 # 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
 # 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
 # 改这里就行，不用碰 D3_N_BETS。
-D3_SAMPLE_N = 30
+D3_SAMPLE_N = 12
 # 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
 # D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
 D3_SAMPLE_DISPLAY_N = 12
 
 # 采样统计里"两号共现"最多列出多少对（只列同一注内出现≥2次的对，1次的太多没有意义）
 D3_STAT_PAIR_TOP = 12
+_D3_POS_NAMES = ["百位", "十位", "个位"]
 
 
 def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
@@ -147,6 +148,10 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
       pair_top    : 同一注内两个数字共现的次数，如"3-7"；按位置两两配对、不去重，
                     每注固定贡献3对：797 算 7-9×2 + 7-7×1，888 算 8-8×3；
                     全部采样注的配对总数恒等于 3×注数；只列出现≥2次的，按次数降序
+      pos_pair_top: 位置共现——"十位4-个位7"专指这两个位置分别是4和7，跟数字对(pair_top)
+                    不是一回事(数字对不认位置，这个认)。只列出现≥2次的，每条额外带
+                    related_a/related_b：把其中一半条件(比如"十位=4")单独拿出来，
+                    在全部采样注里找出所有符合这一半的注，供交叉验证这个信号
       sum_count   : 和值(三位之和)出现次数，只列出现过的，按和值升序
       span_count  : 跨度(最大-最小)出现次数，只列出现过的，按跨度升序
       group       : 组六(三位互不相同)/组三(恰有两位相同)/豹子(三位全同)的注数
@@ -158,7 +163,7 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
     n = len(sampled)
     if n == 0:
         return {}
-    digit_cnt, pair_cnt = Counter(), Counter()
+    digit_cnt, pair_cnt, pos_pair_cnt = Counter(), Counter(), Counter()
     sum_cnt, span_cnt = Counter(), Counter()
     grp = Counter(); bs_ratio = Counter(); oe_ratio = Counter()
     big_d = odd_d = 0
@@ -168,6 +173,10 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
         # 同一注内按位置两两配对(百十、百个、十个，每注固定3对)，映射成"小-大"的数字对，
         # 不去重：797 的 百十=7-9、十个=9-7 是两对，所以 7-9 算2次，百个=7-7 算1次
         pair_cnt.update([f"{min(x, y)}-{max(x, y)}" for x, y in combinations(b, 2)])
+        # 位置共现：跟上面的数字对不是一回事——"十位4-个位7"专指这两个位置分别是4和7，
+        # 跟"百位4-十位7"是两个不同的信号，不能像数字对那样混在一起统计
+        for i, j in combinations(range(3), 2):
+            pos_pair_cnt[f"{_D3_POS_NAMES[i]}{b[i]}-{_D3_POS_NAMES[j]}{b[j]}"] += 1
         sum_cnt[sum(b)] += 1
         span_cnt[max(b) - min(b)] += 1
         grp[{1: 'baozi', 2: 'zu3', 3: 'zu6'}[len(set(b))]] += 1
@@ -177,8 +186,27 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
         oe_ratio[f"{odd}:{3 - odd}"] += 1
         big_d += big; odd_d += odd
     ratios = ['3:0', '2:1', '1:2', '0:3']
+    # 位置共现的强信号(≥2次)才做钻取：把"其中一半条件"(某位=某数字)单独拿出来，
+    # 在全部采样注里再找一遍谁还符合这一半，方便看这个信号周不周边有别的注印证。
+    pos_pair_top = []
+    for key, cnt_v in sorted(pos_pair_cnt.items(), key=lambda kv: (-kv[1], kv[0])):
+        if cnt_v < 2:
+            continue
+        half_a, half_b = key.split('-')
+        pos_a, val_a = half_a[:2], int(half_a[2:])
+        pos_b, val_b = half_b[:2], int(half_b[2:])
+        idx_a = _D3_POS_NAMES.index(pos_a); idx_b = _D3_POS_NAMES.index(pos_b)
+        pos_pair_top.append({
+            'label': key, 'count': cnt_v,
+            'pos_a': pos_a, 'val_a': val_a, 'related_a': [b for b in sampled if b[idx_a] == val_a],
+            'pos_b': pos_b, 'val_b': val_b, 'related_b': [b for b in sampled if b[idx_b] == val_b],
+        })
+        if len(pos_pair_top) >= pair_top:
+            break
+
     return {
         'n': n,
+        'pos_pair_top': pos_pair_top,
         'digit_count': [digit_cnt.get(d, 0) for d in range(10)],
         'pair_top': [[k, v] for k, v in sorted(pair_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
                      if v >= 2][:pair_top],
@@ -196,7 +224,7 @@ def compute_d3_sample_stats(sampled, pair_top=D3_STAT_PAIR_TOP):
 # 永远不可能超出holdout边界，不会引入数据泄漏。
 # 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
 # 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 200
+D3_BACKTEST_N = 80
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -844,7 +872,7 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
 SEGMENT_ENABLE = {
     '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
-    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':False},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':True},
 }
 
 
@@ -2217,7 +2245,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 100000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=1, patience=6, reset_timesteps=True, warmup_chunks=5,
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
