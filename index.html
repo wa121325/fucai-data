@@ -2552,13 +2552,14 @@ function renderD3SampleStats(st, shownCount){
   // 每条强信号(≥2次)附带钻取：把其中一半条件单独拎出来，在全部采样注里找出所有符合的注，
   // 方便看这个信号周边有没有其它注互相印证。整条(标签+两行钻取)用一个块包住不拆开。
   const betStr = b => b.join('');
+  const posPoolNote = note(`(采样+推荐共${st.n_pos_pool||st.n}注)`);
   const posPairs = (st.pos_pair_top||[]).length
-    ? st.pos_pair_top.map(p=>`<div style="display:inline-block;vertical-align:top;background:#15152a;border-radius:5px;padding:3px 6px;margin:2px 6px 2px 0;">`
+    ? posPoolNote + '<br>' + st.pos_pair_top.map(p=>`<div style="display:inline-block;vertical-align:top;background:#15152a;border-radius:5px;padding:3px 6px;margin:2px 6px 2px 0;">`
         + `<div>${p.label}${cnt(p.count)}</div>`
         + `<div style="color:#888;font-size:9px;margin-top:1px;">${p.pos_a}=${p.val_a}: ${p.related_a.map(betStr).join(' ')}</div>`
         + `<div style="color:#888;font-size:9px;">${p.pos_b}=${p.val_b}: ${p.related_b.map(betStr).join(' ')}</div>`
         + `</div>`).join('')
-    : note('无（各组合均只出现1次）');
+    : posPoolNote + '<br>' + note('无（各组合均只出现1次）');
   let h = `<div style="font-size:11px;color:#666;margin:6px 0 3px;">采样统计（共${st.n}注${st.n>shownCount?`，上方仅展示前${shownCount}注`:''}）：</div>`;
   h += `<div style="background:#1a1a2e;border-radius:6px;padding:3px 8px;color:#ccc;font-size:10px;">`;
   h += row('号码次数', (st.digit_count||[]).map((c,d)=>chip(d,c,c===0)).join(''));
