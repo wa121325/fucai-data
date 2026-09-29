@@ -2552,7 +2552,7 @@ function renderD3SampleStats(st, shownCount){
   // 每条强信号(≥2次)附带钻取：把其中一半条件单独拎出来，在全部采样注里找出所有符合的注，
   // 方便看这个信号周边有没有其它注互相印证。整条(标签+两行钻取)用一个块包住不拆开。
   const betStr = b => b.join('');
-  const posPoolNote = note(`(采样+推荐共${st.n_pos_pool||st.n}注)`);
+  const posPoolNote = note(`(信号强度只看采样注，钻取时连推荐注一起验证共${st.n_pos_pool||st.n}注)`);
   const posPairs = (st.pos_pair_top||[]).length
     ? posPoolNote + '<br>' + st.pos_pair_top.map(p=>`<div style="display:inline-block;vertical-align:top;background:#15152a;border-radius:5px;padding:3px 6px;margin:2px 6px 2px 0;">`
         + `<div>${p.label}${cnt(p.count)}</div>`
