@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-09-30 05:06",
+  "updated_at": "2026-09-30 06:12",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8770,
-      "updated_at": "2026-09-30 04:46",
+      "updated_at": "2026-09-30 05:49",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -1186,11 +1186,6 @@
       "recommendation": {
         "groups": [
           [
-            2,
-            6,
-            3
-          ],
-          [
             8,
             3,
             4
@@ -1201,19 +1196,24 @@
             3
           ],
           [
-            2,
-            6,
-            7
-          ],
-          [
-            5,
+            9,
             0,
-            6
+            2
           ],
           [
             9,
-            0,
+            2,
             4
+          ],
+          [
+            3,
+            6,
+            4
+          ],
+          [
+            1,
+            6,
+            3
           ]
         ],
         "pos_candidates": [
@@ -1313,11 +1313,6 @@
         "sum_pred": "中(10-17)",
         "recommend_groups": [
           [
-            2,
-            6,
-            3
-          ],
-          [
             8,
             3,
             4
@@ -1328,26 +1323,31 @@
             3
           ],
           [
-            2,
-            6,
-            7
-          ],
-          [
-            5,
+            9,
             0,
-            6
+            2
           ],
           [
             9,
-            0,
+            2,
             4
+          ],
+          [
+            3,
+            6,
+            4
+          ],
+          [
+            1,
+            6,
+            3
           ]
         ]
       }
     },
     "ssq": {
       "data_count": 3510,
-      "updated_at": "2026-09-30 04:54",
+      "updated_at": "2026-09-30 05:59",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -2544,24 +2544,35 @@
           {
             "red": [
               1,
+              2,
+              10,
+              13,
+              24,
+              30
+            ],
+            "blue": 5
+          },
+          {
+            "red": [
+              2,
+              5,
+              6,
+              18,
+              24,
+              25
+            ],
+            "blue": 14
+          },
+          {
+            "red": [
+              1,
               4,
               8,
               18,
               24,
               25
             ],
-            "blue": 5
-          },
-          {
-            "red": [
-              5,
-              6,
-              13,
-              18,
-              23,
-              25
-            ],
-            "blue": 14
+            "blue": 3
           },
           {
             "red": [
@@ -2572,7 +2583,7 @@
               24,
               30
             ],
-            "blue": 3
+            "blue": 4
           },
           {
             "red": [
@@ -2582,17 +2593,6 @@
               18,
               25,
               30
-            ],
-            "blue": 4
-          },
-          {
-            "red": [
-              8,
-              9,
-              11,
-              13,
-              23,
-              25
             ],
             "blue": 11
           }
@@ -2646,7 +2646,7 @@
     },
     "kl8": {
       "data_count": 2083,
-      "updated_at": "2026-09-30 05:01",
+      "updated_at": "2026-09-30 06:07",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -3832,10 +3832,10 @@
                 53
               ],
               [
-                50,
+                8,
                 51,
-                54,
-                55
+                52,
+                53
               ]
             ]
           },
@@ -4037,7 +4037,7 @@
     "date": "2026-09-30",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-09-29 18:52",
+        "prediction_generated_at": "2026-09-30 04:46",
         "actual_qihao": "2026262",
         "actual_date": "2026-09-29",
         "actual": [
@@ -4049,7 +4049,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-09-29 18:57",
+        "prediction_generated_at": "2026-09-30 04:54",
         "actual_qihao": "2026113",
         "actual_date": "2026-09-29",
         "actual_red": [
@@ -4090,7 +4090,7 @@
         "best_red_hit": 2
       },
       "kl8": {
-        "prediction_generated_at": "2026-09-29 19:02",
+        "prediction_generated_at": "2026-09-30 05:01",
         "actual_qihao": "2026262",
         "actual_date": "2026-09-29",
         "actual": [
