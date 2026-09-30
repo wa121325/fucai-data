@@ -729,7 +729,87 @@ def fkl8(records, idx):
 #  代价：只用RF一种模型（不是生产环境RF+XGB+LGB三模型集成），牺牲一点精度
 #  换取速度；最早 min_train 期左右没有可用历史，用均匀分布占位。
 # ══════════════════════════════════════════════════════
-def compute_ml_walkforward(X, Y, keys, nc_map, stride=500, min_train=300):
+def _adaptive_wf_stride(n_records):
+    """
+    walk-forward每隔多少期重训一次，按数据量自适应，不再写死500。
+
+    ── 为什么必须自适应 ──
+    固定stride=500，对8700+期的3D只占5.7%，重训17次，粒度还行；
+    但双色球/快乐8只有1800~2000期，500期占了约25%~27%，
+    整个历史只重训4次——意味着约四分之一的期数，都是用同一个
+    早就过时的模型预测出来的，粒度太粗，跟3D完全不是一个精细程度。
+    改成按总期数的5%动态算，三个游戏的"每块占比"都稳定在5%左右，
+    重训次数16~20次，粒度基本一致，不再因为游戏数据量差异悬殊而失衡。
+    """
+    return max(100, min(500, int(n_records * 0.05)))
+
+
+def diagnose_optimal_stride(X, y, nc, candidates=(50,100,200,300,500,800), test_frac=0.15,
+                            min_train=300, verbose=True):
+    """
+    实测哪个stride更好，而不是凭感觉挑一个数字。
+
+    ── 怎么保证候选之间公平比较 ──
+    每个候选stride各自在【全部历史】上跑一遍walk-forward重建(用的是同一份
+    compute_ml_walkforward逻辑，绝不偷看未来——这个约束不因stride变化而改变)，
+    然后统一在【最后 test_frac 比例的期数】上打分。这段测试区对所有候选都一样，
+    差异只来自stride本身，比较才公平。
+
+    ── 用什么打分 ──
+    对数概率(log-loss的相反数)，不用命中率——命中率是离散的对/错，
+    对"stride=100"和"stride=500"这种量级的细微差异不敏感，
+    这个项目里已经反复验证过这一点。
+
+    ── 怎么判断差异是真的还是噪声 ──
+    多个候选的分数会很接近，必须看差距有没有超过标准误的量级，
+    不能谁的数字略高一点就说谁更好——这跟整个项目的方法论一致：
+    没有跨过显著性门槛的"更好"，大概率只是噪声。
+
+    返回 {stride: {'logp':平均对数概率, 'n':测试样本数, 'se':标准误}}
+    """
+    n = len(X)
+    test_start = int(n * (1 - test_frac))
+    if test_start <= min_train:
+        print("    ! 数据量太小，不足以留出测试区，跳过stride诊断")
+        return {}
+
+    results = {}
+    for stride in candidates:
+        wf = compute_ml_walkforward(X, {'y': y}, ['y'], {'y': nc}, stride=stride, min_train=min_train)
+        probs = wf['y']
+        # 只看测试区：真实标签的对数概率
+        idx = np.arange(test_start, n)
+        true_labels = y[idx]
+        p_true = probs[idx, true_labels]
+        logp_vals = np.log(np.clip(p_true, 1e-9, 1.0))
+        logp_mean = float(np.mean(logp_vals))
+        se = float(np.std(logp_vals) / np.sqrt(len(logp_vals))) if len(logp_vals) > 1 else 0.0
+        results[stride] = {'logp': round(logp_mean,4), 'n': len(idx), 'se': round(se,4)}
+        if verbose:
+            print(f"    stride={stride:4}  测试区平均对数概率={logp_mean:.4f} ± {se:.4f}  "
+                  f"(均匀基准={np.log(1.0/nc):.4f})")
+
+    if verbose and results:
+        best = max(results, key=lambda k: results[k]['logp'])
+        best_logp, best_se = results[best]['logp'], results[best]['se']
+        # 跟best比，差距没超过2倍标准误的，都算"分不出谁真的更好"，归入同一组；
+        # 差距超过2倍标准误的，才能确定是真的更差——不能因为分不清谁是"最优"，
+        # 就把"明显更差的候选也被甩开了"这个结论一起抹掉。
+        tied = [s for s,r in results.items()
+                if s==best or (best_logp - r['logp']) <= 2*np.sqrt(best_se**2 + r['se']**2)]
+        worse = sorted(s for s in results if s not in tied)
+        print(f"    → 分数最高: stride={best}")
+        if len(tied) > 1:
+            print(f"      跟 {sorted(set(tied)-{best})} 差距在噪声范围内(2倍标准误内)，"
+                  f"这几个之间分不出真的谁更优")
+        if worse:
+            print(f"      但明显优于(超过2倍标准误): {worse} —— 这几个可以确定更差，不建议用")
+        elif len(tied) == 1:
+            print(f"      明显优于全部其他候选，是可信的最优选择")
+    return results
+
+
+def compute_ml_walkforward(X, Y, keys, nc_map, stride=None, min_train=300):
     """
     返回 {target_name: (n, n_classes)数组}，每一行是【该期特征对应的下一期】
     在"当时"可用的模型下的概率分布，不含任何该期或之后的信息。
@@ -739,6 +819,8 @@ def compute_ml_walkforward(X, Y, keys, nc_map, stride=500, min_train=300):
     "预测第checkpoint到end行"，天然就是walk-forward安全的。
     """
     n = X.shape[0]
+    if stride is None:
+        stride = _adaptive_wf_stride(n)
     out = {k: np.full((n, nc_map[k]), 1.0/nc_map[k], dtype=np.float32) for k in keys}
     if not HAS_SKL or n <= min_train:
         return out
