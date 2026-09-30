@@ -1326,12 +1326,12 @@ def rec3d(records, ml, mk, om):
     """
     score = [{} for _ in range(3)]
 
-    # ML概率贡献（权重45%）
-    for pi, pname in enumerate(['bai','shi','ge']):
-        m = ml.get(pname, {})
-        probs = m.get('prediction', {}).get('probs', {}) if m else {}
-        for k, v in probs.items():
-            score[pi][int(k)] = score[pi].get(int(k), 0) + float(v) * 0.45
+    # 注：原来这里还有一段"ML概率贡献(权重45%)"，从 ml.get('bai'/'shi'/'ge') 取值——
+    # 但ML训练的是组合级目标(和值/奇偶/大小等)，从来没有百/十/个位各自独立的
+    # 预测模型，这三个key在ml里永远不存在，这段代码实际上一直贡献0，
+    # 却顶着45%权重的名号。发现后直接删掉，不去凑一个"假的"每位概率——
+    # 位置层面的信息现在由马尔可夫+遗漏两路提供，组合层面的信息由下面
+    # "条件筛选"那部分的_conds(现在10个目标)提供，两者已经覆盖了ML能给的全部信息。
 
     # 马尔可夫转移贡献（权重35%）
     for mk_item in (mk or []):
@@ -1368,19 +1368,25 @@ def rec3d(records, ml, mk, om):
         tri = (b == s == g)
         grp3 = (b == s or s == g or b == g) and not tri
         s3 = sorted(c); roads = [x % 3 for x in c]
+        span = max(c) - min(c)
         return {
             'sum_grp':    0 if sm <= 9 else (1 if sm <= 17 else 2),
             'odd':        sum(1 for x in c if x % 2 != 0),
             'group_type': 0 if tri else (1 if grp3 else 2),
             'big':        sum(1 for x in c if x >= 5),
-            'span_grp':   (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c) - min(c)),
+            'span_grp':   (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(span),
             'road_dom':   max(set(roads), key=roads.count),
             'arith':      int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0),
+            # 下面3个是新加的目标，算法必须跟tgt3d完全一致，否则"符合条件"判断会失真
+            'prime_cnt':  sum(1 for x in c if x in {2,3,5,7}),
+            'sum_tail':   sm % 10,
+            'span_odd':   span % 2,
         }
 
     # 收集ML各目标的预测值与置信度（置信度作为该条件的权重，模型越有把握的条件越重要）
     _conds = {}
-    for _k in ['sum_grp', 'odd', 'group_type', 'big', 'span_grp', 'road_dom', 'arith']:
+    for _k in ['sum_grp', 'odd', 'group_type', 'big', 'span_grp', 'road_dom', 'arith',
+               'prime_cnt', 'sum_tail', 'span_odd']:
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
@@ -1542,6 +1548,8 @@ def recssq(records, ml, om):
         z1 = sum(1 for x in r if x <= 11); z2 = sum(1 for x in r if 12 <= x <= 22)
         z3 = sum(1 for x in r if x >= 23)
         mg = max(r[i+1]-r[i] for i in range(len(r)-1)) if len(r) > 1 else 0
+        _prime_n = sum(1 for x in r if x in _PRIMES)
+        _tc = Counter(x % 10 for x in r)
         return {
             'odd':          sum(1 for x in r if x % 2 != 0),
             'sum_grp':      0 if sm < 70 else (1 if sm < 100 else 2),
@@ -1550,10 +1558,15 @@ def recssq(records, ml, om):
             'gap_grp':      0 if mg <= 5 else (1 if mg <= 10 else 2),
             'big':          sum(1 for x in r if x > 16),
             'consec':       sum(1 for i in range(len(r)-1) if r[i+1]-r[i] == 1),
+            # 下面3个是新加的目标，算法必须跟tgtssq完全一致
+            'prime_grp':    0 if _prime_n<=1 else (1 if _prime_n==2 else 2),
+            'sum_tail':     sm % 10,
+            'same_tail':    min(sum(c*(c-1)//2 for c in _tc.values()), 3),
         }
 
     _ssq_conds = {}
-    for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']:
+    for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec',
+               'prime_grp','sum_tail','same_tail']:
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
@@ -1567,38 +1580,9 @@ def recssq(records, ml, om):
                    for b in base_bets) / len(base_bets)
         print(f"    [双色球条件筛选] 共{len(_ssq_conds)}条ML预测条件，6注平均符合{_avg:.1f}条")
 
-    def _tune(picked):
-        """
-        按ML的奇偶/和值预测做定向微调：不满足时用候选池里分数最高的合适球替换，
-        而不是像以前那样"整注推倒重新随机生成"——那样号码全靠碰运气。
-        """
-        picked = list(picked)
-        ranked = [n for n, _ in sorted(ssq_scores.items(), key=lambda x: -x[1])]
-        # 奇偶调整
-        for _ in range(6):
-            cur_odd = sum(1 for n in picked if n % 2 != 0)
-            if abs(cur_odd - odd_pred) <= 1: break
-            need_odd = cur_odd < odd_pred
-            out = next((n for n in reversed(picked) if (n % 2 != 0) != need_odd), None)
-            inn = next((n for n in ranked if n not in picked and (n % 2 != 0) == need_odd), None)
-            if out is None or inn is None: break
-            picked[picked.index(out)] = inn
-        # 和值调整（0=低<70, 2=高>=100）
-        for _ in range(6):
-            cur_sum = sum(picked)
-            if sm_val == 0 and cur_sum < 100: break
-            if sm_val == 2 and cur_sum >= 70: break
-            if sm_val == 1: break
-            need_small = (sm_val == 0)
-            out = max(picked) if need_small else min(picked)
-            inn = next((n for n in ranked if n not in picked and
-                        (n < out if need_small else n > out)), None)
-            if inn is None: break
-            picked[picked.index(out)] = inn
-        return sorted(picked)
-
     groups, seen = [], set()
-    # 注：这里原先还有一步 _tune()，按奇偶/和值预测对号码做替换微调。
+    # 注：这里原先还有一个 _tune() 函数，按奇偶/和值预测对号码做替换微调，
+    # 但定义之后从没被调用过(死代码)，这次连同它一起删掉。
     # 现在 cond_filtered_picks 已经把奇偶、和值连同AC值、主力区、间距、大数、连号
     # 一并作为筛选条件，再做微调只会破坏已筛好的组合，因此不再调用。
     for i, bet in enumerate(base_bets):
@@ -1815,6 +1799,13 @@ def reckl8(records, ml, om):
         # 因此这几项按"占比"折算回20球口径再分档。
         k = 20.0 / max(len(c), 1)
         odd20, big20, tt20 = odd * k, big * k, tt * k
+        # 质数个数是跟odd/big同类的"简单比例"统计，可以用同一套rescale折算回20球口径。
+        # 但ac_grp(AC值)、same_tail_grp(同尾对数)不是线性比例关系——AC值取决于
+        # 具体数字的排列间距、同尾对数取决于C(选球数,2)这种组合数，
+        # 20球和选4/6/9球时的量级、分布形状完全不是简单倍数关系，
+        # 硬套20球训练出来的分档阈值只会systematically落进"低档"，没有意义。
+        # 所以这两个新目标不纳入快乐8的选号条件，只有prime_grp纳入。
+        prime20 = sum(1 for x in c if x in _PRIMES) * k
         return {
             'odd_grp':    0 if odd20 < 9 else (1 if odd20 <= 11 else 2),
             'zone_dom':   int(max(range(4), key=lambda i: zn[i])),
@@ -1823,10 +1814,11 @@ def reckl8(records, ml, om):
             'five_dom':   int(max(range(5), key=lambda i: fv[i])),
             'consec_grp': 0 if cg == 0 else (1 if cg <= 2 else 2),
             'range_grp':  0 if rng < 60 else (1 if rng < 70 else 2),
+            'prime_grp':  0 if prime20 <= 4 else (1 if prime20 <= 6 else 2),
         }
 
     _kl8_conds = {}
-    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']:
+    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','prime_grp']:
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
