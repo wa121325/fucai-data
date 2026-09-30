@@ -557,48 +557,69 @@ def fkl8(records, idx):
 
 
 class LSTMEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dim=10, dropout=0.3):
+    """
+    多任务版本，跟 kaggle_lstm_tfm.py 里的定义必须逐字段保持一致——
+    这里只用于加载已训练好的权重(不参与训练)，但 load_state_dict 是按key名严格匹配的，
+    这份定义(包括属性名 self.heads、每层的具体结构)只要跟训练那边有一丝出入就会报错。
+    """
+    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dims=(10,), dropout=0.3):
         super().__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True,
                             dropout=dropout if num_layers>1 else 0)
         self.norm = nn.LayerNorm(hidden_dim)
-        self.head = nn.Sequential(nn.Linear(hidden_dim,64), nn.GELU(), nn.Dropout(dropout), nn.Linear(64,output_dim))
+        self.heads = nn.ModuleList([
+            nn.Sequential(nn.Linear(hidden_dim,64), nn.GELU(), nn.Dropout(dropout), nn.Linear(64,od))
+            for od in output_dims])
     def forward(self, x, return_hidden=False):
-        out,_ = self.lstm(x); last = self.norm(out[:,-1,:]); logits = self.head(last)
-        return (logits,last) if return_hidden else logits
+        out,_ = self.lstm(x); last = self.norm(out[:,-1,:])
+        logits_list = [head(last) for head in self.heads]
+        return (logits_list,last) if return_hidden else logits_list
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim, d_model=32, nhead=4, num_layers=2, output_dim=10, dropout=0.2):
+    """多任务版本，道理同 LSTMEncoder：只用于加载权重，结构必须跟训练那边逐字段一致。"""
+    def __init__(self, input_dim, d_model=32, nhead=4, num_layers=2, output_dims=(10,), dropout=0.2):
         super().__init__()
         self.proj = nn.Linear(input_dim, d_model)
         enc = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=128,
                                          dropout=dropout, batch_first=True, norm_first=True)
         self.transformer = nn.TransformerEncoder(enc, num_layers)
         self.pool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Sequential(nn.Linear(d_model,32), nn.GELU(), nn.Linear(32,output_dim))
+        self.heads = nn.ModuleList([
+            nn.Sequential(nn.Linear(d_model,32), nn.GELU(), nn.Linear(32,od))
+            for od in output_dims])
     def forward(self, x, return_hidden=False):
         x = self.proj(x); x = self.transformer(x)
-        pooled = self.pool(x.transpose(1,2)).squeeze(-1); logits = self.head(pooled)
-        return (logits,pooled) if return_hidden else logits
+        pooled = self.pool(x.transpose(1,2)).squeeze(-1)
+        logits_list = [head(pooled) for head in self.heads]
+        return (logits_list,pooled) if return_hidden else logits_list
 
 
 def load_lstm_tfm(game, current_feat_dim=None):
-    """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重"""
+    """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重（多任务共享主干架构）"""
     meta_path = f'{DL_MOUNTED}/{game}_meta.json'
     if not os.path.exists(meta_path):
         print(f"  ! 找不到 {game} 的LSTM/TFM权重（先运行 kaggle_lstm_tfm.py 并挂载 {DL_DATASET_SLUG}）")
         return None, None, None
     with open(meta_path) as f: meta = json.load(f)
-    # 特征维度校验：若当前特征函数产出维度与保存时不一致（特征工程改了），
-    # 直接跳过旧权重，避免运行到forward()时矩阵形状不匹配而崩溃
+    # 新版meta.json用的是 n_classes_list(每个目标各自的分类数列表)，
+    # 不再是单个 n_classes——旧版meta.json(多任务重构之前存的)没有这个字段，
+    # 用 .get() 而不是 meta['n_classes_list']，读不到时干净地走"跳过"分支，
+    # 而不是让 KeyError 直接把整个训练进程崩掉。
+    nc_list = meta.get('n_classes_list')
+    # 特征维度或目标结构（新旧meta格式不一致、或特征工程改了）任一项不匹配，
+    # 直接跳过旧权重，避免运行到forward()/load_state_dict()时形状或key不匹配而崩溃
+    if nc_list is None:
+        print(f"  ! {game} 的LSTM/TFM权重是旧格式meta.json(缺n_classes_list字段，"
+              f"多任务重构之前保存的)，请重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
+        return None, None, None
     if current_feat_dim is not None and meta.get('feat_dim') != current_feat_dim:
         print(f"  ! {game} 的LSTM/TFM权重特征维度({meta.get('feat_dim')})与当前特征工程({current_feat_dim})不一致")
         print(f"    请先重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
         return None, None, None
-    lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
+    lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dims=nc_list)
     lstm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu'))
     lstm.eval()
-    tfm = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
+    tfm = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dims=nc_list)
     tfm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu'))
     tfm.eval()
     return lstm, tfm, meta
