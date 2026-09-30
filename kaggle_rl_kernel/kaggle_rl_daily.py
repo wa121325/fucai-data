@@ -929,6 +929,125 @@ def apply_segment_switches(named_segments, game):
     return out
 
 
+# ══════════════════════════════════════════════════════
+#  分段自动开关：跑完回测后，自动判断哪些段在帮倒忙，攒够多天证据才动手关
+#
+#  ── 便宜的消融测试 ──
+#  模型已经训练好了，不用重新训练——只是在holdout上，把某一段临时清零，
+#  重新跑一遍前向推理再评一次分，跟baseline(当前开关设置)比较。
+#  这测的是"当前这个模型有多依赖这一段"，不是"从一开始不用这段训练会不会更好"，
+#  两者相关但不完全一样，可以理解为一个较便宜的代理信号。
+#
+#  ── 为什么不能当天就关 ──
+#  holdout样本有限，今天随手测都可能有一两段"看起来关了更好"，这跟之前
+#  α自动选择要解决的问题是同一回事：单日的"更好"大概率是噪声。
+#  所以这里也是"只记录，不当天决策"，攒够天数、差距显著才真正切换。
+# ══════════════════════════════════════════════════════
+def run_segment_ablation(game, eval_fn, verbose=True):
+    """
+    对已训练好的模型，在holdout上做消融：baseline(当前开关设置) vs 逐个临时关掉某一段。
+    eval_fn 复用 run_X_daily 里已经定义好的 _eval_holdout 闭包——调用它就会自动读取
+    当前的 SEGMENT_ENABLE 状态，因为 _state() 内部会调用 apply_segment_switches。
+    """
+    orig_cfg = dict(SEGMENT_ENABLE.get(game, {}))
+    scores = {'__baseline__': eval_fn()}
+    for seg_name, enabled in orig_cfg.items():
+        if not enabled:
+            continue   # 已经关闭的段，不需要再测"关闭后"——现在就是关闭状态
+        SEGMENT_ENABLE[game] = dict(orig_cfg); SEGMENT_ENABLE[game][seg_name] = False
+        scores[seg_name] = eval_fn()
+        if verbose:
+            delta = scores[seg_name] - scores['__baseline__']
+            print(f"    [分段消融] 关闭「{seg_name}」后holdout={scores[seg_name]:.4f}"
+                  f"（baseline={scores['__baseline__']:.4f}，差值{delta:+.4f}，"
+                  f"{'关闭后更好' if delta > 0 else '关闭后更差或持平'}）")
+    SEGMENT_ENABLE[game] = orig_cfg   # 恢复原配置，不能让这次消融测试的临时改动漏出去
+    return scores
+
+
+def record_segment_scores(game, scores_today):
+    """把今天的消融评分记录到持久化历史，只记录不决策，道理同 record_alpha_scores"""
+    path = f'{RL_LOCAL_DIR}/{game}_segment_history.json'
+    hist = []
+    for p in (f'{RL_MOUNTED}/{game}_segment_history.json', path):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: hist = json.load(f); break
+            except Exception: pass
+    hist.append({'date': str(date.today()), 'scores': scores_today})
+    hist = hist[-400:]
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"    ! 写入{game}分段消融历史失败: {e}")
+    return hist
+
+
+def auto_tune_segments(hist, se_per_step, min_days=15, margin_k=2.0):
+    """
+    根据多天累积的"关闭某段 vs baseline"证据，决定要不要真的关掉某段。
+
+    对每一段，比较【关闭后的分数】和【baseline分数】的多天平均差距：
+      - 关闭后显著更好(差距 > margin_k倍标准误) → 这段在帮倒忙，建议关闭
+      - 关闭后显著更差 → 这段有正贡献，确认保持打开
+      - 差距不显著 → 不建议改动，保持现状(避免单日噪声导致来回切换)
+
+    返回 {段名: (建议的开关状态True/False, 原因说明)}，只有真正判断出结果的段才会出现在返回值里；
+    证据不足或差距不显著的段不放进返回值，调用方应保持这些段的现状不变。
+    """
+    if len(hist) < min_days:
+        return {}, f"仅积累{len(hist)}天(<{min_days}天门槛)，暂不调整任何分段开关"
+
+    seg_names = [k for k in hist[-1]['scores'] if k != '__baseline__']
+    decisions = {}
+    for seg in seg_names:
+        pairs = [(h['scores'].get('__baseline__'), h['scores'].get(seg)) for h in hist
+                 if h['scores'].get('__baseline__') is not None and h['scores'].get(seg) is not None]
+        if len(pairs) < min_days:
+            continue
+        n = len(pairs)
+        diffs = [off - base for base, off in pairs]   # 关闭后-baseline，>0说明关闭更好
+        mean_diff = sum(diffs) / n
+        se = se_per_step / max(n, 1) ** 0.5
+        if mean_diff > margin_k * se:
+            decisions[seg] = (False, f"累计{n}天，关闭后比开启平均高{mean_diff:.4f}"
+                                     f"(>{margin_k}倍标准误{se:.4f})，建议关闭")
+        elif mean_diff < -margin_k * se:
+            decisions[seg] = (True, f"累计{n}天，开启比关闭平均高{-mean_diff:.4f}"
+                                    f"(>{margin_k}倍标准误{se:.4f})，确认保持开启")
+        # 不显著的不放进decisions，调用方保持这段现状不变
+    return decisions, f"已积累{len(hist)}天证据"
+
+
+def load_segment_override(game):
+    """读取之前自动决定过的分段开关状态，应用到 SEGMENT_ENABLE 上——
+    没有这一步的话，每天都是全新进程，昨天自动关掉的段今天又会变回默认的开"""
+    for path in (f'{RL_MOUNTED}/{game}_segment_override.json',
+                 f'{RL_LOCAL_DIR}/{game}_segment_override.json'):
+        if os.path.exists(path):
+            try:
+                with open(path) as f: override = json.load(f)
+                for seg, enabled in override.items():
+                    if game in SEGMENT_ENABLE and seg in SEGMENT_ENABLE[game]:
+                        SEGMENT_ENABLE[game][seg] = enabled
+                if override:
+                    print(f"  [分段开关] 已加载{game}上次自动决定: {override}")
+                return override
+            except Exception as e:
+                print(f"  ! 读取{game}分段开关历史决定失败: {e}")
+    return {}
+
+
+def save_segment_override(game, override):
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(f'{RL_LOCAL_DIR}/{game}_segment_override.json', 'w') as f:
+            json.dump(override, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"  ! 保存{game}分段开关决定失败: {e}")
+
+
 def normalize_state_segments(*segments):
     """
     分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
@@ -1560,6 +1679,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
         return carry_over_result('kl8', '快乐8', prev_result, len(records), last_trained_n,
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
+    load_segment_override('kl8')
+
     _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
 
@@ -1667,6 +1788,19 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
+
+    _seg_scores_kl8 = run_segment_ablation('kl8', lambda: _eval_holdout(model))
+    _seg_hist_kl8 = record_segment_scores('kl8', _seg_scores_kl8)
+    _se_seg_kl8 = math.sqrt(6*0.25*0.75) / max(len(records)-_hold_start, 1) ** 0.5
+    _seg_decisions_kl8, _seg_note_kl8 = auto_tune_segments(_seg_hist_kl8, _se_seg_kl8)
+    print(f"    [分段自动开关] {_seg_note_kl8}")
+    if _seg_decisions_kl8:
+        _override_kl8 = load_segment_override('kl8') or {}
+        for _seg, (_enabled, _why) in _seg_decisions_kl8.items():
+            print(f"      {_seg}: {_why}")
+            SEGMENT_ENABLE['kl8'][_seg] = _enabled
+            _override_kl8[_seg] = _enabled
+        save_segment_override('kl8', _override_kl8)
 
     save_ppo(model, 'kl8')
 
@@ -1936,6 +2070,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
         return carry_over_result('ssq', '双色球', prev_result, len(records), last_trained_n,
                                  '双色球周二/四/日开奖，本次运行无新开奖数据')
 
+    load_segment_override('ssq')
+
     _cur_feat_dim = len(fssq(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
 
@@ -2033,6 +2169,19 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
+
+    _seg_scores_ssq = run_segment_ablation('ssq', lambda: _eval_holdout(model))
+    _seg_hist_ssq = record_segment_scores('ssq', _seg_scores_ssq)
+    _se_seg_ssq = math.sqrt(6*(6/33)*(27/33)) / max(len(records)-_hold_start, 1) ** 0.5
+    _seg_decisions_ssq, _seg_note_ssq = auto_tune_segments(_seg_hist_ssq, _se_seg_ssq)
+    print(f"    [分段自动开关] {_seg_note_ssq}")
+    if _seg_decisions_ssq:
+        _override_ssq = load_segment_override('ssq') or {}
+        for _seg, (_enabled, _why) in _seg_decisions_ssq.items():
+            print(f"      {_seg}: {_why}")
+            SEGMENT_ENABLE['ssq'][_seg] = _enabled
+            _override_ssq[_seg] = _enabled
+        save_segment_override('ssq', _override_ssq)
 
     save_ppo(model, 'ssq')
 
@@ -2217,6 +2366,10 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
         return carry_over_result('3d', '福彩3D', prev_result, len(records), last_trained_n,
                                  '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
 
+    # 加载之前自动决定过的分段开关（比如之前判断出某段在帮倒忙、已自动关闭），
+    # 没有这一步的话，每天都是全新进程，昨天关掉的段今天又会变回默认的开
+    load_segment_override('3d')
+
     _cur_feat_dim = len(f3d(records, len(records)-1) or {})
     lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
 
@@ -2280,8 +2433,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 300000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
+            model, 200000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=10, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2310,6 +2463,21 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
+
+    # 分段消融：用训好的模型，在holdout上测"关掉某段是不是反而更好"，
+    # 只记录今天的结果，攒够天数、差距显著才真的自动关闭（见函数注释）
+    _seg_scores_3d = run_segment_ablation('3d', lambda: _eval_holdout(model))
+    _seg_hist_3d = record_segment_scores('3d', _seg_scores_3d)
+    _se_seg_3d = math.sqrt(3*0.1*0.9) / max(len(records)-_hold_start, 1) ** 0.5
+    _seg_decisions_3d, _seg_note_3d = auto_tune_segments(_seg_hist_3d, _se_seg_3d)
+    print(f"    [分段自动开关] {_seg_note_3d}")
+    if _seg_decisions_3d:
+        _override_3d = load_segment_override('3d') or {}
+        for _seg, (_enabled, _why) in _seg_decisions_3d.items():
+            print(f"      {_seg}: {_why}")
+            SEGMENT_ENABLE['3d'][_seg] = _enabled
+            _override_3d[_seg] = _enabled
+        save_segment_override('3d', _override_3d)
 
     save_ppo(model, '3d')
 
