@@ -1,0 +1,2643 @@
+"""
+福彩 PPO 强化学习 — 每天增量微调
+kaggle_rl_daily.py
+
+功能：
+  1. 加载上次训练好的 PPO 模型（从 Kaggle Dataset "fucai-rl-cache"）
+     若没有则首次全量训练
+  2. 加载本周训练好的 LSTM/Transformer 权重（从 "fucai-dl-cache"）
+     计算最新一期的隐层状态，构建 RL 状态
+  3. 用最近新增的数据做增量微调（几千步，而非从头训练）
+  4. 保存更新后的 PPO 模型回 Kaggle Dataset
+  5. 更新 prediction.json 的 dl_result.rl 字段（每天更新）
+
+Kaggle Secrets: GH_TOKEN, GH_REPO, KAGGLE_TOKEN
+Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
+"""
+import os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy, math
+from datetime import datetime, date
+from collections import Counter, defaultdict
+from itertools import combinations
+warnings.filterwarnings('ignore')
+
+_secrets_client = None
+_secrets_client_ready = False
+
+def _get_secrets_client(retries=5, delay=4):
+    global _secrets_client, _secrets_client_ready
+    if _secrets_client_ready:
+        return _secrets_client
+    for attempt in range(retries):
+        try:
+            from kaggle_secrets import UserSecretsClient
+            _secrets_client = UserSecretsClient()
+            _secrets_client_ready = True
+            print(f"  [Secrets] Client 连接成功（第{attempt+1}次尝试）")
+            return _secrets_client
+        except Exception as e:
+            if attempt < retries - 1:
+                print(f"  [Secrets] Client 连接失败（第{attempt+1}次）: {e}，{delay}秒后重试…")
+                time.sleep(delay)
+            else:
+                print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
+    return None
+
+SECRETS_DATASET_MOUNT = '/kaggle/input/fucai-secrets/secrets.json'
+_dataset_secrets = None
+
+def _load_secrets_from_dataset():
+    try:
+        with open(SECRETS_DATASET_MOUNT) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def get_secret(name, retries=3, delay=3):
+    global _dataset_secrets
+    client = _get_secrets_client()
+    if client is not None:
+        for attempt in range(retries):
+            try:
+                v = client.get_secret(name)
+                if v:
+                    return v
+                else:
+                    break
+            except Exception as e:
+                if attempt < retries - 1:
+                    print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
+                    time.sleep(delay)
+                else:
+                    print(f"  [Secret] {name} kaggle_secrets重试{retries}次仍失败: {e}")
+
+    if _dataset_secrets is None:
+        _dataset_secrets = _load_secrets_from_dataset()
+    if name in _dataset_secrets and _dataset_secrets[name]:
+        print(f"  [Secret] {name} 从 fucai-secrets Dataset 读取成功")
+        return _dataset_secrets[name]
+
+    return os.environ.get(name, '')
+
+_HARDCODED_GH_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets      # ← 新的 GitHub Token
+_HARDCODED_GH_REPO  = 'wa121325/fucai-data'
+_HARDCODED_KAGGLE_TOKEN = 'KGAT_0847d8a3c8619a4db2ff2c7c3e9e824f'
+
+GH_TOKEN = get_secret('GH_TOKEN') or get_secret('gh_token') or _HARDCODED_GH_TOKEN
+GH_REPO  = get_secret('GH_REPO')  or get_secret('gh_repo')  or _HARDCODED_GH_REPO
+KAGGLE_TOKEN = get_secret('KAGGLE_TOKEN') or get_secret('kaggle_token') or _HARDCODED_KAGGLE_TOKEN
+print(f"GitHub: {GH_REPO}  GH_TOKEN: {'✓('+str(len(GH_TOKEN))+')' if GH_TOKEN else '✗'}")
+
+try:
+    import torch, torch.nn as nn
+    DEVICE = torch.device('cpu')   # PPO在CPU更稳定
+    print("PyTorch ✓")
+except ImportError:
+    print("PyTorch ✗"); sys.exit(1)
+
+try:
+    subprocess.run(['pip','install','stable-baselines3','gymnasium','-q'], capture_output=True, timeout=180)
+    import gymnasium as gym
+    from gymnasium import spaces
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.env_util import make_vec_env
+    print("SB3 ✓")
+except Exception as e:
+    print(f"SB3 ✗: {e}"); sys.exit(1)
+
+import numpy as np
+
+DL_DATASET_SLUG = 'fucai-dl-cache'
+DL_MOUNTED      = f'/kaggle/input/{DL_DATASET_SLUG}'
+RL_DATASET_SLUG = 'fucai-rl-cache'
+RL_DATASET_ID   = f'megskfdbbskeb/{RL_DATASET_SLUG}'
+RL_LOCAL_DIR    = '/kaggle/working/rl_cache'
+RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
+WINDOW = 50; SEQ_LEN = 20
+
+# 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
+# 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
+D3_N_BETS = 12
+
+# 生成12注时，实际参与"联合概率最优"搜索的候选池大小。
+# 之前只在每位Top3里选(3×3×3=27种组合)，现在扩大到Top5(5×5×5=125种)，
+# 搜索空间更大，更有机会找到真正联合概率最高的组合——
+# 只是【显示】给人看的候选仍然维持Top3，不受这个影响。
+D3_POOL_N = 5
+
+# 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
+# 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
+# 改这里就行，不用碰 D3_N_BETS。
+D3_SAMPLE_N = 12
+# 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
+# D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
+D3_SAMPLE_DISPLAY_N = 12
+
+# 采样统计里"两号共现"最多列出多少对（只列同一注内出现≥2次的对，1次的太多没有意义）
+D3_STAT_PAIR_TOP = 12
+_D3_POS_NAMES = ["百位", "十位", "个位"]
+
+
+def compute_d3_sample_stats(sampled, extra_bets=None, pair_top=D3_STAT_PAIR_TOP):
+    """
+    对3D【采样注】做频率统计（只统计传入的采样注，不含确定性推荐那12注）。
+    统计的是传入的全部采样注(D3_SAMPLE_N注)，网页只展示其中前D3_SAMPLE_DISPLAY_N注，
+    所以调大D3_SAMPLE_N样本更多、统计更有参考价值。
+
+    返回值全部是Python原生类型(int/str/list)，可直接json序列化。
+      digit_count : 0~9每个数字在全部采样注里出现的总次数（三位合计）
+      pair_top    : 同一注内两个数字共现的次数，如"3-7"；按位置两两配对、不去重，
+                    每注固定贡献3对：797 算 7-9×2 + 7-7×1，888 算 8-8×3；
+                    全部采样注的配对总数恒等于 3×注数；只列出现≥2次的，按次数降序
+      pos_pair_top: 位置共现——"十位4-个位7"专指这两个位置分别是4和7，跟数字对(pair_top)
+                    不是一回事(数字对不认位置，这个认)。够不够格(≥2次)只由【采样注】决定，
+                    推荐12注(extra_bets)不参与计数；但每条信号的related_a/related_b钻取
+                    (把其中一半条件比如"十位=4"单独拿出来找相符的注)会在【采样+推荐】
+                    合并池子里找，让推荐注在这一步起验证/印证作用
+      sum_count   : 和值(三位之和)出现次数，只列出现过的，按和值升序
+      span_count  : 跨度(最大-最小)出现次数，只列出现过的，按跨度升序
+      group       : 组六(三位互不相同)/组三(恰有两位相同)/豹子(三位全同)的注数
+      bigsmall    : 每注的大小比(大:小，5~9为大)分布 + 全部号码里大/小的个数
+      oddeven     : 每注的奇偶比(奇:偶)分布 + 全部号码里奇/偶的个数
+    """
+    from itertools import combinations
+    from collections import Counter
+    n = len(sampled)
+    if n == 0:
+        return {}
+    digit_cnt, pair_cnt = Counter(), Counter()
+    sum_cnt, span_cnt = Counter(), Counter()
+    grp = Counter(); bs_ratio = Counter(); oe_ratio = Counter()
+    big_d = odd_d = 0
+    for bet in sampled:
+        b = [int(x) for x in bet]
+        digit_cnt.update(b)
+        # 同一注内按位置两两配对(百十、百个、十个，每注固定3对)，映射成"小-大"的数字对，
+        # 不去重：797 的 百十=7-9、十个=9-7 是两对，所以 7-9 算2次，百个=7-7 算1次
+        pair_cnt.update([f"{min(x, y)}-{max(x, y)}" for x, y in combinations(b, 2)])
+        sum_cnt[sum(b)] += 1
+        span_cnt[max(b) - min(b)] += 1
+        grp[{1: 'baozi', 2: 'zu3', 3: 'zu6'}[len(set(b))]] += 1
+        big = sum(1 for x in b if x >= 5)
+        odd = sum(1 for x in b if x % 2 == 1)
+        bs_ratio[f"{big}:{3 - big}"] += 1
+        oe_ratio[f"{odd}:{3 - odd}"] += 1
+        big_d += big; odd_d += odd
+    ratios = ['3:0', '2:1', '1:2', '0:3']
+
+    # 位置共现：找信号(计数、判断够不够≥2次强度)只用【采样注】，推荐12注不参与计数——
+    # 强度是不是够格，得由采样这批真正反映概率分布的数据说了算，推荐注不能掺进来影响判断。
+    # "十位4-个位7"专指这两个位置分别是4和7，跟不认位置的数字对(pair_cnt)也不是一回事。
+    sampled_int = [[int(x) for x in bet] for bet in sampled]
+    pos_pair_cnt = Counter()
+    for b in sampled_int:
+        for i, j in combinations(range(3), 2):
+            pos_pair_cnt[f"{_D3_POS_NAMES[i]}{b[i]}-{_D3_POS_NAMES[j]}{b[j]}"] += 1
+    # 验证/钻取则把【采样注 + 推荐12注】合并起来找：信号已经由采样注确认够格了，
+    # 这一步只是看这个信号在推荐注里有没有得到印证，推荐注在这里只当验证材料，不影响计数。
+    verify_pool = sampled_int + [[int(x) for x in bet] for bet in (extra_bets or [])]
+    pos_pair_top = []
+    for key, cnt_v in sorted(pos_pair_cnt.items(), key=lambda kv: (-kv[1], kv[0])):
+        if cnt_v < 2:
+            continue
+        half_a, half_b = key.split('-')
+        pos_a, val_a = half_a[:2], int(half_a[2:])
+        pos_b, val_b = half_b[:2], int(half_b[2:])
+        idx_a = _D3_POS_NAMES.index(pos_a); idx_b = _D3_POS_NAMES.index(pos_b)
+        pos_pair_top.append({
+            'label': key, 'count': cnt_v,
+            'pos_a': pos_a, 'val_a': val_a, 'related_a': [b for b in verify_pool if b[idx_a] == val_a],
+            'pos_b': pos_b, 'val_b': val_b, 'related_b': [b for b in verify_pool if b[idx_b] == val_b],
+        })
+        if len(pos_pair_top) >= pair_top:
+            break
+
+    return {
+        'n': n,
+        'n_pos_pool': len(verify_pool),  # 验证池子大小(采样+推荐)，不是计数用的采样数——计数只用sampled
+        'pos_pair_top': pos_pair_top,
+        'digit_count': [digit_cnt.get(d, 0) for d in range(10)],
+        'pair_top': [[k, v] for k, v in sorted(pair_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
+                     if v >= 2][:pair_top],
+        'sum_count': [[k, sum_cnt[k]] for k in sorted(sum_cnt)],
+        'span_count': [[k, span_cnt[k]] for k in sorted(span_cnt)],
+        'group': {'zu6': grp['zu6'], 'zu3': grp['zu3'], 'baozi': grp['baozi']},
+        'bigsmall': {'ratio': [[r, bs_ratio.get(r, 0)] for r in ratios],
+                     'big_digits': big_d, 'small_digits': 3 * n - big_d},
+        'oddeven': {'ratio': [[r, oe_ratio.get(r, 0)] for r in ratios],
+                    'odd_digits': odd_d, 'even_digits': 3 * n - odd_d},
+    }
+
+# 3D回测用的期数。想改期数，改这一个数字就行——
+# 不管改成多少，代码里会自动取 min(这个数, 当前holdout大小)，
+# 永远不可能超出holdout边界，不会引入数据泄漏。
+# 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
+# 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
+D3_BACKTEST_N = 80
+
+# ══════════════════════════════════════════════════════
+#  新增特征辅助函数（三个脚本共用，务必保持完全一致）
+#  补齐之前的空缺：遗漏统计、质合比、012路、和值尾数、重号/邻号、上期号码编码
+# ══════════════════════════════════════════════════════
+_PRIMES = set([2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79])
+
+def _omission_stats(w, pool_max, get_nums, prefix):
+    """
+    遗漏统计：之前遗漏信息只有强化学习在用，ML/DL的特征函数里一个都没有，
+    这是最明显的空缺。这里把它提炼成聚合统计量补进来。
+    - max/mean/std：整体遗漏分布的形态
+    - overdue_cnt：遗漏值超过"该号码理论平均间隔"的号码个数（即所谓"超期"号码有多少）
+    - last_draw_omit_mean：上期开出的那批号码，在开出之前平均冷了多久
+      （衡量"这期开的是热号还是冷号"，这个序列本身可能比单纯遗漏值更有结构）
+    """
+    f = {}
+    if not w:
+        for k in ['omit_max','omit_mean','omit_std','overdue_cnt','last_draw_omit_mean']:
+            f[f'{prefix}{k}'] = 0.0
+        return f
+    last_seen = {}
+    for i, rec in enumerate(w):
+        for n in get_nums(rec):
+            last_seen[n] = i
+    total = len(w)
+    omits = []
+    for n in range(1, pool_max+1):
+        omits.append(total - 1 - last_seen[n] if n in last_seen else total)
+    omits = np.array(omits, dtype=np.float32)
+    # 理论平均间隔 = 号池大小 / 每期开出个数
+    per_draw = len(get_nums(w[-1])) if w else 1
+    theoretical_gap = pool_max / max(per_draw, 1)
+    f[f'{prefix}omit_max']  = float(omits.max())
+    f[f'{prefix}omit_mean'] = float(omits.mean())
+    f[f'{prefix}omit_std']  = float(omits.std())
+    f[f'{prefix}overdue_cnt'] = float((omits > theoretical_gap).sum())
+    # 上期号码在开出前的遗漏（需要看倒数第二期为止的状态）
+    if len(w) >= 2:
+        prev_seen = {}
+        for i, rec in enumerate(w[:-1]):
+            for n in get_nums(rec):
+                prev_seen[n] = i
+        base = len(w) - 1
+        vals = [base - 1 - prev_seen[n] if n in prev_seen else base for n in get_nums(w[-1])]
+        f[f'{prefix}last_draw_omit_mean'] = float(np.mean(vals)) if vals else 0.0
+    else:
+        f[f'{prefix}last_draw_omit_mean'] = 0.0
+    return f
+
+def _prime_ratio(nums):
+    """质合比：彩票分析里的经典维度，号池内质数分布不均匀，这个比例的波动是真实统计量"""
+    return sum(1 for n in nums if n in _PRIMES) / max(len(nums), 1)
+
+def _road012_counts(nums):
+    """012路：按除3余数分三组。之前只有3D做了，双色球/快乐8同样适用"""
+    c = [0,0,0]
+    for n in nums: c[n % 3] += 1
+    return c
+
+def _repeat_neighbor(cur, prev):
+    """
+    重号：本期与上期重复的号码个数
+    邻号：本期号码中，是上期某号码±1的个数
+    这是走势图里很常见的跨期观察角度，之前只有3D零星涉及
+    """
+    if not prev: return 0, 0
+    ps = set(prev)
+    rep = len(set(cur) & ps)
+    nb = sum(1 for n in cur if (n-1 in ps or n+1 in ps) and n not in ps)
+    return rep, nb
+
+
+# ══════════════════════════════════════════════════════
+#  GitHub 工具
+# ══════════════════════════════════════════════════════
+def gh_raw(path):
+    url = f'https://raw.githubusercontent.com/{GH_REPO}/main/{path}?t={int(time.time())}'
+    req = urllib.request.Request(url, headers={'Cache-Control':'no-cache','User-Agent':'rl-bot'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r: return r.read().decode('utf-8')
+    except Exception as e: print(f"  gh_raw({path}) 失败: {e}"); return None
+
+def gh_put(path, content_str, message):
+    url = f'https://api.github.com/repos/{GH_REPO}/contents/{path}'
+    sha = None
+    try:
+        req = urllib.request.Request(url, headers={'Authorization':f'token {GH_TOKEN}',
+            'Accept':'application/vnd.github.v3+json','User-Agent':'rl-bot'})
+        with urllib.request.urlopen(req, timeout=15) as r: sha = json.loads(r.read()).get('sha')
+    except Exception: pass
+    data = {'message':message,'branch':'main','content':base64.b64encode(content_str.encode()).decode()}
+    if sha: data['sha'] = sha
+    req = urllib.request.Request(url, data=json.dumps(data).encode(), method='PUT', headers={
+        'Authorization':f'token {GH_TOKEN}','Content-Type':'application/json',
+        'Accept':'application/vnd.github.v3+json','User-Agent':'rl-bot'})
+    with urllib.request.urlopen(req, timeout=30) as r: return json.loads(r.read())
+
+# ══════════════════════════════════════════════════════
+#  特征工程（与LSTM训练脚本一致）
+# ══════════════════════════════════════════════════════
+def f3d(records, idx):
+    w=records[max(0,idx-WINDOW):idx]
+    if len(w)<5: return None
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        sms=[sum(x['digits']) for x in chunk]
+        sps=[max(x['digits'])-min(x['digits']) for x in chunk]
+        odds=[sum(1 for d in x['digits'] if d%2!=0) for x in chunk]
+        bigs=[sum(1 for d in x['digits'] if d>=5) for x in chunk]
+        tails=[sum(x['digits'])%10 for x in chunk]
+        gbs=[abs(x['digits'][0]-x['digits'][1]) for x in chunk]
+        gsg=[abs(x['digits'][1]-x['digits'][2]) for x in chunk]
+        f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
+        f[f'sp{sfx}']=float(np.mean(sps))
+        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
+        f[f'tail{sfx}']=float(np.mean(tails))
+        f[f'gbs{sfx}']=float(np.mean(gbs)); f[f'gsg{sfx}']=float(np.mean(gsg))
+        for ci,cn in enumerate(['b','s','g']):
+            vals=[x['digits'][ci] for x in chunk]
+            f[f'{cn}m{sfx}']=float(np.mean(vals))
+            f[f'{cn}s{sfx}']=float(np.std(vals)) if len(vals)>1 else 0.0
+    if len(w)>=3:
+        s3=[sum(x['digits']) for x in w[-3:]]
+        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+    else: f['sm_trend']=0
+    w20 = w[-20:]; n20 = len(w20) or 1
+    r0=r1=r2=0
+    for x in w20:
+        for d in x['digits']:
+            if d%3==0: r0+=1
+            elif d%3==1: r1+=1
+            else: r2+=1
+    total=r0+r1+r2 or 1
+    f['road0']=r0/total; f['road1']=r1/total; f['road2']=r2/total
+    g3=g6=gt=0
+    for x in w20:
+        b2,s2,g2=x['digits']
+        if b2==s2==g2: gt+=1
+        elif b2==s2 or s2==g2 or b2==g2: g3+=1
+        else: g6+=1
+    f['grp3']=g3/n20; f['grp6']=g6/n20; f['grpt']=gt/n20
+    # 重号比例（与各自前一期比较，近20期）
+    rep_cnt=0; rep_n=0
+    for i in range(max(1,len(w)-20), len(w)):
+        prev=w[i-1]['digits']; cur=w[i]['digits']
+        rep_cnt += sum(1 for k in range(3) if prev[k]==cur[k])
+        rep_n += 1
+    f['repeat_ratio'] = rep_cnt/rep_n if rep_n else 0.0
+    # 斜连（三位等差数列）比例，近20期
+    arith_cnt=0
+    for x in w20:
+        s3d=sorted(x['digits'])
+        if (s3d[1]-s3d[0])==(s3d[2]-s3d[1]) and s3d[2]-s3d[0]>0: arith_cnt+=1
+    f['arith_ratio'] = arith_cnt/n20
+    # ── 新增特征：遗漏统计 / 质合比 / 和值尾数 / 重号邻号 ──
+    # 3D按位处理：把每期三位数字当作号码集合（0-9映射到1-10避免0号问题）
+    f.update(_omission_stats(w, 10, lambda r: [d+1 for d in r['digits']], 'g_'))
+    primes = [_prime_ratio([d for d in x['digits'] if d>1]) for x in w[-20:]]
+    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
+    tails = [sum(x['digits']) % 10 for x in w[-20:]]
+    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
+    f['sumtail_std20']  = float(np.std(tails)) if len(tails)>1 else 0.0
+    reps, nbs = [], []
+    for i in range(1, len(w[-20:])):
+        chunk = w[-20:]
+        r, n = _repeat_neighbor(chunk[i]['digits'], chunk[i-1]['digits'])
+        reps.append(r); nbs.append(n)
+    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
+    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
+    # 上期号码原始编码：让模型能自己学出跨期关系，而不必全靠手工设计的聚合量
+    last = w[-1]['digits'] if w else [0,0,0]
+    for pi in range(3):
+        f[f'prev_pos{pi}'] = float(last[pi]) if pi < len(last) else 0.0
+
+    return f
+
+
+def fssq(records, idx):
+    w=records[max(0,idx-WINDOW):idx]
+    if len(w)<5: return None
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        sms=[sum(x['red']) for x in chunk]
+        bls=[x['blue'] for x in chunk]
+        odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
+        bigs=[sum(1 for n in x['red'] if n>16) for x in chunk]
+        z1s=[sum(1 for n in x['red'] if n<=11) for x in chunk]
+        z2s=[sum(1 for n in x['red'] if 12<=n<=22) for x in chunk]
+        z3s=[sum(1 for n in x['red'] if n>=23) for x in chunk]
+        consecs=[sum(1 for i in range(len(sorted(x['red']))-1) if sorted(x['red'])[i+1]-sorted(x['red'])[i]==1) for x in chunk]
+        ac_vals=[]; max_gaps=[]
+        for x in chunk:
+            sred=sorted(x['red'])
+            diffs=set()
+            for i in range(len(sred)):
+                for j in range(i+1,len(sred)):
+                    diffs.add(sred[j]-sred[i])
+            ac_vals.append(len(diffs)-(len(sred)-1))
+            max_gaps.append(max(sred[k+1]-sred[k] for k in range(len(sred)-1)) if len(sred)>1 else 0)
+        blue_odds=[x['blue']%2 for x in chunk]
+        blue_bigs=[1 if x['blue']>=9 else 0 for x in chunk]
+        f[f'sm_mean{sfx}']=float(np.mean(sms)); f[f'sm_std{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
+        f[f'bl_mean{sfx}']=float(np.mean(bls)); f[f'bl_std{sfx}']=float(np.std(bls)) if len(bls)>1 else 0.0
+        f[f'odd_mean{sfx}']=float(np.mean(odds))
+        f[f'big_mean{sfx}']=float(np.mean(bigs))
+        f[f'z1_mean{sfx}']=float(np.mean(z1s))
+        f[f'z2_mean{sfx}']=float(np.mean(z2s))
+        f[f'z3_mean{sfx}']=float(np.mean(z3s))
+        f[f'consec_mean{sfx}']=float(np.mean(consecs))
+        f[f'ac_mean{sfx}']=float(np.mean(ac_vals)); f[f'ac_std{sfx}']=float(np.std(ac_vals)) if len(ac_vals)>1 else 0.0
+        f[f'gap_mean{sfx}']=float(np.mean(max_gaps))
+        f[f'blodd_mean{sfx}']=float(np.mean(blue_odds))
+        f[f'blbig_mean{sfx}']=float(np.mean(blue_bigs))
+    if len(w)>=3:
+        s3=[sum(x['red']) for x in w[-3:]]
+        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
+        b3=[x['blue'] for x in w[-3:]]
+        f['bl_trend']=1 if b3[-1]>b3[-2] else(-1 if b3[-1]<b3[-2] else 0)
+    else:
+        f['sm_trend']=0; f['bl_trend']=0
+    cnt=Counter(n for x in w[-20:] for n in x['red'])
+    f['hot_z1']=sum(cnt.get(n,0) for n in range(1,12))
+    f['hot_z2']=sum(cnt.get(n,0) for n in range(12,23))
+    f['hot_z3']=sum(cnt.get(n,0) for n in range(23,34))
+    bcnt=Counter(x['blue'] for x in w[-20:])
+    f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))
+    f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))
+    # ── 新增特征：遗漏统计 / 质合比 / 012路 / 和值尾数 / 重号邻号 / 上期编码 ──
+    f.update(_omission_stats(w, 33, lambda r: r['red'], 'r_'))
+    f.update(_omission_stats(w, 16, lambda r: [r['blue']], 'b_'))
+    primes = [_prime_ratio(x['red']) for x in w[-20:]]
+    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
+    r0s, r1s, r2s = [], [], []
+    for x in w[-20:]:
+        c = _road012_counts(x['red']); r0s.append(c[0]); r1s.append(c[1]); r2s.append(c[2])
+    f['road0_mean20'] = float(np.mean(r0s)) if r0s else 0.0
+    f['road1_mean20'] = float(np.mean(r1s)) if r1s else 0.0
+    f['road2_mean20'] = float(np.mean(r2s)) if r2s else 0.0
+    tails = [sum(x['red']) % 10 for x in w[-20:]]
+    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
+    reps, nbs = [], []
+    chunk = w[-20:]
+    for i in range(1, len(chunk)):
+        r, n = _repeat_neighbor(chunk[i]['red'], chunk[i-1]['red'])
+        reps.append(r); nbs.append(n)
+    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
+    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
+    # 上期红球二值编码(33维)+上期蓝球，让模型自行学习跨期规律
+    prev_red = set(w[-1]['red']) if w else set()
+    for n in range(1, 34):
+        f[f'prev_r{n}'] = 1.0 if n in prev_red else 0.0
+    f['prev_blue'] = float(w[-1]['blue']) if w else 0.0
+
+    return f
+
+
+def fkl8(records, idx):
+    w=records[max(0,idx-WINDOW):idx]
+    if len(w)<5: return None
+    f={}
+    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
+        chunk=w[-ws:]
+        tots=[sum(x['numbers']) for x in chunk]
+        odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
+        bigs=[sum(1 for n in x['numbers'] if n>40) for x in chunk]
+        mins=[min(x['numbers']) for x in chunk]
+        maxs=[max(x['numbers']) for x in chunk]
+        cgs=[]
+        for x in chunk:
+            sn=sorted(x['numbers']); cg=0; inc=False
+            for i in range(len(sn)-1):
+                if sn[i+1]-sn[i]==1:
+                    if not inc: cg+=1; inc=True
+                else: inc=False
+            cgs.append(cg)
+        f[f'tm{sfx}']=float(np.mean(tots)); f[f'ts{sfx}']=float(np.std(tots)) if len(tots)>1 else 0.0
+        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
+        f[f'mn{sfx}']=float(np.mean(mins)); f[f'mx{sfx}']=float(np.mean(maxs))
+        f[f'cg{sfx}']=float(np.mean(cgs))
+        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+            zv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
+            f[f'z{zi+1}m{sfx}']=float(np.mean(zv))
+        for fi2,(lo,hi) in enumerate([(1,16),(17,32),(33,48),(49,64),(65,80)]):
+            fv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
+            f[f'f{fi2+1}m{sfx}']=float(np.mean(fv))
+    if len(w)>=3:
+        t3=[sum(x['numbers']) for x in w[-3:]]
+        f['tot_trend']=1 if t3[-1]>t3[-2] else(-1 if t3[-1]<t3[-2] else 0)
+    else: f['tot_trend']=0
+    cnt=Counter(n for x in w[-20:] for n in x['numbers'])
+    for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+        f[f'hz{zi+1}']=sum(cnt.get(n,0) for n in range(lo,hi+1))
+    # ── 新增特征：遗漏统计 / 质合比 / 012路 / 和值尾数 / 重号邻号 / 上期编码 ──
+    f.update(_omission_stats(w, 80, lambda r: r['numbers'], 'n_'))
+    primes = [_prime_ratio(x['numbers']) for x in w[-20:]]
+    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
+    r0s, r1s, r2s = [], [], []
+    for x in w[-20:]:
+        c = _road012_counts(x['numbers']); r0s.append(c[0]); r1s.append(c[1]); r2s.append(c[2])
+    f['road0_mean20'] = float(np.mean(r0s)) if r0s else 0.0
+    f['road1_mean20'] = float(np.mean(r1s)) if r1s else 0.0
+    f['road2_mean20'] = float(np.mean(r2s)) if r2s else 0.0
+    tails = [sum(x['numbers']) % 10 for x in w[-20:]]
+    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
+    reps, nbs = [], []
+    chunk = w[-20:]
+    for i in range(1, len(chunk)):
+        r, n = _repeat_neighbor(chunk[i]['numbers'], chunk[i-1]['numbers'])
+        reps.append(r); nbs.append(n)
+    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
+    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
+    # 快乐8每期开20个球，上期二值编码就是80维，维度偏大且信息稀疏，
+    # 改用"上期号码按四区分布"这种压缩表示，兼顾跨期信息与维度控制
+    prev = w[-1]['numbers'] if w else []
+    for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
+        f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
+
+    return f
+
+
+class LSTMEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dim=10, dropout=0.3):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True,
+                            dropout=dropout if num_layers>1 else 0)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.head = nn.Sequential(nn.Linear(hidden_dim,64), nn.GELU(), nn.Dropout(dropout), nn.Linear(64,output_dim))
+    def forward(self, x, return_hidden=False):
+        out,_ = self.lstm(x); last = self.norm(out[:,-1,:]); logits = self.head(last)
+        return (logits,last) if return_hidden else logits
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, input_dim, d_model=32, nhead=4, num_layers=2, output_dim=10, dropout=0.2):
+        super().__init__()
+        self.proj = nn.Linear(input_dim, d_model)
+        enc = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=128,
+                                         dropout=dropout, batch_first=True, norm_first=True)
+        self.transformer = nn.TransformerEncoder(enc, num_layers)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.head = nn.Sequential(nn.Linear(d_model,32), nn.GELU(), nn.Linear(32,output_dim))
+    def forward(self, x, return_hidden=False):
+        x = self.proj(x); x = self.transformer(x)
+        pooled = self.pool(x.transpose(1,2)).squeeze(-1); logits = self.head(pooled)
+        return (logits,pooled) if return_hidden else logits
+
+
+def load_lstm_tfm(game, current_feat_dim=None):
+    """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重"""
+    meta_path = f'{DL_MOUNTED}/{game}_meta.json'
+    if not os.path.exists(meta_path):
+        print(f"  ! 找不到 {game} 的LSTM/TFM权重（先运行 kaggle_lstm_tfm.py 并挂载 {DL_DATASET_SLUG}）")
+        return None, None, None
+    with open(meta_path) as f: meta = json.load(f)
+    # 特征维度校验：若当前特征函数产出维度与保存时不一致（特征工程改了），
+    # 直接跳过旧权重，避免运行到forward()时矩阵形状不匹配而崩溃
+    if current_feat_dim is not None and meta.get('feat_dim') != current_feat_dim:
+        print(f"  ! {game} 的LSTM/TFM权重特征维度({meta.get('feat_dim')})与当前特征工程({current_feat_dim})不一致")
+        print(f"    请先重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
+        return None, None, None
+    lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
+    lstm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu'))
+    lstm.eval()
+    tfm = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
+    tfm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu'))
+    tfm.eval()
+    return lstm, tfm, meta
+
+def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
+    """计算指定期数idx对应的隐层状态（单次调用，仅用于最后一期推荐）"""
+    seq = []
+    for j in range(idx-seq_len, idx):
+        feat = feat_fn(records, j)
+        if feat is None: return None
+        seq.append(list(feat.values()))
+    x = torch.FloatTensor([seq])
+    with torch.no_grad():
+        _, h = model(x, return_hidden=True)
+    return h.numpy()[0]
+
+
+def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256):
+    """
+    批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
+    返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
+    """
+    if model is None:
+        return None, {}
+    X, idxs = [], []
+    # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
+    # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
+    # 被迫回退成零向量，白白丢掉LSTM/TFM的信息。
+    for idx in range(seq_len, len(records)+1):
+        seq = []; valid = True
+        for j in range(idx-seq_len, idx):
+            feat = feat_fn(records, j)
+            if feat is None: valid=False; break
+            seq.append(list(feat.values()))
+        if not valid: continue
+        X.append(seq); idxs.append(idx)
+    if not X:
+        return None, {}
+    X = np.array(X, dtype=np.float32)
+    model.eval()
+    hs = []
+    with torch.no_grad():
+        for i in range(0, len(X), batch_size):
+            xb = torch.FloatTensor(X[i:i+batch_size])
+            _, h = model(xb, return_hidden=True)
+            hs.append(h.numpy())
+    hs = np.vstack(hs)
+    idx_to_row = {idx:i for i,idx in enumerate(idxs)}
+    return hs, idx_to_row
+
+
+def precompute_omission_kl8(records):
+    """
+    批量一次性计算快乐8所有期数的遗漏向量（O(N*80)，而非原来每次调用O(N*80)倒序扫描导致的O(N²*80)）
+    返回数组 omit_arr[idx] = 80维遗漏归一化向量，与 omission_vec_kl8(records, idx) 完全等价
+    """
+    N = len(records)
+    last_seen = {}   # 号码 -> 最后出现的下标
+    omit_arr = np.zeros((N+1, 80), dtype=np.float32)
+    for idx in range(N+1):
+        avg = max(idx*20/80, 1)
+        for n in range(1, 81):
+            if n in last_seen:
+                omit_arr[idx, n-1] = min((idx-1-last_seen[n]) / avg, 3)
+            else:
+                omit_arr[idx, n-1] = 2.0
+        if idx < N:
+            for n in records[idx]['numbers']:
+                last_seen[n] = idx
+    return omit_arr
+
+
+def precompute_freq_kl8(records, window=30):
+    """
+    批量一次性计算快乐8所有期数的"近N期逐球出现频率"（80维，每个球一个独立数值）
+    这是遗漏向量之外，第二个真正能逐球区分号码的信号。
+    ── 为什么需要这个 ──
+    快乐8 PPO 需要给80个球各自打分，但状态向量里绝大部分内容
+    （走势聚合特征、ML分组概率、LSTM/TFM隐层）对80个球来说都是完全相同的共享信息，
+    根本不携带"这是哪个球"的区分度。之前只有遗漏值这一个80维信号能区分个体球，
+    信号太单薄，导致网络最后一层的输出权重很容易在训练中自己走出一个
+    跟真实状态无关、只是训练过程偶然形成的固定偏好（表现为持续偏向某个号码区间）。
+    加入"近期出现频率"作为第二个逐球信号，让网络有更充分的依据去真正学习"选哪个球"，
+    而不是在信息不足的情况下被迫依赖训练过程中的随机偏置。
+    """
+    N = len(records)
+    freq_arr = np.zeros((N+1, 80), dtype=np.float32)
+    from collections import deque
+    recent = deque(maxlen=window)
+    for idx in range(N+1):
+        cnt = Counter(n for r in recent for n in r['numbers'])
+        for n in range(1, 81):
+            freq_arr[idx, n-1] = cnt.get(n, 0)
+        if idx < N:
+            recent.append(records[idx])
+    return freq_arr
+
+
+def precompute_omission_ssq(records):
+    """双色球：33红球+16蓝球=49维遗漏向量，批量预计算"""
+    N = len(records)
+    last_seen_r = {}; last_seen_b = {}
+    omit_arr = np.zeros((N+1, 49), dtype=np.float32)
+    for idx in range(N+1):
+        avg_r = max(idx*6/33, 1); avg_b = max(idx/16, 1)
+        for n in range(1,34):
+            if n in last_seen_r:
+                omit_arr[idx, n-1] = min((idx-1-last_seen_r[n])/avg_r, 3)
+            else:
+                omit_arr[idx, n-1] = 2.0
+        for n in range(1,17):
+            if n in last_seen_b:
+                omit_arr[idx, 33+n-1] = min((idx-1-last_seen_b[n])/avg_b, 3)
+            else:
+                omit_arr[idx, 33+n-1] = 2.0
+        if idx < N:
+            for n in records[idx]['red']: last_seen_r[n]=idx
+            last_seen_b[records[idx]['blue']] = idx
+    return omit_arr
+
+
+def precompute_omission_3d(records):
+    """福彩3D：百十个位各10个数字，共30维遗漏向量"""
+    N = len(records)
+    last_seen = [{}, {}, {}]  # 每位一个字典：数字 -> 最后出现下标
+    omit_arr = np.zeros((N+1, 30), dtype=np.float32)
+    for idx in range(N+1):
+        avg = max(idx/10, 1)
+        for pos in range(3):
+            for d in range(10):
+                if d in last_seen[pos]:
+                    omit_arr[idx, pos*10+d] = min((idx-1-last_seen[pos][d])/avg, 3)
+                else:
+                    omit_arr[idx, pos*10+d] = 2.0
+        if idx < N:
+            for pos in range(3):
+                last_seen[pos][records[idx]['digits'][pos]] = idx
+    return omit_arr
+
+# ══════════════════════════════════════════════════════
+#  ML概率向量 + 遗漏向量
+# ══════════════════════════════════════════════════════
+def extract_ml_prob_vec(ml_pred, game, verbose=True):
+    # ⚠️ 这里的 tk/nc 列表必须跟 kaggle_fucai.py 的 compute_ml_walkforward 调用处
+    # 完全一致——两边独立写死，任何一边改了目标顺序或分类数，另一边不会报错，
+    # 只会导致walk-forward数组和现场live概率的维度对不上、拼出来的state错位。
+    vec = []
+    models_data = ml_pred.get('models', {})
+    # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
+    if game=='3d':
+        tk=['sum_grp','odd','group_type','big','span_grp','road_dom','arith','prime_cnt','sum_tail','span_odd']
+        nc=[3,4,3,4,3,3,2,4,10,2]
+    elif game=='ssq':
+        tk=['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec','prime_grp','sum_tail','same_tail']
+        nc=[7,3,3,3,3,7,6,3,10,4]
+    else:
+        tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','prime_grp','ac_grp','same_tail_grp']
+        nc=[3,4,3,3,5,3,3,3,3,3]
+    offsets=[0]*len(tk)
+    found, missing = [], []
+    for tkey,n,off in zip(tk,nc,offsets):
+        m = models_data.get(tkey,{}); probs = m.get('prediction',{}).get('probs',{})
+        seg = [float(probs.get(str(i+off),0.0))/100.0 for i in range(n)]
+        vec.extend(seg)
+        (found if any(v>0 for v in seg) else missing).append(tkey)
+    if verbose:
+        print(f"    [传统ML状态注入验证] {game}: 成功读到概率的目标={found}")
+        if missing:
+            print(f"    ⚠️ [传统ML状态注入验证] 以下目标概率全为0，未生效={missing}（请确认 kaggle_fucai.py 已用最新目标重新跑过）")
+    return np.array(vec, dtype=np.float32)
+
+# （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
+
+# ══════════════════════════════════════════════════════
+#  快乐8真实赔率
+# ══════════════════════════════════════════════════════
+KL8_PAYOUT = {(1,1):2,(2,2):10,(3,3):30,(4,4):100,(4,3):3,(4,2):1,(5,5):200,(5,4):8,(5,3):1,
+    (6,6):1000,(6,5):20,(6,4):2,(6,3):1,(7,7):2000,(7,6):50,(7,5):4,(7,4):1,
+    (8,8):5000,(8,7):100,(8,6):8,(8,5):1,(9,9):10000,(9,8):300,(9,7):20,(9,6):2,
+    (10,10):18000,(10,9):600,(10,8):30,(10,7):3,(10,6):1}
+TICKET_PRICE = 2.0
+def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
+
+
+
+def diverse_picks(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
+    """
+    多样化选号：胆码 + 拖码轮转。
+
+    ── 为什么不用"联合得分Top-N" ──
+    按组合总分排序取前N注，结果必然是N注共享同样的头几个高分球、只有末尾一两个位置在微调
+    （实测双色球6注平均重合4.8/6个球，只用到8个不同号码），
+    这跟只推1注没有本质区别，完全体现不出多元化，实际参考意义很低。
+
+    ── 现在的做法 ──
+    1) 候选池：按模型打分取前 pool_mult 倍于所需球数的号码，超出的说明模型不看好，不予考虑
+    2) 胆码：池中打分最高的那少数几个球，模型最确信，进入每一注
+    3) 拖码：池中其余球轮转填充各注剩余位置，让模型看好的号码都有机会出场
+
+    这样既尊重模型的置信度层次（越看好的球出现越频繁），又保证各注之间有实质差异。
+    返回 (各注号码列表, 胆码, 候选池)
+    """
+    order = np.argsort(scores)[::-1]
+    pool_size = min(len(scores), max(n_pick + 2, int(round(n_pick * pool_mult))))
+    pool = [int(order[i]) + 1 for i in range(pool_size)]
+    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
+    core, rest = pool[:core_n], pool[core_n:]
+    bets, ri = [], 0
+    for _ in range(n_bets):
+        sel = list(core)
+        guard = 0
+        while len(sel) < n_pick and rest and guard < len(rest) * 3:
+            cand = rest[ri % len(rest)]; ri += 1; guard += 1
+            if cand not in sel: sel.append(cand)
+        # 池子不够时（理论上不会），用全局排序补齐
+        oi = 0
+        while len(sel) < n_pick and oi < len(order):
+            c = int(order[oi]) + 1; oi += 1
+            if c not in sel: sel.append(c)
+        bets.append(sorted(sel))
+    return bets, sorted(core), sorted(pool)
+
+
+# ══════════════════════════════════════════════════════
+#  新数据检测：避免拿完全相同的数据反复训练（过拟合防护）
+#  三个游戏共用。记录"上次训练时用了多少期数据"，
+#  下次运行时若期数没增加，说明没有新开奖，跳过训练直接沿用上次结果。
+#  这对手动重复触发尤其重要——否则同一批数据被训练N次，
+#  模型会对这批数据过度拟合，反而降低泛化能力。
+# ══════════════════════════════════════════════════════
+def get_last_trained_n(game):
+    """读取上次训练时的数据期数（优先读挂载的Dataset，那是上次运行持久化的结果）"""
+    for path in (f'{RL_MOUNTED}/{game}_last_trained_n.json',
+                 f'{RL_LOCAL_DIR}/{game}_last_trained_n.json'):
+        if os.path.exists(path):
+            try:
+                with open(path) as f: return json.load(f).get('n', 0)
+            except Exception: pass
+    return 0
+
+def save_last_trained_n(game, n):
+    """记录本次训练用到的数据期数，随RL_LOCAL_DIR一起推送到Dataset持久化"""
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(f'{RL_LOCAL_DIR}/{game}_last_trained_n.json', 'w') as f:
+            json.dump({'n': n}, f)
+    except Exception as e:
+        print(f"  ! 记录{game}训练期数失败: {e}")
+
+def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason):
+    """
+    无新数据时，沿用上次的完整结果（字段结构保持一致，前端渲染无需感知变化）。
+
+    注意 game_key 与 display_name 必须分开：
+    game_key 用于拼文件名（'3d'/'ssq'/'kl8'），display_name 只用于日志展示（中文）。
+    之前两者混用，把中文名传进 save_last_trained_n，生成了带中文的文件名，
+    挂载后变成乱码（日志里看到的 '_last_trained_n.json'），
+    导致双色球的"已训练期数"永远读不回来，开奖日检测形同虚设。
+    """
+    print(f"  {display_name} 无新开奖数据（当前{cur_n}期，上次训练时已是{last_n}期），"
+          f"跳过训练避免重复数据过拟合")
+    save_last_trained_n(game_key, cur_n)
+    if prev_result:
+        carried = dict(prev_result)
+        carried['skipped'] = True
+        carried['carried_over'] = True
+        carried['note'] = (carried.get('note','') or '') + f'（{reason}，以上为上次训练结果，本次未重新训练）'
+        return carried
+    return {'skipped': True, 'games_tested': 0, 'reason': reason,
+            'note': f'{reason}，且未找到上次训练结果可沿用（可能是首次运行）'}
+
+# ══════════════════════════════════════════════════════
+#  分段开关：可以单独关闭状态向量里的某一段（比如"遗漏"），不用重新设计模型。
+#
+#  ── 关闭是清零，不是删除 ──
+#  关掉某段不会把它从state向量里拿掉，而是把这段数值全部置0。
+#  这样state_dim(总维度)永远不变，不管开关怎么切换，都不会跟已保存的模型
+#  产生维度不匹配——纯粹是"喂给模型的这段信息变成了全0"，模型该怎么学还怎么学，
+#  只是这段不再携带任何真实信息。
+#
+#  ── 为什么训练和预测必须用同一份开关 ──
+#  训练时(Env的_state())和现场预测/回测时(build_state函数)如果开关不一致，
+#  模型见到的输入分布就不一样——训练时以为某段是有效信号，预测时却被清零，
+#  等于给模型看了一份它没训练过的输入，等于白训练。所以两边共用这同一份配置。
+# ══════════════════════════════════════════════════════
+SEGMENT_ENABLE = {
+    '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
+    'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':True},
+}
+
+
+def apply_segment_switches(named_segments, game):
+    """
+    named_segments: 按顺序排列的 [(段名, 数组), ...]，顺序必须跟
+    normalize_state_segments() 实际拼接的顺序完全一致。
+    根据 SEGMENT_ENABLE[game] 里的开关，把关闭的段替换成同样长度的全0数组，
+    其余原样返回——只做清零，不改变任何一段的长度。
+    """
+    cfg = SEGMENT_ENABLE.get(game, {})
+    out = []
+    for name, arr in named_segments:
+        arr = np.asarray(arr, dtype=np.float32)
+        if not cfg.get(name, True):
+            arr = np.zeros_like(arr)
+        out.append(arr)
+    return out
+
+
+def normalize_state_segments(*segments):
+    """
+    分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
+    问题根源：raw特征里像"号码总和均值"这类聚合量级在几百到近千，
+    而遗漏值(0-3)、ML概率(0-1)量级很小，如果整个向量共用一个全局最大值做归一化，
+    遗漏和ML概率信号会被压缩到接近0，模型实际上"看不到"这些真正能区分号码好坏的关键信息，
+    只能学到一些跟具体选哪个球无关的全局统计偏向，导致策略跟状态基本脱钩、
+    收敛到一个固定的、看似随意的偏好（这次表现为一直偏向大号）。
+    修复：每一段各自独立按自己的最大值缩放到[-1,1]附近，再拼接，
+    确保任何一段都不会因为量级差异淹没其它段的信号。
+    """
+    normed = []
+    for seg in segments:
+        seg = np.asarray(seg, dtype=np.float32)
+        if seg.size == 0:
+            normed.append(seg)
+            continue
+        m = np.abs(seg).max()
+        normed.append(seg / (m + 1e-8) if m > 0 else seg)
+    state = np.concatenate(normed).astype(np.float32)
+    return np.clip(state, -5, 5)
+
+# ══════════════════════════════════════════════════════
+#  训练/回测隔离 + 增量微调防过拟合机制
+#
+#  ── 问题 ──
+#  之前训练覆盖全部历史数据（第25期~最后一期），而"增量微调"是在这份
+#  已经见过全部数据的模型上，每天用最新几千步继续训练——
+#  这里有两层过拟合风险：
+#    ① 模型训练时本来就见过全部历史，回测/评估用的数据也在训练集里，
+#       没有真正的"没见过的题"来检验它，数字会虚高。
+#    ② 每天的微调只有1期新数据（占总数万分之一），却要跑几千到几万步梯度更新，
+#       极易在这1个新样本上过拟合，甚至让原本练好的权重变差——
+#       而原来的代码不管微调后变好变坏，都无条件覆盖保存，好权重一旦被
+#       一次不走运的微调带偏，永远回不去了。
+#
+#  ── 解决方式 ──
+#  ① 留出末段数据（holdout）训练时完全不碰，回测/评估只在这段上进行，
+#     这段数据训练时全程没见过，是真正的样本外检验。
+#  ② 增量微调改为"分段训练+早停+保留最佳"：把当天的微调步数切成几段，
+#     每段结束都在holdout上评一次分，全程跟踪历史最高分对应的那组权重，
+#     最后只保留那组最佳权重——如果微调全程都没能超过"微调前"的水平，
+#     就直接原样保留微调前的权重，不会因为一次不走运的微调把模型带差。
+#     这是本次要新增的核心防过拟合机制。
+# ══════════════════════════════════════════════════════
+def holdout_size(n_records):
+    """留出期数：至少80期保证评估样本量，最多300期避免过度侵占训练数据"""
+    return max(80, min(300, int(n_records * 0.10)))
+
+
+# EMA混合比例：每天微调的结果按这个比例并入总权重，不管当天效果好坏。
+# α越小，单日影响越弱（更稳，但跟新数据的关联也越弱）；
+# α越大，跟得越紧，但单日噪声的影响也越大。0.15是折中值，可按需调整。
+EMA_ALPHA_FINETUNE = 0.15
+
+
+# 候选α值。每天都会把每个候选实际评一次分并记录下来，
+# 但【当前生效】的α只有攒够多天、且明显优于默认值时才会切换（见下方 choose_alpha）。
+EMA_ALPHA_CANDIDATES = [0.05, 0.10, 0.15, 0.20, 0.30]
+EMA_ALPHA_DEFAULT = 0.15
+
+
+def record_alpha_scores(game, scores_today):
+    """
+    把今天各候选α的holdout评分记录到持久化历史，用于日后判断哪个α更好。
+
+    只记录，不在这里做决策——决策交给 choose_alpha，
+    避免"用今天一天的噪声挑最好的候选"这种典型的过拟合。
+    """
+    path = f'{RL_LOCAL_DIR}/{game}_alpha_history.json'
+    hist = []
+    for p in (f'{RL_MOUNTED}/{game}_alpha_history.json', path):
+        if os.path.exists(p):
+            try:
+                with open(p) as f: hist = json.load(f); break
+            except Exception: pass
+    hist.append({'date': str(date.today()), 'scores': {str(k): v for k, v in scores_today.items()}})
+    hist = hist[-400:]
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    try:
+        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"    ! 写入α历史失败: {e}")
+    return hist
+
+
+def choose_alpha(hist, candidates, default_alpha, se_per_day, min_days=15, margin_k=2.0):
+    """
+    根据多天累积证据决定接下来用哪个α，而不是挑"今天表现最好"的那个。
+
+    ── 为什么不能直接挑今天最好的 ──
+    holdout样本有限，今天5个候选里随手就会有一个"恰好"评分最高，
+    这跟之前挑战者机制要解决的问题是同一件事——单日的"更好"大概率是噪声。
+
+    ── 做法 ──
+    每个候选都持续记录，攒够 min_days 天以后，比较各候选的【多天平均分】。
+    只有当某个候选的多天平均明显超过默认值（超过 margin_k 倍标准误），
+    才换成那个候选；否则一直用默认值 EMA_ALPHA_DEFAULT，不做武断切换。
+    """
+    if len(hist) < min_days:
+        return default_alpha, f"仅积累{len(hist)}天(<{min_days}天门槛)，暂用默认α={default_alpha}"
+
+    avgs, ns = {}, {}
+    for a in candidates:
+        vals = [h['scores'].get(str(a)) for h in hist if h['scores'].get(str(a)) is not None]
+        if vals:
+            avgs[a] = sum(vals) / len(vals); ns[a] = len(vals)
+    if not avgs:
+        return default_alpha, "候选评分历史数据不足，暂用默认值"
+
+    best_a = max(avgs, key=avgs.get)
+    best_avg = avgs[best_a]
+    default_avg = avgs.get(default_alpha, best_avg)
+    n_days = ns.get(best_a, len(hist))
+    se_avg = se_per_day / max(n_days, 1) ** 0.5
+    gap = best_avg - default_avg
+
+    _detail = "  ".join(f"α={a}:{avgs[a]:.4f}" for a in candidates if a in avgs)
+    if best_a != default_alpha and gap > margin_k * se_avg:
+        return best_a, (f"候选α={best_a} 累计{n_days}天平均{best_avg:.4f} 显著优于默认"
+                        f"(差距{gap:+.4f} > {margin_k}倍标准误{se_avg:.4f})  [{_detail}]")
+    return default_alpha, (f"候选间差异未达显著水平(需要差距>{margin_k}倍标准误{se_avg:.4f})，"
+                           f"保持默认α={default_alpha}  [{_detail}]")
+
+
+def blend_state_dicts(old_sd, new_sd, alpha):
+    """
+    按 alpha 比例把 new_sd 混入 old_sd，返回混合后的 state_dict（EMA滑动平均）。
+
+    ── 这是替代"门槛式accept/reject"的防过拟合方法 ──
+    之前的做法：微调结果 vs 微调前基准，赢了整个替换、输了整个丢弃。
+    问题：为了不让1天的数据把模型带偏，把学习率压到30%+严格KL裁剪，
+    结果单日移动幅度小到测不出来；而且"赢了就整个接受"的判断没有
+    显著性门槛，约89%的天数会把纯噪声当成"真提升"整个采纳。
+
+    EMA换了一种思路：不做"行/不行"的二元判断，每天都按固定比例α
+    把当天训练结果混入总权重——单日效果再差，也只占α的权重，
+    结构上不可能把模型带崩；但权重每天都在真实移动，不会被
+    保护参数压到几乎不变。旧的更新影响力随天数指数衰减，
+    真正一致的信号会持续累积，纯噪声则会被后续的天数慢慢稀释掉。
+    """
+    blended = {}
+    for k in old_sd:
+        if old_sd[k].dtype.is_floating_point:
+            blended[k] = alpha * new_sd[k] + (1 - alpha) * old_sd[k]
+        else:
+            blended[k] = new_sd[k]
+    return blended
+
+
+def train_with_early_stop(model, total_steps, eval_fn, label,
+                          n_chunks=8, patience=3, reset_timesteps=True, warmup_chunks=0,
+                          baseline_is_real=False):
+    """
+    分段训练 + 早停 + 保留最佳模型，服务两种场景：
+
+    ① 首次训练（baseline_is_real=False）：
+       训练前的评分只是【随机初始化】网络在holdout上的一次评估，纯属噪声
+       （holdout样本量有限，随机网络完全可能"运气好"评出一个不低的分数），
+       不能把这个噪声值当成"要打败的基准"——否则后面刚开始训练的几段
+       只要没有同样的运气，就会被判定"无提升"，练不了几步就被提前叫停，
+       返回的还是那份没训练过的随机权重。这里不把它计入best_score候选，
+       只在真正训练过的几段里选最高分。
+
+    ② 增量微调（baseline_is_real=True）：
+       "微调前"不是随机初始化，是一份真实训练过的权重，拿它当基准完全合理——
+       微调不允许让结果比微调前更差，这正是本次要的防过拟合效果：
+       微调全程没有任何一段超过微调前，就直接保留微调前的权重原样返回。
+
+    warmup_chunks: 前N段不触发早停（仅用于首训，RL训练前期震荡是正常现象）。
+
+    返回 (model, best_score, history)
+    """
+    chunk = max(1, total_steps // n_chunks)
+    _init_score = eval_fn()
+
+    if baseline_is_real:
+        best_score = _init_score
+        best_params = copy.deepcopy(model.get_parameters())
+        print(f"    [{label}] 微调前基准分: {_init_score:.4f}"
+              f"（已训练权重，微调全程没能超过它就保留原权重不变）")
+    else:
+        best_score = None
+        best_params = None
+        print(f"    [{label}] 训练前基准分: {_init_score:.4f}（随机初始化，仅供参考，不参与最佳权重评选）")
+
+    history = [round(_init_score, 4)]
+    no_improve = 0
+
+    for i in range(n_chunks):
+        model.learn(total_timesteps=chunk,
+                    reset_num_timesteps=(reset_timesteps and i == 0),
+                    progress_bar=False)
+        score = eval_fn()
+        history.append(round(score, 4))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_params = copy.deepcopy(model.get_parameters())
+            no_improve = 0
+            flag = "✓ 新最佳"
+        elif i < warmup_chunks:
+            flag = f"（热身期第{i+1}/{warmup_chunks}段，不计入早停）"
+        else:
+            no_improve += 1
+            flag = f"（无提升 {no_improve}/{patience}）"
+        print(f"    [{label}] 第{i+1}/{n_chunks}段({chunk}步) 评分 {score:.4f}  {flag}")
+        if i >= warmup_chunks and no_improve >= patience:
+            print(f"    [{label}] 连续{patience}段无提升，提前停止（省下{(n_chunks-i-1)*chunk}步）")
+            break
+
+    if best_params is None:
+        print(f"    [{label}] ⚠️ 没有任何一段完成评估，使用当前（未训练）权重")
+        return model, _init_score, history
+
+    model.set_parameters(best_params)
+    print(f"    [{label}] 已恢复到最佳权重，最终评分 {best_score:.4f}  评分轨迹: {history}")
+    return model, best_score, history
+
+
+# ══════════════════════════════════════════════════════
+#  集成环境
+# ══════════════════════════════════════════════════════
+KL8_TRAIN_N = 6    # 训练时用"选六"作为奖励标准，推荐时对同一个排序取不同TopN即可覆盖所有玩法
+
+class IntegratedKL8Env(gym.Env):
+    """
+    快乐8环境 v4：全号码打分排序 + 双重逐球差异化信号（遗漏+近期频率）
+    动作空间设计对比：
+    - MultiBinary(80)：2^80种组合，训练几十万步也探索不到万分之一，学不出东西
+    - 候选池Box(30)：只对预筛的30个候选打分，覆盖面受限，真正该选的号码若不在候选池里则永远选不到
+    - 本版 Box(80)：对全部80个球直接打连续分数，取Top6，
+      既保留全覆盖（跟MultiBinary一样能选中任意号码），
+      又是标准的排序学习问题（跟候选池一样好训练，PPO能有效利用梯度）
+
+    ⚠️ 关键修复：网络要输出80个球各自的分数，但状态向量里绝大部分内容
+    （走势聚合特征/ML分组概率/LSTM/TFM隐层）对80个球来说完全相同，不携带"选哪个球"的区分度，
+    之前只有遗漏值这一个80维信号能区分个体球，信号太单薄，网络最后一层容易在训练中
+    自己走出一个跟真实状态无关的固定偏好（表现为持续偏向某个号码区间）。
+    这版加入"近期出现频率"作为第二个逐球信号，并对这两个逐球信号整体加权(×2)，
+    确保网络有足够强的信号去真正学习"选哪个球"，而不是被迫依赖训练偶然性。
+    """
+    metadata={'render_modes':[]}
+    PERBALL_WEIGHT = 2.0   # 逐球信号（遗漏+频率）额外加权，突出其重要性
+
+    def __init__(self, records, feat_fn, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N, ml_wf=None):
+        super().__init__()
+        self.records=records; self.feat_fn=feat_fn
+        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
+        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
+        self.omit_arr=omit_arr; self.freq_arr=freq_arr
+        self.ml_wf=ml_wf   # 逐期ML概率(walk-forward)，数组第i行对应records[i+1]，即self.idx=i+1
+        self.train_n=train_n
+        self.start=SEQ_LEN+30; self.idx=self.start
+        # 留出末段holdout训练时完全不碰，是真正的样本外评估数据
+        self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
+        sample=feat_fn(records,self.start); feat_dim=len(sample)
+        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
+        omit_dim = 80; freq_dim = 80
+        # 逐期ML概率(walk-forward)：每期不同，且保证只用没见过那期(及之后)数据的模型算出，
+        # 训练时才有变化量可学，不是之前那种从头到尾不变的常数。
+        ml_wf_dim = ml_wf.shape[1] if ml_wf is not None else 0
+        self.state_dim = feat_dim+ml_wf_dim+lstm_dim+tfm_dim+omit_dim+freq_dim
+        self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
+
+    def _state(self):
+        feat=self.feat_fn(self.records,self.idx)
+        if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
+        raw=np.array(list(feat.values()),dtype=np.float32)
+        # walk-forward数组第i行对应self.idx=i+1，取第(self.idx-1)行；越界时0占位。
+        # 必须插在raw之后、lh/th/om/fr之前——下面 state[-160:] 假设最后160维是
+        # 遗漏+频率，插在这个位置不会破坏那个切片。
+        if self.ml_wf is not None and 0 <= self.idx-1 < len(self.ml_wf):
+            mlv = self.ml_wf[self.idx-1]
+        else:
+            mlv = np.zeros(self.ml_wf.shape[1] if self.ml_wf is not None else 0, dtype=np.float32)
+        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
+            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
+        else:
+            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
+        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
+            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
+        else:
+            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
+        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
+        fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(80,dtype=np.float32)
+
+        # 分段开关在这里对未归一化的原始数组操作，只清零数值不改变长度，
+        # 所以下面"末尾160维是遗漏+频率"这个切片假设依然成立
+        # （关掉的段清零后乘以PERBALL_WEIGHT还是0，不影响结果）
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th),
+             ('遗漏',om), ('频率',fr)], 'kl8')
+        state = normalize_state_segments(*segs)
+        # 逐球信号（遗漏+频率，对应state末尾160维）额外加权，让网络有更强动力真正依赖它们
+        # （mlv插在最前段，不影响这个"末尾160维"的判定）
+        state = state.copy()
+        state[-160:] *= self.PERBALL_WEIGHT
+        return np.clip(state, -5, 5)
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed); self.idx=self.start
+        return self._state(), {}
+
+    def step(self, action):
+        # 对全部80个球的打分，取分数最高的 train_n 个作为本期选号
+        top_idx = np.argsort(action)[-self.train_n:]
+        selected = sorted([int(i)+1 for i in top_idx])
+
+        actual=set(self.records[self.idx]['numbers'])
+        hit=len(actual&set(selected)); n_sel=len(selected)
+        net=calc_payout(n_sel,hit)
+        # 快乐8真实赔率表在命中0-2个球时统统赔0（选6时命中期望仅1.5个，绝大多数样本落在这个区间），
+        # 导致奖励大范围完全一样、没有梯度信号，PPO学不到跟状态相关的规律，只会随机收敛到某个固定偏向。
+        # 加一个连续塑形项：命中率越高奖励越好，覆盖赔率表的"平坦区"，让policy始终有梯度可学。
+        shaping = (hit / n_sel) * 0.3
+        reward = net/(TICKET_PRICE*100) + shaping
+        self.idx+=1
+        terminated=(self.idx >= self.train_end)
+        obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
+        return obs, reward, terminated, False, {'hit':hit,'n_sel':n_sel,'net':net}
+
+
+SSQ_RED_PICK_N = 6    # 双色球固定选6个红球
+
+class IntegratedSSQEnv(gym.Env):
+    """
+    双色球环境 v3：红球全号码打分排序（33个全打分，不再预筛候选池）+ 蓝球打分
+    动作向量 = [33个红球分数, 16个蓝球分数]，共49维
+    - 红球：33个球全部打分，取Top6
+    - 蓝球：16个分数argmax
+    理由同快乐8：候选池预筛会限制覆盖面，全量打分既保留完整覆盖又保持可学习的连续参数化。
+    奖励按双色球真实奖级结构分级，同时激励红球和蓝球命中。
+    """
+    metadata={'render_modes':[]}
+    def __init__(self, records, feat_fn, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N, ml_wf=None):
+        super().__init__()
+        self.records=records; self.feat_fn=feat_fn
+        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
+        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
+        self.omit_arr=omit_arr
+        self.ml_wf=ml_wf   # 逐期ML概率(walk-forward)，数组第i行对应records[i+1]，即self.idx=i+1
+        self.red_pick_n=red_pick_n
+        self.start=SEQ_LEN+30; self.idx=self.start
+        self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
+        sample=feat_fn(records,self.start); feat_dim=len(sample)
+        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
+        omit_dim = 49   # 33红球+16蓝球遗漏值，已含每个号码的差异化信息
+        # 逐期ML概率(walk-forward)：每期不同，且保证只用没见过那期(及之后)数据的模型算出。
+        ml_wf_dim = ml_wf.shape[1] if ml_wf is not None else 0
+        self.state_dim = feat_dim+ml_wf_dim+lstm_dim+tfm_dim+omit_dim
+        self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.,high=1.,shape=(33+16,),dtype=np.float32)
+
+    def _state(self):
+        feat=self.feat_fn(self.records,self.idx)
+        if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
+        raw=np.array(list(feat.values()),dtype=np.float32)
+        if self.ml_wf is not None and 0 <= self.idx-1 < len(self.ml_wf):
+            mlv = self.ml_wf[self.idx-1]
+        else:
+            mlv = np.zeros(self.ml_wf.shape[1] if self.ml_wf is not None else 0, dtype=np.float32)
+        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
+            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
+        else:
+            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
+        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
+            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
+        else:
+            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
+        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
+
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], 'ssq')
+        return normalize_state_segments(*segs)
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed); self.idx=self.start
+        return self._state(), {}
+
+    @staticmethod
+    def _tier_reward(red_hit, blue_hit):
+        """按双色球真实奖级结构给分级奖励，激励红球和蓝球同时命中"""
+        if red_hit==6 and blue_hit: return 50.0   # 一等奖
+        if red_hit==6:               return 20.0   # 二等奖
+        if red_hit==5 and blue_hit:  return 10.0   # 三等奖
+        if red_hit==5 or (red_hit==4 and blue_hit): return 5.0   # 四等奖
+        if red_hit==4 or (red_hit==3 and blue_hit): return 2.0   # 五等奖
+        if blue_hit:                 return 1.0    # 六等奖（仅蓝球）
+        return -1.0   # 未中奖（成本）
+
+    def step(self, action):
+        red_scores  = action[:33]
+        blue_scores = action[33:]
+
+        top_idx = np.argsort(red_scores)[-self.red_pick_n:]
+        red_selected = sorted([int(i)+1 for i in top_idx])
+        blue_pred = int(np.argmax(blue_scores)) + 1
+
+        actual_red = set(self.records[self.idx]['red'])
+        actual_blue = self.records[self.idx]['blue']
+        red_hit = len(actual_red & set(red_selected))
+        blue_hit = int(blue_pred == actual_blue)
+        reward = self._tier_reward(red_hit, blue_hit)
+        # 红球选6个从33个里选，命中期望约1.09个，0-2命中区间同样存在奖励梯度不足问题，加小塑形项
+        reward += (red_hit / 6.0) * 0.5
+
+        self.idx+=1
+        terminated=(self.idx >= self.train_end)
+        obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
+        return obs, reward, terminated, False, {'red_hit':red_hit,'blue_hit':blue_hit,
+                                                  'red_selected':red_selected,'blue_pred':blue_pred}
+
+
+class Integrated3DEnv(gym.Env):
+    """
+    福彩3D环境：动作空间 MultiDiscrete([10,10,10])（百十个位各选一个数字，共1000种组合）
+    比快乐8的2^80小得多，PPO能够正常学习。
+    奖励：按位命中数给分，三位全中给大奖励（对应"直选"），
+    位置命中但顺序不对不加分（3D不看"组选"，只关心百十个精确对应）。
+    """
+    metadata={'render_modes':[]}
+    def __init__(self, records, feat_fn, lstm_hidden, lstm_idx2row,
+                 tfm_hidden, tfm_idx2row, omit_arr, ml_wf=None):
+        super().__init__()
+        self.records=records; self.feat_fn=feat_fn
+        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
+        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
+        self.omit_arr=omit_arr
+        self.ml_wf=ml_wf   # 逐期ML概率(walk-forward)，数组第i行对应records[i+1]，即self.idx=i+1
+        self.start=SEQ_LEN+5; self.idx=self.start
+        self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
+        sample=feat_fn(records,self.start); feat_dim=len(sample)
+        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
+        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
+        omit_dim = 30
+        # 逐期ML概率(walk-forward)：跟之前的常数ml_vec不同，这里每期都不一样，
+        # 且保证每期的值只来自没见过那期(及之后)数据的模型，训练时才有变化量可学。
+        ml_wf_dim = ml_wf.shape[1] if ml_wf is not None else 0
+        self.state_dim = feat_dim+ml_wf_dim+lstm_dim+tfm_dim+omit_dim
+        self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
+        self.action_space = spaces.MultiDiscrete([10,10,10])
+
+    def _state(self):
+        feat=self.feat_fn(self.records,self.idx)
+        if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
+        raw=np.array(list(feat.values()),dtype=np.float32)
+        # walk-forward数组第i行对应self.idx=i+1，所以取第(self.idx-1)行；
+        # 越界(数组还没覆盖到这期，或压根没有这个数组)时用0占位。
+        if self.ml_wf is not None and 0 <= self.idx-1 < len(self.ml_wf):
+            mlv = self.ml_wf[self.idx-1]
+        else:
+            mlv = np.zeros(self.ml_wf.shape[1] if self.ml_wf is not None else 0, dtype=np.float32)
+        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
+            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
+        else:
+            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
+        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
+            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
+        else:
+            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
+        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], '3d')
+        return normalize_state_segments(*segs)
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed); self.idx=self.start
+        return self._state(), {}
+
+    def step(self, action):
+        pred = [int(action[0]), int(action[1]), int(action[2])]
+        actual = self.records[self.idx]['digits']
+        matches = sum(1 for i in range(3) if pred[i]==actual[i])
+        reward = matches * 1.0
+        if matches == 3:
+            reward += 20.0   # 三位全中（直选）额外大奖励
+        self.idx+=1
+        terminated=(self.idx >= self.train_end)
+        obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
+        return obs, reward, terminated, False, {'pred':pred,'actual':actual,'matches':matches}
+
+# ══════════════════════════════════════════════════════
+#  加载/保存 PPO 模型
+# ══════════════════════════════════════════════════════
+def load_ppo(game):
+    path = f'{RL_MOUNTED}/{game}_ppo.zip'
+    if os.path.exists(path):
+        try:
+            model = PPO.load(path, device='cpu')
+            print(f"  ✓ 加载已有PPO模型: {path}")
+            return model
+        except Exception as e:
+            print(f"  ! 加载PPO失败: {e}，将重新训练")
+        return None
+
+    # ── 关键兼容：Kaggle 上传 Dataset 时会自动把 .zip 解压成同名目录 ──
+    # SB3 存的是 3d_ppo.zip，挂载后变成 3d_ppo/ 目录（里面是 policy.pth 等文件），
+    # 于是 os.path.exists('3d_ppo.zip') 永远为 False，模型明明在却读不到，
+    # 每天都静默退回"首次训练"，微调机制形同虚设。
+    # 这里把解压出来的目录重新打包成 zip 再交给 SB3 加载。
+    dir_path = f'{RL_MOUNTED}/{game}_ppo'
+    if os.path.isdir(dir_path):
+        try:
+            tmp_base = f'/kaggle/working/_restore_{game}_ppo'
+            zip_path = shutil.make_archive(tmp_base, 'zip', dir_path)
+            model = PPO.load(zip_path, device='cpu')
+            print(f"  ✓ 加载已有PPO模型（从被Kaggle解压的目录 {dir_path} 重新打包恢复）")
+            return model
+        except Exception as e:
+            print(f"  ! 从解压目录恢复PPO失败: {e}，将重新训练")
+            return None
+
+    print(f"  ! 未找到PPO模型文件: {path}")
+    if os.path.isdir(RL_MOUNTED):
+        try:
+            entries = sorted(os.listdir(RL_MOUNTED))
+            print(f"    挂载目录 {RL_MOUNTED} 实际内容({len(entries)}项): {entries[:20]}")
+            for e in entries:
+                sub = os.path.join(RL_MOUNTED, e)
+                if os.path.isdir(sub):
+                    print(f"    子目录 {e}/ 内容: {sorted(os.listdir(sub))[:20]}")
+        except Exception as e:
+            print(f"    读取挂载目录失败: {e}")
+    else:
+        print(f"    ⚠️ 挂载目录 {RL_MOUNTED} 不存在——"
+              f"说明 kernel-metadata.json 的 dataset_sources 里没挂载 {RL_DATASET_SLUG}，"
+              f"或该Dataset尚未创建")
+    return None
+
+def save_ppo(model, game):
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    model.save(f'{RL_LOCAL_DIR}/{game}_ppo')
+    print(f"  ✓ PPO模型已保存到本地: {RL_LOCAL_DIR}/{game}_ppo.zip")
+
+def sync_local_with_mounted():
+    """
+    推送前，把【挂载目录（上次版本）里有、但本地工作目录没有】的文件全部补齐。
+
+    ── 为什么必须做这一步 ──
+    push_rl_dataset() 会把本地工作目录的全部内容当作新版本推送到Kaggle，
+    Kaggle的Dataset版本更新是【整体替换】，不是合并——本地目录里没有的文件，
+    这次推送后就会从Dataset里彻底消失。
+
+    如果某个游戏这次跳过了训练（比如手动运行时没有新开奖数据、
+    或双色球恰好不是开奖日），carry_over_result 只会写一个
+    {game}_last_trained_n.json，模型文件根本没进本地工作目录——
+    这时如果直接推送，等于用"更瘦"的本地目录覆盖了Kaggle上原来的完整版本，
+    上次好不容易保存的PPO模型就这样被冲掉了，下次运行读不到模型，
+    只能被迫从头首训。这正是"手动运行→没有新数据→跳过训练→推送→
+    再自动运行时发现模型丢了"这个bug的根因。
+
+    这里在推送前统一补齐：挂载目录有、本地没有的文件都复制过来
+    （包括被Kaggle自动解压出的 xxx_ppo 目录，会重新打包成 xxx_ppo.zip），
+    保证不管这次训没训练、训了哪几个游戏，推送出去的始终是完整的一份，
+    不会遗漏任何游戏已经保存过的内容。
+    """
+    if not os.path.isdir(RL_MOUNTED):
+        return
+    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+    local_files = set(os.listdir(RL_LOCAL_DIR))
+    synced = []
+    for entry in sorted(os.listdir(RL_MOUNTED)):
+        src = os.path.join(RL_MOUNTED, entry)
+        if os.path.isdir(src):
+            # 被Kaggle自动解压的模型目录（如 3d_ppo/），本地若没有对应的.zip就重新打包补上
+            zip_name = entry + '.zip'
+            if zip_name not in local_files:
+                try:
+                    tmp_base = f'/kaggle/working/_sync_{entry}'
+                    zip_path = shutil.make_archive(tmp_base, 'zip', src)
+                    shutil.copy(zip_path, os.path.join(RL_LOCAL_DIR, zip_name))
+                    synced.append(zip_name)
+                except Exception as e:
+                    print(f"    ! 同步{entry}失败: {e}")
+        else:
+            if entry not in local_files and entry != 'dataset-metadata.json':
+                try:
+                    shutil.copy(src, os.path.join(RL_LOCAL_DIR, entry))
+                    synced.append(entry)
+                except Exception as e:
+                    print(f"    ! 同步{entry}失败: {e}")
+    if synced:
+        print(f"  [推送前补齐] 本地缺失、已从挂载目录同步的文件: {synced}")
+    else:
+        print("  [推送前补齐] 本地文件已是完整的，无需从挂载目录同步")
+
+
+def push_rl_dataset():
+    """把RL_LOCAL_DIR整体推送到Kaggle Dataset"""
+    try:
+        meta = {"title":"Fucai RL Cache","id":RL_DATASET_ID,"licenses":[{"name":"CC0-1.0"}]}
+        with open(f'{RL_LOCAL_DIR}/dataset-metadata.json','w') as f: json.dump(meta,f)
+        # 打印本次要上传的文件清单，便于跟下次运行时挂载目录的内容对照排查
+        try:
+            files = sorted(os.listdir(RL_LOCAL_DIR))
+            print(f"  本次上传文件({len(files)}项): {files[:20]}")
+        except Exception: pass
+        env = os.environ.copy(); env['KAGGLE_API_TOKEN']=KAGGLE_TOKEN
+        # 注意：不要加 --dir-mode tar/zip。模型文件本来就直接放在 RL_LOCAL_DIR 下，
+        # 加了归档参数会把内容打包，挂载后看到的是压缩包而非 xxx_ppo.zip 独立文件，
+        # 导致 load_ppo 每次都找不到文件、静默退回"首次训练"，模型永远无法累积。
+        for cmd in [
+            ['kaggle','datasets','version','-p',RL_LOCAL_DIR,'-m',f'daily-{date.today()}'],
+            ['kaggle','datasets','create','-p',RL_LOCAL_DIR],
+        ]:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
+            if r.returncode==0:
+                print(f"  ✓ RL模型已推送到 {RL_DATASET_ID}"); return True
+            print(f"  [{cmd[1]} {cmd[2]}] rc={r.returncode}  {r.stderr[:150]}")
+        return False
+    except Exception as e:
+        print(f"  ! 推送异常: {e}"); return False
+
+# ══════════════════════════════════════════════════════
+#  主流程：kl8 增量微调
+# ══════════════════════════════════════════════════════
+def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
+    print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
+
+    # 新数据检测：快乐8虽然每天开奖，但手动重复触发时数据是完全相同的，
+    # 反复训练会让模型对同一批数据过拟合，这里直接跳过
+    last_trained_n = get_last_trained_n('kl8')
+    if len(records) <= last_trained_n:
+        return carry_over_result('kl8', '快乐8', prev_result, len(records), last_trained_n,
+                                 '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
+
+    _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
+    lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
+
+    print("  批量预计算 LSTM/TFM 隐层状态…")
+    t0 = time.time()
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
+
+    print("  批量预计算遗漏向量…")
+    t0 = time.time()
+    omit_arr = precompute_omission_kl8(records)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（80维，覆盖全部号码）")
+
+    print("  批量预计算近30期频率向量…")
+    t0 = time.time()
+    freq_arr = precompute_freq_kl8(records, window=30)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [频率向量] ✓已加载（80维，第二个逐球差异化信号）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 逐期ML概率(walk-forward)"
+          f"{ml_wf.shape[1] if ml_wf is not None else 0}维 + LSTM隐层 + TFM隐层 + 遗漏80维 + 频率80维（逐球信号×2加权）")
+
+    def make_env():
+        return IntegratedKL8Env(records, fkl8,
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr,
+                                ml_wf=ml_wf)
+    vec_env = make_vec_env(make_env, n_envs=4)
+
+    # 探针环境：跟训练环境用同一个 _state() 方法算状态，供早停评估复用，
+    # 不重复实现一遍特征拼接逻辑，避免训练和评估用的状态出现细微不一致
+    _probe_env = IntegratedKL8Env(records, fkl8,
+                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr,
+                                  ml_wf=ml_wf)
+    _hold_start = _probe_env.train_end
+    def _eval_holdout(m):
+        """在holdout（训练时从未碰过的末段）上评分：选六标准的平均命中球数"""
+        tot, n = 0, 0
+        for idx in range(_hold_start, len(records)):
+            _probe_env.idx = idx
+            st = _probe_env._state()
+            action, _ = m.predict(st, deterministic=True)
+            top_idx = np.argsort(action)[-6:]
+            sel = set(int(i)+1 for i in top_idx)
+            tot += len(set(records[idx]['numbers']) & sel); n += 1
+        return tot/n if n else 0.0
+
+    # 关闭增量微调：不再加载旧权重，每次都从零全量训练。
+    # 原因：①的修复已经改变了状态维度，旧权重本来就用不了；
+    # 更根本的是，增量微调+EMA混合这套机制目前建立在
+    # '状态特征逐期正确对齐历史'这个前提上，而①暴露出这个前提
+    # 之前并不成立(ML概率块是常数)——现在改对了，但增量微调这套
+    # 机制本身还没有针对'状态改动后是否依然可靠'重新验证过，
+    # 先关掉，每天全新训练，行为更简单、更容易判断是否有效。
+    model = None
+    is_new = model is None
+    t0 = time.time()
+    if not is_new:
+        try:
+            model.set_env(vec_env)
+        except Exception as e:
+            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
+            model = None; is_new = True
+
+    if is_new:
+        print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
+        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
+                    target_kl=0.03,   # 限制单次更新的策略偏移幅度，防止在小样本上过度拟合
+                    verbose=0, device='cpu')
+        model, _best, _hist = train_with_early_stop(
+            model, 200000, lambda: _eval_holdout(model), '快乐8首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
+            baseline_is_real=False)
+    else:
+        print("  增量微调（2万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
+        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
+        _pre_score = _eval_holdout(model)
+        # 不再刻意压低学习率——EMA混合本身就把单日影响限制在α比例内，
+        # 不需要再靠"调小学习率+严格KL裁剪"把移动量压到几乎测不出来
+        model.target_kl = 0.05
+        # baseline_is_real=False：不把"微调前"当候选基准，只从这次会话
+        # 实际训练出的几段里挑最好的——不管它比昨天好还是差都无所谓，
+        # 因为"要不要接受"这件事已经交给下面的EMA混合处理，
+        # 这里只负责回答"今天训出来的最好版本是什么"
+        model, _session_best, _hist = train_with_early_stop(
+            model, 20000, lambda: _eval_holdout(model), '快乐8微调',
+            n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
+            baseline_is_real=False)
+        _new_sd = model.policy.state_dict()
+        # 每个候选α都实测一次holdout评分，记录到历史（不在这里挑，避免用单日噪声选参数）
+        _alpha_scores = {}
+        for _a in EMA_ALPHA_CANDIDATES:
+            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
+            _alpha_scores[_a] = _eval_holdout(model)
+        _alpha_hist = record_alpha_scores('kl8', _alpha_scores)
+        _se_kl8 = math.sqrt(6*0.25*0.75) / max(len(records)-_hold_start, 1) ** 0.5
+        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
+                                                 EMA_ALPHA_DEFAULT, _se_kl8)
+        print(f"    [α自动选择] {_alpha_why}")
+        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
+        model.policy.load_state_dict(_blended_sd)
+        _best = _eval_holdout(model)
+        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
+              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
+          f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
+
+    save_ppo(model, 'kl8')
+
+    def build_state(idx):
+        feat = fkl8(records, idx)
+        if feat is None: return None
+        raw = np.array(list(feat.values()),dtype=np.float32)
+        # idx>=len(records)：现场预测下一期(尚未开奖)，用今天真实的ML概率——
+        # 这里不存在泄漏问题，这就是"今天能拿到的最新信息"，
+        # 跟历史训练样本"未来才有的信息"完全是两回事。
+        # idx<len(records)：历史期，从walk-forward数组取对应行(第idx-1行)。
+        if idx >= len(records):
+            mlv = extract_ml_prob_vec(ml_pred, 'kl8', verbose=False)
+        elif ml_wf is not None and 0 <= idx-1 < len(ml_wf):
+            mlv = ml_wf[idx-1]
+        else:
+            mlv = np.zeros(ml_wf.shape[1] if ml_wf is not None else 0, dtype=np.float32)
+        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
+        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
+        om = omit_arr[idx]
+        fr = freq_arr[idx]
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th),
+             ('遗漏',om), ('频率',fr)], 'kl8')
+        state = normalize_state_segments(*segs)
+        state = state.copy()
+        state[-160:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
+        return np.clip(state, -5, 5)
+
+    # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
+    start = max(SEQ_LEN+30, len(records)-30)
+    play_sizes = [4,5,6,9,10]
+    net_by_size = {n: 0.0 for n in play_sizes}
+    hit_by_size = {n: 0.0 for n in play_sizes}
+    games=0
+    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
+    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    for idx in range(start, len(records)):
+        state = build_state(idx)
+        if state is None: continue
+        action,_ = model.predict(state, deterministic=True)
+        order = np.argsort(action)[::-1]
+        ranked_all = [int(i)+1 for i in order]   # 一次打分，全部玩法复用同一个排序结果
+        actual=set(records[idx]['numbers'])
+        for n in play_sizes:
+            sel = set(ranked_all[:n])
+            hit = len(actual & sel)
+            net_by_size[n] += calc_payout(n, hit)
+            hit_by_size[n] += hit
+        games+=1
+
+    backtest_by_play = {}
+    for n in play_sizes:
+        avg_net = round(net_by_size[n]/games,2) if games else 0
+        avg_hit = round(hit_by_size[n]/games,2) if games else 0
+        backtest_by_play[n] = {'avg_net_per_game':avg_net,'avg_hit':avg_hit}
+
+    # 找出净收益回测表现最好的玩法（仅供参考，彩票本质随机，历史回测不代表未来）
+    best_play_n = max(play_sizes, key=lambda n: backtest_by_play[n]['avg_net_per_game'])
+    avg_net = backtest_by_play[6]['avg_net_per_game']   # 兼容旧字段：保留选六作为默认展示值
+    print(f"  回测（近{games}期，全玩法对比）：" + "  ".join(
+        f"选{['','','','','四','五','六','','','九','十'][n]}净收益{backtest_by_play[n]['avg_net_per_game']}元/期" for n in play_sizes))
+    print(f"  回测表现最好的玩法：选{['','','','','四','五','六','','','九','十'][best_play_n]}")
+
+    # 今日推荐：以RL自己的判断为主——它的状态输入已经融合了ML概率/LSTM/TFM隐层/遗漏/频率/走势特征，
+    # 训练过程中神经网络自己学会了怎么综合这些信息，不再用人工权重公式二次加工跟它的判断"打架"。
+    # 多组推荐用同一份RL排序做滑动窗口切分（保持100%由RL主导，不引入外部信号重新排序）；
+    # 遗漏/频率/ML预测只作为"参考信息"附加展示，帮助理解RL为什么这么选，不参与决策计算。
+    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
+    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
+    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
+    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
+    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    idx = len(records)
+    state = build_state(idx)
+    rl_order = []
+    ref_info = {}   # 参考信息：遗漏/频率/ML预测，仅用于展示说明，不影响排序
+    if state is not None:
+        base_action,_ = model.predict(state, deterministic=True)
+        rl_order = [int(i)+1 for i in np.argsort(base_action)[::-1]]
+
+        # 区分度诊断：模型对80个球的打分，Top6跟中位区拉不拉得开？
+        # 如果差距接近0，说明模型其实没在区分号码好坏，选Top6跟随便选6个没实质区别，
+        # 这比"回测净收益"更能直接反映模型到底学到没有。
+        _srt = np.sort(base_action)[::-1]
+        _top6, _mid = float(_srt[:6].mean()), float(_srt[34:40].mean())
+        _spread = float(_srt.max() - _srt.min())
+        _gap_ratio = (_top6 - _mid) / (_spread + 1e-9)
+        print(f"  [区分度] Top6均分{_top6:.4f}  中位区均分{_mid:.4f}  "
+              f"差距占全域{_gap_ratio*100:.1f}%")
+        if _gap_ratio < 0.15:
+            print(f"    ⚠️ 差距很小，说明模型对各号码的偏好不明显，本次推荐参考价值有限")
+        else:
+            print(f"    ✓ 模型对号码有明显区分")
+
+        om_now = omit_arr[idx] if omit_arr is not None else np.zeros(80)
+        fr_now = freq_arr[idx] if freq_arr is not None else np.zeros(80)
+        models_data = ml_pred.get('models', {})
+        zone_probs_raw = models_data.get('zone_dom', {}).get('prediction', {}).get('probs', {})
+        five_probs_raw = models_data.get('five_dom', {}).get('prediction', {}).get('probs', {})
+        zone_pred = models_data.get('zone_dom', {}).get('prediction', {}).get('value')
+        five_pred = models_data.get('five_dom', {}).get('prediction', {}).get('value')
+        zone_names = ['1-20区','21-40区','41-60区','61-80区']
+        five_names = ['1-16','17-32','33-48','49-64','65-80']
+
+        top6 = rl_order[:6]
+        avg_omission = round(float(np.mean([om_now[b-1] for b in top6])), 2)
+        avg_freq = round(float(np.mean([fr_now[b-1] for b in top6])), 2)
+        ref_info = {
+            'avg_omission_top6': avg_omission,
+            'avg_freq_top6': avg_freq,
+            'ml_zone_pred': zone_names[zone_pred] if zone_pred is not None and 0<=zone_pred<4 else None,
+            'ml_five_pred': five_names[five_pred] if five_pred is not None and 0<=five_pred<5 else None,
+        }
+        print(f"  [主推荐] RL确定性排序Top6: {sorted(top6)}")
+        print(f"  [参考信息] 该注平均遗漏{avg_omission}期，平均近期频率{avg_freq}次；"
+              f"ML预测主力区间={ref_info['ml_zone_pred']}，主力五行段={ref_info['ml_five_pred']}")
+
+        # ── 诊断：检验打分是否跟球号系统性绑定（即"是否还存在偏向大号/小号"的机制性bug）──
+        ball_idx = np.arange(1, 81)
+        corr = float(np.corrcoef(ball_idx, base_action)[0, 1])
+        print(f"  [诊断1] RL打分与球号(1-80)的相关系数: {corr:.3f}")
+        if abs(corr) > 0.3:
+            direction = '偏向大号' if corr > 0 else '偏向小号'
+            print(f"  ⚠️ [诊断1警告] 相关系数绝对值>0.3，RL打分可能仍跟球号系统性绑定（{direction}），建议人工复查")
+        else:
+            print(f"  ✓ [诊断1通过] RL打分与球号无明显系统性相关")
+
+        # ── 诊断2（关键）：对比多个不同历史时间点的推荐结果 ──
+        if games >= 4:
+            test_points = sorted(set([
+                max(SEQ_LEN+30, len(records)-200),
+                max(SEQ_LEN+30, len(records)-100),
+                max(SEQ_LEN+30, len(records)-50),
+                len(records)-1,
+            ]))
+            snapshot_top6 = {}
+            for tp in test_points:
+                st = build_state(tp)
+                if st is None: continue
+                act,_ = model.predict(st, deterministic=True)
+                t6 = set(int(i)+1 for i in np.argsort(act)[-6:])
+                snapshot_top6[tp] = t6
+            print(f"  [诊断2] 不同历史时期(共{len(snapshot_top6)}个采样点)的Top6对比：")
+            for tp, t6 in snapshot_top6.items():
+                print(f"    第{tp}期状态 → {sorted(t6)}")
+            if len(snapshot_top6) >= 2:
+                all_sets = list(snapshot_top6.values())
+                pairwise_overlaps = []
+                for i in range(len(all_sets)):
+                    for j in range(i+1, len(all_sets)):
+                        pairwise_overlaps.append(len(all_sets[i] & all_sets[j]))
+                avg_overlap = sum(pairwise_overlaps)/len(pairwise_overlaps)
+                print(f"  [诊断2] 不同时期推荐重合数: {avg_overlap:.1f}/6")
+                if avg_overlap >= 4:
+                    print(f"  ⚠️⚠️ [诊断2警告] 不同状态推荐重合度高(≥4/6)，模型区分度不足，建议人工复查训练情况")
+                elif avg_overlap <= 1:
+                    print(f"  ✓ [诊断2通过] 不同状态推荐差异明显，模型确实在响应状态变化")
+                else:
+                    print(f"  ⚠️ [诊断2中性] 重合度中等")
+
+    # 各玩法预先用"胆码+拖码轮转"算好各注（原因同双色球：
+    # 按联合得分取Top-N会让各注共享同样的高分球、只在末位微调，体现不出多元化）
+    # ── 提取ML的7条预测作为选号条件（这些本来就已注入RL状态，
+    #    但之前只在训练时被"看到"，选号环节完全没检验，这里补上）──
+    def _kl8_cond_feats(c):
+        cs = sorted(c)
+        odd = sum(1 for x in c if x % 2 != 0)
+        big = sum(1 for x in c if x > 40)
+        zn = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,20),(21,40),(41,60),(61,80)]]
+        fv = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
+        tt = sum(c)
+        cg, inc = 0, False
+        for i in range(len(cs)-1):
+            if cs[i+1]-cs[i] == 1:
+                if not inc: cg += 1; inc = True
+            else: inc = False
+        rng = cs[-1] - cs[0]
+        # 分档阈值按每期20球定义，选4~10球时需按占比折算回20球口径，否则永远匹配不上
+        k = 20.0 / max(len(c), 1)
+        o20, b20, t20 = odd*k, big*k, tt*k
+        return {'odd_grp': 0 if o20 < 9 else (1 if o20 <= 11 else 2),
+                'zone_dom': int(max(range(4), key=lambda i: zn[i])),
+                'tot_grp': 0 if t20 < 640 else (1 if t20 < 820 else 2),
+                'big_grp': 0 if b20 < 9 else (1 if b20 <= 11 else 2),
+                'five_dom': int(max(range(5), key=lambda i: fv[i])),
+                'consec_grp': 0 if cg == 0 else (1 if cg <= 2 else 2),
+                'range_grp': 0 if rng < 60 else (1 if rng < 70 else 2)}
+
+    _kl8_conds = {}
+    _md = ml_pred.get('models', {})
+    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']:
+        _p = (_md.get(_k, {}) or {}).get('prediction', {})
+        if _p.get('value') is not None:
+            _kl8_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
+
+    _play_bets = {}
+    _play_core = {}
+    for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
+        if rl_order:
+            # 完全按RL自己的球分选号。ML的那些预测已经在状态向量里，
+            # 训练时模型看得见、奖励信号会告诉它有没有用；
+            # 如果在外面再套一层手写规则去筛，等于用"我认为对的"覆盖"模型学到的"，
+            # 而且"符合条件更容易中"这个假设本身从未被验证过。
+            _b, _c, _p = diverse_picks(base_action, _n, _cnt)
+            _play_bets[_n], _play_core[_n] = _b, _c
+        else:
+            _play_bets[_n], _play_core[_n] = [[] for _ in range(_cnt)], []
+    if rl_order:
+        _o6 = [len(set(_play_bets[6][i]) & set(_play_bets[6][j]))
+               for i in range(len(_play_bets[6])) for j in range(i+1, len(_play_bets[6]))]
+        _a6 = set()
+        for c in _play_bets[6]: _a6 |= set(c)
+        print(f"  [选六] 胆码{_play_core[6]}  3注共用到{len(_a6)}个号码"
+              + (f"，两两平均重合{np.mean(_o6):.1f}/6" if _o6 else ""))
+        if _kl8_conds:
+            _cavg = sum(len([1 for k,(v,w) in _kl8_conds.items()
+                             if _kl8_cond_feats(b).get(k)==v]) for b in _play_bets[6]) / max(len(_play_bets[6]),1)
+            print(f"  [诊断·仅参考] RL自选的选六3注，平均符合{_cavg:.1f}/{len(_kl8_conds)}条ML预测条件"
+                  f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
+
+    def group(n, rank=0):
+        """取该玩法第 rank+1 注（已由 diverse_picks 保证各注之间有实质差异）"""
+        bets = _play_bets.get(n, [])
+        if rank < len(bets): return bets[rank]
+        return sorted(rl_order[:n]) if rl_order else []
+
+    # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
+    # 每注由"胆码+拖码轮转"生成：模型最确信的球进每注，其余候选轮转分配，兼顾置信度与多样性
+    plays = {
+        'xuan4':    {'name':'选四','balls':4, 'tip':'胆码+拖码轮转3注',
+                     'groups':[group(4,0), group(4,1), group(4,2)]},
+        'xuan5':    {'name':'选五','balls':5, 'tip':'胆码+拖码轮转3注',
+                     'groups':[group(5,0), group(5,1), group(5,2)]},
+        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注',
+                     'groups':[group(8,0)]},
+        'xuan6':    {'name':'选六','balls':6, 'tip':'胆码+拖码轮转3注（回测标准）',
+                     'groups':[group(6,0), group(6,1), group(6,2)]},
+        'xuan9':    {'name':'选九','balls':9, 'tip':'胆码+拖码轮转2注',
+                     'groups':[group(9,0), group(9,1)]},
+        'xuan10':   {'name':'选十','balls':10,'tip':'RL打分最高的10球',
+                     'groups':[group(10,0)]},
+    }
+    picks_by_n = {4:group(4,0), 5:group(5,0), 6:group(6,0), 9:group(9,0), 10:group(10,0)}
+
+    # 记录本次训练时的期数，供下次运行判断是否有新数据
+    save_last_trained_n('kl8', len(records))
+
+    return {'avg_net_per_game':avg_net,'games_tested':games,
+            'ppo_selected':picks_by_n[6],   # 兼容旧字段
+            'picks_by_n':picks_by_n,        # 兼容旧字段
+            'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
+            'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
+            'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
+            'ref_info':ref_info,            # 参考信息：遗漏/频率/ML预测，仅供理解RL判断依据，不影响排序
+            'is_first_train':is_new,
+            'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'}
+
+
+def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
+    print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
+
+    # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据；
+    # 手动重复触发时也会命中这个检查，避免同一批数据被反复训练导致过拟合
+    last_trained_n = get_last_trained_n('ssq')
+    if len(records) <= last_trained_n:
+        return carry_over_result('ssq', '双色球', prev_result, len(records), last_trained_n,
+                                 '双色球周二/四/日开奖，本次运行无新开奖数据')
+
+    _cur_feat_dim = len(fssq(records, len(records)-1) or {})
+    lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
+
+    print("  批量预计算 LSTM/TFM 隐层状态…")
+    t0 = time.time()
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
+
+    print("  批量预计算遗漏向量…")
+    t0 = time.time()
+    omit_arr = precompute_omission_ssq(records)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 逐期ML概率(walk-forward)"
+          f"{ml_wf.shape[1] if ml_wf is not None else 0}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
+
+    def make_env():
+        return IntegratedSSQEnv(records, fssq,
+                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                ml_wf=ml_wf)
+    vec_env = make_vec_env(make_env, n_envs=4)
+
+    _probe_env = IntegratedSSQEnv(records, fssq,
+                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                  ml_wf=ml_wf)
+    _hold_start = _probe_env.train_end
+    def _eval_holdout(m):
+        """在holdout上评分：红球平均命中数 + 蓝球命中率加权（蓝球0.5注权重）"""
+        tot, n = 0.0, 0
+        for idx in range(_hold_start, len(records)):
+            _probe_env.idx = idx
+            st = _probe_env._state()
+            action, _ = m.predict(st, deterministic=True)
+            red_scores = action[:33]; blue_scores = action[33:]
+            top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
+            red_sel = set(int(i)+1 for i in top_idx)
+            blue_pred = int(np.argmax(blue_scores)) + 1
+            rh = len(set(records[idx]['red']) & red_sel)
+            bh = int(blue_pred == records[idx]['blue'])
+            tot += rh + 0.5*bh; n += 1
+        return tot/n if n else 0.0
+
+    # 关闭增量微调：不再加载旧权重，每次都从零全量训练。
+    # 原因：①的修复已经改变了状态维度，旧权重本来就用不了；
+    # 更根本的是，增量微调+EMA混合这套机制目前建立在
+    # '状态特征逐期正确对齐历史'这个前提上，而①暴露出这个前提
+    # 之前并不成立(ML概率块是常数)——现在改对了，但增量微调这套
+    # 机制本身还没有针对'状态改动后是否依然可靠'重新验证过，
+    # 先关掉，每天全新训练，行为更简单、更容易判断是否有效。
+    model = None
+    is_new = model is None
+    t0 = time.time()
+    if not is_new:
+        try:
+            model.set_env(vec_env)
+        except Exception as e:
+            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
+            model = None; is_new = True
+
+    if is_new:
+        print("  首次训练（15万步，红球33全量打分+蓝球联合优化）…")
+        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
+                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
+                    target_kl=0.03,
+                    verbose=0, device='cpu')
+        model, _best, _hist = train_with_early_stop(
+            model, 150000, lambda: _eval_holdout(model), '双色球首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
+            baseline_is_real=False)
+    else:
+        print("  增量微调（1.5万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
+        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
+        _pre_score = _eval_holdout(model)
+        model.target_kl = 0.05
+        model, _session_best, _hist = train_with_early_stop(
+            model, 15000, lambda: _eval_holdout(model), '双色球微调',
+            n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
+            baseline_is_real=False)
+        _new_sd = model.policy.state_dict()
+        _alpha_scores = {}
+        for _a in EMA_ALPHA_CANDIDATES:
+            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
+            _alpha_scores[_a] = _eval_holdout(model)
+        _alpha_hist = record_alpha_scores('ssq', _alpha_scores)
+        _se_ssq = math.sqrt(6*(6/33)*(27/33)) / max(len(records)-_hold_start, 1) ** 0.5
+        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
+                                                 EMA_ALPHA_DEFAULT, _se_ssq)
+        print(f"    [α自动选择] {_alpha_why}")
+        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
+        model.policy.load_state_dict(_blended_sd)
+        _best = _eval_holdout(model)
+        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
+              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
+          f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
+
+    save_ppo(model, 'ssq')
+
+    def build_state(idx):
+        feat = fssq(records, idx)
+        if feat is None: return None
+        raw = np.array(list(feat.values()),dtype=np.float32)
+        if idx >= len(records):
+            mlv = extract_ml_prob_vec(ml_pred, 'ssq', verbose=False)
+        elif ml_wf is not None and 0 <= idx-1 < len(ml_wf):
+            mlv = ml_wf[idx-1]
+        else:
+            mlv = np.zeros(ml_wf.shape[1] if ml_wf is not None else 0, dtype=np.float32)
+        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
+        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
+        om = omit_arr[idx]
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], 'ssq')
+        return normalize_state_segments(*segs)
+
+    # 回测最近30期：红球命中数分布 + 蓝球命中率
+    start=max(SEQ_LEN+30, len(records)-30)
+    total=0; blue_correct=0; red_hit_dist={0:0,1:0,2:0,3:0,4:0,5:0,6:0}
+    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
+    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
+    for idx in range(start, len(records)):
+        state = build_state(idx)
+        if state is None: continue
+        action,_ = model.predict(state, deterministic=True)
+        red_scores = action[:33]; blue_scores = action[33:]
+        top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
+        red_selected = set(int(i)+1 for i in top_idx)
+        blue_pred = int(np.argmax(blue_scores))+1
+
+        actual_red = set(records[idx]['red']); actual_blue = records[idx]['blue']
+        rh = len(actual_red & red_selected); bh = int(blue_pred==actual_blue)
+        red_hit_dist[rh]+=1
+        if bh: blue_correct+=1
+        total+=1
+
+    blue_acc = round(blue_correct/total*100,1) if total else 0
+    avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
+    print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
+
+    # 今日推荐：以RL自己的判断为主，红球排序滑动窗口切分成6注，遗漏/ML预测仅作参考展示
+    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
+    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
+    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
+    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
+    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    idx = len(records)
+    state = build_state(idx)
+    groups=[]
+    ref_info = {}
+    red_core_info, red_pool_info = [], []
+    if state is not None:
+        base_action,_ = model.predict(state, deterministic=True)
+        red_scores = base_action[:33]; blue_scores = base_action[33:]
+
+        # 蓝球排序：不再只取argmax(唯一最优解)，而是拿到RL对全部16个蓝球的完整打分排序，
+        # 让不同注轮流用排名靠前的几个候选蓝球，把模型对次优选项的判断也利用起来，
+        # 而不是把"分数第二、第三高"的蓝球完全浪费掉、6注全部锁死在同一个号码上。
+        blue_order = [int(i)+1 for i in np.argsort(blue_scores)[::-1]]
+
+        rl_red_order = [int(i)+1 for i in np.argsort(red_scores)[::-1]]
+
+        # 区分度诊断（红球/蓝球分开看）：模型的打分能不能把好坏号码拉开差距？
+        # 差距接近0说明模型没在真正区分，推荐等同于随机选，比看回测数字更直接。
+        _rs = np.sort(red_scores)[::-1]
+        _r_gap = (float(_rs[:6].mean()) - float(_rs[13:19].mean())) / (float(_rs.max()-_rs.min()) + 1e-9)
+        _bs = np.sort(blue_scores)[::-1]
+        _b_gap = (float(_bs[:3].mean()) - float(_bs[6:9].mean())) / (float(_bs.max()-_bs.min()) + 1e-9)
+        print(f"  [区分度] 红球Top6与中位区差距占全域{_r_gap*100:.1f}%  "
+              f"蓝球Top3与中位区差距占全域{_b_gap*100:.1f}%")
+        if _r_gap < 0.15:
+            print(f"    ⚠️ 红球区分度偏低，模型对各红球偏好不明显，推荐参考价值有限")
+        if _b_gap < 0.15:
+            print(f"    ⚠️ 蓝球区分度偏低，模型对16个蓝球基本无偏好")
+
+        # ── 红球：枚举组合，取模型联合得分最高的6注 ──
+        # 之前是把排序切成梯队(1-6名/7-12名/…)，但第2注开始就是模型认为"第7到12好"的球，
+        # 等于故意给出越来越差的推荐，这不是"最可能出现的6注"。
+        # ── 红球：胆码+拖码轮转 + ML条件校验 ──
+        # ML的7个目标(奇数/和值/AC值/主力区/间距/大数/连号)本就已注入RL状态，
+        # 但之前选号只看每个球的分数，"这一注整体符不符合那些预测"没人检验，这里补上。
+        def _ssq_cond_feats(red):
+            r = sorted(red); sm = sum(r)
+            d = set()
+            for i in range(len(r)):
+                for j in range(i+1, len(r)): d.add(r[j]-r[i])
+            ac = len(d) - (len(r)-1)
+            z = [sum(1 for x in r if x <= 11), sum(1 for x in r if 12 <= x <= 22),
+                 sum(1 for x in r if x >= 23)]
+            mg = max(r[i+1]-r[i] for i in range(len(r)-1)) if len(r) > 1 else 0
+            return {'odd': sum(1 for x in r if x % 2 != 0),
+                    'sum_grp': 0 if sm < 70 else (1 if sm < 100 else 2),
+                    'ac_grp': 0 if ac <= 2 else (1 if ac <= 5 else 2),
+                    'red_zone_dom': int(max(range(3), key=lambda i: z[i])),
+                    'gap_grp': 0 if mg <= 5 else (1 if mg <= 10 else 2),
+                    'big': sum(1 for x in r if x > 16),
+                    'consec': sum(1 for i in range(len(r)-1) if r[i+1]-r[i] == 1)}
+
+        _ssq_conds = {}
+        _md = ml_pred.get('models', {})
+        for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']:
+            _p = (_md.get(_k, {}) or {}).get('prediction', {})
+            if _p.get('value') is not None:
+                _ssq_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
+
+        # 完全按RL自己的球分选号（理由同快乐8：ML预测已在状态里，不在外面二次干预）
+        red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
+        if _ssq_conds:
+            _cavg = sum(len([1 for k,(v,w) in _ssq_conds.items()
+                             if _ssq_cond_feats(b).get(k)==v]) for b in red_top6) / max(len(red_top6),1)
+            print(f"  [诊断·仅参考] RL自选的6注，平均符合{_cavg:.1f}/{len(_ssq_conds)}条ML预测条件"
+                  f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
+        _ov = [len(set(red_top6[i]) & set(red_top6[j])) for i in range(6) for j in range(i+1,6)]
+        _allb = set()
+        for c in red_top6: _allb |= set(c)
+        print(f"  [红球] 候选池{len(red_pool)}球 胆码{red_core}  "
+              f"6注共用到{len(_allb)}个号码，两两平均重合{np.mean(_ov):.1f}/6")
+
+        # ── 蓝球：模型预测几个算几个，全部展示 ──
+        # 对16个蓝球分数做softmax，把高于均匀分布(1/16=6.25%)的候选都算作模型的预测，最多3个
+        _bexp = np.exp(blue_scores - np.max(blue_scores))
+        _bprob = _bexp / (_bexp.sum() + 1e-12)
+        _border = np.argsort(_bprob)[::-1]
+        blue_cands, blue_probs = [], []
+        for bi in _border[:3]:
+            p = float(_bprob[bi])
+            if p >= (1.0/16) or not blue_cands:   # 至少给1个，其余只需高于均匀分布即可
+                blue_cands.append(int(bi) + 1); blue_probs.append(round(p*100, 1))
+        print(f"  [蓝球预测] 共{len(blue_cands)}个候选: "
+              + "  ".join(f"{b:02d}({p}%)" for b, p in zip(blue_cands, blue_probs)))
+
+        for red_sel in red_top6:
+            groups.append({
+                'red': red_sel,
+                'blue': blue_cands[0] if blue_cands else None,   # 兼容旧字段
+                'blues': blue_cands,          # 模型预测的全部蓝球候选，前端有几个显示几个
+                'blue_probs': blue_probs,
+            })
+        blue_sel = blue_cands[0] if blue_cands else blue_order[0]
+        red_core_info, red_pool_info = red_core, red_pool
+
+        # 参考信息：遗漏值+ML主力区预测，仅用于展示说明，不参与排序计算
+        om_now = omit_arr[idx] if omit_arr is not None else np.zeros(49)
+        top6_red = rl_red_order[:6]
+        avg_omission = round(float(np.mean([om_now[b-1] for b in top6_red])), 2)
+        models_data = ml_pred.get('models', {})
+        zone_pred = models_data.get('red_zone_dom', {}).get('prediction', {}).get('value')
+        zone_names = ['一区(1-11)','二区(12-22)','三区(23-33)']
+        ref_info = {
+            'avg_omission_top6': avg_omission,
+            'ml_zone_pred': zone_names[zone_pred] if zone_pred is not None and 0<=zone_pred<3 else None,
+        }
+        print(f"  [主推荐] RL红球排序Top6: {sorted(top6_red)}  蓝球Top3候选: {blue_order[:3]}（6注轮流分配）")
+        print(f"  [参考信息] 该注平均遗漏{avg_omission}期；ML预测红球主力区={ref_info['ml_zone_pred']}")
+
+    # 兼容旧字段：主推荐仍取第一注
+    red_selected = groups[0]['red'] if groups else []
+    blue_pred = groups[0]['blue'] if groups else None
+
+    # 记录本次训练时的期数，供下次运行判断是否有新开奖
+    save_last_trained_n('ssq', len(records))
+
+    return {'blue_acc_pct':blue_acc,'games_tested':total,
+            'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
+            'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
+            'ppo_groups':groups,'ref_info':ref_info,
+            'red_core':red_core_info,'red_pool':red_pool_info,
+            'is_first_train':is_new,
+            'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
+
+
+def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
+    print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
+
+    # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
+    last_trained_n = get_last_trained_n('3d')
+    if len(records) <= last_trained_n:
+        return carry_over_result('3d', '福彩3D', prev_result, len(records), last_trained_n,
+                                 '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
+
+    _cur_feat_dim = len(f3d(records, len(records)-1) or {})
+    lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
+
+    print("  批量预计算 LSTM/TFM 隐层状态…")
+    t0 = time.time()
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
+
+    print("  批量预计算遗漏向量…")
+    t0 = time.time()
+    omit_arr = precompute_omission_3d(records)
+    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
+
+    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 逐期ML概率(walk-forward)"
+          f"{ml_wf.shape[1] if ml_wf is not None else 0}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
+
+    def make_env():
+        return Integrated3DEnv(records, f3d,
+                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                               ml_wf=ml_wf)
+    vec_env = make_vec_env(make_env, n_envs=4)
+
+    _probe_env = Integrated3DEnv(records, f3d,
+                                 lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr,
+                                 ml_wf=ml_wf)
+    _hold_start = _probe_env.train_end
+    def _eval_holdout(m):
+        """在holdout上评分：平均命中位数"""
+        tot, n = 0, 0
+        for idx in range(_hold_start, len(records)):
+            _probe_env.idx = idx
+            st = _probe_env._state()
+            action, _ = m.predict(st, deterministic=True)
+            pred = [int(action[0]), int(action[1]), int(action[2])]
+            actual = records[idx]['digits']
+            tot += sum(1 for i in range(3) if pred[i]==actual[i]); n += 1
+        return tot/n if n else 0.0
+
+    # 关闭增量微调：不再加载旧权重，每次都从零全量训练。
+    # 原因：①的修复已经改变了状态维度，旧权重本来就用不了；
+    # 更根本的是，增量微调+EMA混合这套机制目前建立在
+    # '状态特征逐期正确对齐历史'这个前提上，而①暴露出这个前提
+    # 之前并不成立(ML概率块是常数)——现在改对了，但增量微调这套
+    # 机制本身还没有针对'状态改动后是否依然可靠'重新验证过，
+    # 先关掉，每天全新训练，行为更简单、更容易判断是否有效。
+    model = None
+    is_new = model is None
+    t0 = time.time()
+    if not is_new:
+        try:
+            model.set_env(vec_env)
+        except Exception as e:
+            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
+            model = None; is_new = True
+
+    if is_new:
+        print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
+        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
+                    n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
+                    target_kl=0.03,
+                    verbose=0, device='cpu')
+        model, _best, _hist = train_with_early_stop(
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
+            baseline_is_real=False)
+    else:
+        print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
+        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
+        _pre_score = _eval_holdout(model)
+        model.target_kl = 0.05
+        model, _session_best, _hist = train_with_early_stop(
+            model, 10000, lambda: _eval_holdout(model), '3D微调',
+            n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
+            baseline_is_real=False)
+        _new_sd = model.policy.state_dict()
+        _alpha_scores = {}
+        for _a in EMA_ALPHA_CANDIDATES:
+            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
+            _alpha_scores[_a] = _eval_holdout(model)
+        _alpha_hist = record_alpha_scores('3d', _alpha_scores)
+        _se_3d = math.sqrt(3*0.1*0.9) / max(len(records)-_hold_start, 1) ** 0.5
+        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
+                                                 EMA_ALPHA_DEFAULT, _se_3d)
+        print(f"    [α自动选择] {_alpha_why}")
+        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
+        model.policy.load_state_dict(_blended_sd)
+        _best = _eval_holdout(model)
+        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
+              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
+    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
+          f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
+
+    save_ppo(model, '3d')
+
+    def build_state(idx):
+        feat = f3d(records, idx)
+        if feat is None: return None
+        raw = np.array(list(feat.values()),dtype=np.float32)
+        if idx >= len(records):
+            mlv = extract_ml_prob_vec(ml_pred, '3d', verbose=False)
+        elif ml_wf is not None and 0 <= idx-1 < len(ml_wf):
+            mlv = ml_wf[idx-1]
+        else:
+            mlv = np.zeros(ml_wf.shape[1] if ml_wf is not None else 0, dtype=np.float32)
+        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
+        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
+        om = omit_arr[idx]
+        segs = apply_segment_switches(
+            [('走势特征',raw), ('ML概率(walk-forward)',mlv), ('LSTM隐层',lh), ('TFM隐层',th), ('遗漏',om)], '3d')
+        return normalize_state_segments(*segs)
+
+    # 回测窗口直接绑定训练边界 _hold_start，而不是写死一个数字——
+    # 之前用 len(records)-30 能"恰好"不泄漏，只是因为 30 小于 holdout_size 的下限80，
+    # 这是巧合，不是结构保证：以后如果 holdout_size 下限改小，写死的30会悄悄泄漏且不报错。
+    # 直接用 _hold_start（跟训练时留出的holdout是同一个边界）就不存在这个隐患，
+    # 而且这个边界本身有80~300期（取决于数据量），比写死的30期样本多得多，
+    # 命中率的统计误差也会明显变小——这是"数据隔离"和"回测更可靠"两件事一起解决。
+    # D3_BACKTEST_N 决定回测用多少期；min()保证不管这个数设多大，
+    # 都不会超出holdout边界(_hold_start对应的训练止点)，结构上杜绝泄漏。
+    start = max(SEQ_LEN+5, len(records) - min(D3_BACKTEST_N, len(records)-_hold_start))
+    total=0
+    match_dist={0:0,1:0,2:0,3:0}
+    # 之前只统计"逐位是否命中"(单一数字对不对)，看不出该位的排序质量——
+    # 比如百位真正开出的数字，模型是把它排第1、第2、第3，还是压根没排进前几名，
+    # 这才是判断"这一位的候选排序有没有价值"的关键，而不是只看Top1对不对。
+    # 命中X位(比如'2位命中1期')也只是计数，不说明是哪两位，
+    # 逐位Top1/2/3命中率才能看出模型是不是在某一位上确实学到了东西。
+    rank_hit = [[0,0,0,0] for _ in range(3)]   # 每位[Top1命中,Top2命中,Top3命中,前3都没中]次数
+    for idx in range(start, len(records)):
+        state = build_state(idx)
+        if state is None: continue
+        actual=records[idx]['digits']
+        try:
+            _obs, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+            with torch.no_grad():
+                _dist = model.policy.get_distribution(_obs)
+            _pp = [d.probs.detach().cpu().numpy()[0] for d in _dist.distribution]
+            pred = [int(np.argmax(p)) for p in _pp]   # Top1，跟原来deterministic预测等价
+            for i in range(3):
+                _ranked = np.argsort(_pp[i])[::-1]   # 该位10个数字按概率从高到低排序
+                _rank_of_actual = int(np.where(_ranked == actual[i])[0][0])  # 真实数字排第几
+                if _rank_of_actual < 3:
+                    rank_hit[i][_rank_of_actual] += 1
+                else:
+                    rank_hit[i][3] += 1
+        except Exception:
+            action,_ = model.predict(state, deterministic=True)
+            pred=[int(action[0]),int(action[1]),int(action[2])]
+        m = sum(1 for i in range(3) if pred[i]==actual[i])
+        match_dist[m]+=1; total+=1
+    exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
+    avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
+    # 逐位Top1/2/3命中率：真实数字被模型排在第1/2/3高概率位置的比例。
+    # Top1命中率≈随机基准10%但Top1+2+3明显超过30%，说明该位候选排序有价值，
+    # 只是没能精确押中第1名；三档都接近对应基准，说明该位大概率是在瞎猜。
+    names3 = ['百位','十位','个位']
+    print(f"  [逐位Top1/2/3命中率]（共{total}期，随机基准: Top1=10% Top1~3合计=30%）")
+    pos_hit_rate = {}
+    for i in range(3):
+        t1, t2, t3, other = rank_hit[i]
+        r1 = round(t1/total*100,1) if total else 0
+        r2 = round(t2/total*100,1) if total else 0
+        r3 = round(t3/total*100,1) if total else 0
+        r123 = round((t1+t2+t3)/total*100,1) if total else 0
+        pos_hit_rate[names3[i]] = {'top1':r1,'top2':r2,'top3':r3,'top1_3_合计':r123}
+        print(f"    {names3[i]}: Top1命中{t1}期({r1}%)  Top2命中{t2}期({r2}%)  "
+              f"Top3命中{t3}期({r3}%)  前3合计{r123}%  （前3之外{other}期）")
+
+    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
+    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
+    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
+    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
+    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    idx=len(records); state=build_state(idx)
+    groups=[]; pos_candidates=[]; _sampled=[]; _same=None
+    if state is not None:
+        # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
+        # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
+        try:
+            obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+            with torch.no_grad():
+                dist = model.policy.get_distribution(obs_tensor)
+            # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
+            pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
+
+            # 每位取Top3候选。之前用纯联合概率取Top6有个问题：
+            # 联合概率是相乘的，某一位第1名只要比第2名高出一截，乘法会把优势放大，
+            # 导致6注里那一位全被同一个数字垄断（比如十位0.200 vs 0.129，6注十位全是同一个），
+            # 模型对第2、3候选的判断就被白白浪费了。
+            # 改成"轮转+择优"：前3注让每位的3个候选各当一次主角（保证全部候选都露面），
+            # 后3注再从27种组合里按联合概率择优补足。
+            # 每位取Top3候选用于显示；另外单独取一个更宽的候选池(D3_POOL_N)用于组合枚举，
+            # 两者分开：显示给人看的候选数不变，但生成12注时能从更大的空间里挑联合概率最优的。
+            p_bai, p_shi, p_ge = pos_probs[0], pos_probs[1], pos_probs[2]
+            top3 = []
+            for p in (p_bai, p_shi, p_ge):
+                idx3 = np.argsort(p)[::-1][:3]
+                top3.append([(int(d), float(p[d])) for d in idx3])
+            pool_cands = []
+            for p in (p_bai, p_shi, p_ge):
+                idxN = np.argsort(p)[::-1][:D3_POOL_N]
+                pool_cands.append([(int(d), float(p[d])) for d in idxN])
+
+            # ML的7条预测(和值/奇数/组型/大数/跨度/012路/斜连)已注入RL状态，
+            # 这里在选号环节也做校验，让"这一注整体像不像模型预测的样子"参与排序
+            def _d3_feats(c):
+                b, s, g = c; sm = b+s+g
+                tri = (b == s == g); g3 = (b == s or s == g or b == g) and not tri
+                s3 = sorted(c); rd = [x % 3 for x in c]
+                return {'sum_grp': 0 if sm <= 9 else (1 if sm <= 17 else 2),
+                        'odd': sum(1 for x in c if x % 2 != 0),
+                        'group_type': 0 if tri else (1 if g3 else 2),
+                        'big': sum(1 for x in c if x >= 5),
+                        'span_grp': (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c)-min(c)),
+                        'road_dom': max(set(rd), key=rd.count),
+                        'arith': int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0)}
+            _d3_conds = {}
+            _md3 = ml_pred.get('models', {})
+            for _k in ['sum_grp','odd','group_type','big','span_grp','road_dom','arith']:
+                _p = (_md3.get(_k, {}) or {}).get('prediction', {})
+                if _p.get('value') is not None:
+                    _d3_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
+
+            picked, seen = [], set()
+            for i in range(D3_POOL_N):   # 保证候选池里每位的候选都至少露面一次
+                c = [pool_cands[0][i][0], pool_cands[1][i][0], pool_cands[2][i][0]]
+                pr = pool_cands[0][i][1] * pool_cands[1][i][1] * pool_cands[2][i][1]
+                picked.append((c, pr)); seen.add(tuple(c))
+            # 其余注数：从候选池组合(D3_POOL_N^3种)里按联合概率从高到低补足
+            all_combos = sorted(
+                (([b, s, g], pb*ps*pg)
+                 for b, pb in pool_cands[0] for s, ps in pool_cands[1] for g, pg in pool_cands[2]),
+                key=lambda x: -x[1])
+            for c, pr in all_combos:
+                if len(picked) >= D3_N_BETS: break
+                if tuple(c) not in seen:
+                    picked.append((c, pr)); seen.add(tuple(c))
+            picked.sort(key=lambda x: -x[1])
+            groups = [c for c, _ in picked]
+
+            # ══════════════════════════════════════════════════════
+            #  【观测区·不参与推荐】按概率分布采样，跟Top3确定性选号做对比
+            #
+            #  Top3逻辑（groups）保持不动，仍然是正式推荐——这里只是并排
+            #  多算一份"如果换成按概率采样会得到什么"，纯展示，不影响任何决策。
+            #
+            #  为什么要对比：Top3是确定性的，只要每位候选和排序不变，
+            #  12注就不变；权重再怎么小幅移动，只要没能把第4名顶到前3，
+            #  外面就看不出变化。采样则是按完整的10个概率值直接抽签，
+            #  哪怕某个数字只有11%对12%的差距，也有机会被抽中，
+            #  更容易反映权重的细微变化。
+            #
+            #  用当天最新一期开奖数字做随机种子：同样的数据必然采出同样的结果
+            #  （可复现），换一期数据种子就变，采样结果也会跟着变。
+            # ══════════════════════════════════════════════════════
+            try:
+                _seed_src = f"{len(records)}-{''.join(map(str, records[-1]['digits']))}"
+                _seed = abs(hash(_seed_src)) % (2**32)
+                _rng = np.random.default_rng(_seed)
+                _sampled, _seen_s, _guard = [], set(), 0
+                while len(_sampled) < D3_SAMPLE_N and _guard < D3_SAMPLE_N * 200:
+                    _guard += 1
+                    _c = [int(_rng.choice(10, p=pos_probs[i])) for i in range(3)]
+                    if tuple(_c) not in _seen_s:
+                        _seen_s.add(tuple(_c)); _sampled.append(_c)
+                _same = len(set(map(tuple, groups)) & set(map(tuple, _sampled)))
+                _dig_det = set(x for g in groups for x in g)
+                _dig_samp = set(x for g in _sampled for x in g)
+                print(f"  [观测·采样对比]（不参与推荐，仅观察）种子来自最新开奖{records[-1]['digits']}")
+                # 完整采样列表打印在日志里，供自己参考；网页只展示前 D3_SAMPLE_DISPLAY_N 注
+                print(f"    采样{len(_sampled)}注(完整列表，网页只展示前{D3_SAMPLE_DISPLAY_N}注): {_sampled}")
+                print(f"    与确定性推荐(Top{D3_POOL_N}候选池择优)重合 {_same}/{len(_sampled)} 注；"
+                      f"用到的数字 确定性法{len(_dig_det)}个 vs 采样法{len(_dig_samp)}个")
+            except Exception as _e:
+                _sampled = []
+                print(f"  [观测·采样对比] 计算失败: {_e}")
+
+            # 采样注的频率统计（号码次数/两号共现/和值/跨度/组三组六/大小/奇偶），
+            # 只统计采样注；但"位置共现"单独把推荐12注(groups)也并进去一起统计(extra_bets参数)，
+            # 统计失败不能影响推荐本身，所以单独包一层try
+            try:
+                _sample_stats = compute_d3_sample_stats(_sampled, extra_bets=groups)
+                if _sample_stats:
+                    print(f"  [采样统计] 已基于{_sample_stats['n']}注采样计算频率统计，随结果写入网页")
+            except Exception as _e:
+                _sample_stats = {}
+                print(f"  [采样统计] 计算失败: {_e}")
+
+            if _d3_conds:
+                _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
+                                 if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
+                print(f"  [诊断·仅参考] RL自选的{len(groups)}注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
+                      f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
+            top_probs = [pr for _, pr in picked]
+
+            # 每位候选明细，供前端展示"模型认为这位可能是哪几个数字"
+            pos_candidates = [
+                [{'digit': d, 'prob': round(pv*100, 1)} for d, pv in t] for t in top3
+            ]
+
+            names = ['百位','十位','个位']
+            for ni, t in enumerate(top3):
+                print(f"  [{names[ni]}候选] " + "  ".join(f"{d}({pv*100:.1f}%)" for d, pv in t))
+            print(f"  [推荐{len(groups)}注] {groups}")
+            print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
+            _cov = [len(set(c[i] for c in groups)) for i in range(3)]
+            print(f"    候选覆盖: 百位{_cov[0]}/{D3_POOL_N}  十位{_cov[1]}/{D3_POOL_N}  个位{_cov[2]}/{D3_POOL_N}"
+                  f"（搜索池大小，显示仍为Top3，见上方[候选]行）")
+            # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
+            ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
+            print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
+        except Exception as e:
+            print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
+            action,_ = model.predict(state, deterministic=True)
+            groups = [[int(action[0]),int(action[1]),int(action[2])]]
+
+        # 不足D3_N_BETS注时（比如候选池不够、或概率分布提取失败），用确定性预测兜底补齐
+        while len(groups)<D3_N_BETS:
+            if not groups:
+                action,_ = model.predict(state, deterministic=True)
+                groups.append([int(action[0]),int(action[1]),int(action[2])])
+            else:
+                groups.append(groups[-1])
+    pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注（联合概率最高的组合）
+
+    # 记录本次训练时的期数，供下次运行判断是否有新数据
+    save_last_trained_n('3d', len(records))
+
+    # 把逐位Top1/2/3命中率拼进note文字里——网页本来就会把note原样显示在3D卡片下方
+    # (index.html 第2623行 ${d3Rl.note||''})，不用改网页就能让这份数据露出来。
+    _pos_note = "；".join(
+        f"{n}Top1{pos_hit_rate[n]['top1']}%/Top2{pos_hit_rate[n]['top2']}%/"
+        f"Top3{pos_hit_rate[n]['top3']}%(前3合计{pos_hit_rate[n]['top1_3_合计']}%)"
+        for n in ['百位','十位','个位'])
+
+    # 采样12注也拼进note——网页本来就会把note原样显示在3D卡片下方，
+    # 不用改网页就能让这份数据露出来（跟上面逐位命中率同样的思路）。
+    _sample_note = (f'；按概率分布采样的另一组12注（种子来自最新开奖{records[-1]["digits"]}，'
+                    f'同样数据必然采出同样结果）：{_sampled}，与确定性推荐重合{_same}注'
+                    if _sampled else '；本次概率采样计算失败，无采样对比数据')
+
+    return {'games_tested':total,'match_distribution':match_dist,
+            'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
+            'pos_hit_rate_pct':pos_hit_rate,   # 每位Top1/Top2/Top3命中率明细
+            'ppo_pred':pred,'ppo_groups':groups,
+            'sampled_groups':_sampled[:D3_SAMPLE_DISPLAY_N],   # 网页主展示区：前N注
+            'sampled_extra':_sampled[D3_SAMPLE_DISPLAY_N:],    # 超出展示数量的部分，网页用小字单独显示
+            'sampled_stats':_sample_stats,   # 采样注的频率统计，网页在两栏推荐下方展示
+            'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
+            'is_first_train':is_new,
+            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
+                   f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'
+                   f'{_sample_note}'}
+
+# ══════════════════════════════════════════════════════
+#  主流程
+# ══════════════════════════════════════════════════════
+print(f"\n{'#'*55}\nPPO 强化学习 每日增量微调  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
+
+raw = gh_raw('history.json')
+if not raw: print("失败"); sys.exit(1)
+history = json.loads(raw)
+
+# 读取 prediction.json 取ML概率向量（RL状态的一部分）
+raw_ml = gh_raw('prediction.json')
+ml_preds = {}
+if raw_ml:
+    try: ml_preds = json.loads(raw_ml).get('predictions', {})
+    except Exception: pass
+
+# 读取逐期ML概率（walk-forward，kaggle_fucai.py新产出）：每期的概率来自
+# 只用该期之前历史训练出的模型，不是"今天的概率广播给全部历史"这个常数问题。
+# 结构：{'tkeys':[...], 'nc':[...], 'n_periods':N, 'probs':[[...每期一行...]]}
+# 数组第i行 ↔ records[i+1]（跟kaggle_fucai.py build_dataset的X[i]对齐关系完全一致）。
+ml_walkforward = {}
+for _g in ['3d', 'ssq', 'kl8']:
+    _raw_wf = gh_raw(f'{_g}_ml_walkforward.json')
+    if _raw_wf:
+        try:
+            _wf = json.loads(_raw_wf)
+            ml_walkforward[_g] = np.array(_wf['probs'], dtype=np.float32)
+            print(f"✓ 已读取{_g}逐期ML概率walk-forward数组，形状{ml_walkforward[_g].shape}")
+        except Exception as e:
+            print(f"! 解析{_g}_ml_walkforward.json失败: {e}，该游戏本次训练状态里将不含逐期ML概率")
+    else:
+        print(f"! 未读取到{_g}_ml_walkforward.json（kaggle_fucai.py尚未产出时属正常），"
+              f"该游戏本次训练状态里将不含逐期ML概率")
+
+# 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
+# （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
+raw_prev_rl = gh_raw('dl_rl.json')
+prev_rl_results = {}
+if raw_prev_rl:
+    try: prev_rl_results = json.loads(raw_prev_rl).get('results', {})
+    except Exception: pass
+
+os.makedirs(RL_LOCAL_DIR, exist_ok=True)
+rl_results = {}
+
+for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_ssq_daily)]:
+    records = history.get(game, [])
+    if not isinstance(records,list) or len(records)<65:
+        print(f"\n{game}: 数据不足，跳过"); continue
+    ml_pred = ml_preds.get(game, {})
+    try:
+        # 三个游戏统一传入上次结果，无新数据时沿用，避免重复训练造成过拟合
+        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game), ml_walkforward.get(game))
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        print(f"{game} 失败: {e}")
+
+# 推送RL模型到Kaggle Dataset
+print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
+# 判断这次是不是"全部游戏都跳过了训练"（比如手动运行、没有任何新开奖数据）。
+# carry_over_result 会在结果里标 skipped=True；只要有一个游戏真的训练过，
+# 就不算"全部跳过"，因为那个游戏确实产生了要保存的新内容。
+_all_skipped = bool(rl_results) and all(r.get('skipped') for r in rl_results.values())
+if _all_skipped:
+    print("  本次全部游戏都无新数据、跳过了训练，本地也没有产生任何新的模型文件，"
+          "跳过推送——不做无意义的Dataset版本更新，也避免用不完整的本地目录覆盖已保存的内容。")
+else:
+    # 推送前先把"本地没有、但挂载目录（上次版本）里有"的文件补齐，
+    # 防止这次只训练了部分游戏时，把没训练的游戏已保存的模型文件覆盖掉。
+    sync_local_with_mounted()
+    push_rl_dataset()
+
+# ── 写入独立文件 dl_rl.json（不再读取/合并 prediction.json，速度更快）──
+out = {
+    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    'method': 'PPO强化学习（每日增量微调）',
+    'state_composition': '原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量',
+    'results': rl_results,
+}
+out_json = json.dumps(out, ensure_ascii=False, indent=2)
+
+if not GH_TOKEN:
+    print("\n[DRY RUN] 未配置 GH_TOKEN")
+else:
+    print("\n推送 dl_rl.json…")
+    gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("✓ 完成")
+
+print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
