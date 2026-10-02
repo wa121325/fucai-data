@@ -113,6 +113,7 @@ RL_DATASET_ID   = f'megskfdbbskeb/{RL_DATASET_SLUG}'
 RL_LOCAL_DIR    = '/kaggle/working/rl_cache'
 RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
 WINDOW = 50; SEQ_LEN = 20
+DL_ARCH_VERSION = 2   # ⚠️ 必须跟 kaggle_lstm_tfm.py 的 ARCH_VERSION 一致
 
 # 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
 # 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
@@ -575,6 +576,18 @@ class LSTMEncoder(nn.Module):
         logits_list = [head(last) for head in self.heads]
         return (logits_list,last) if return_hidden else logits_list
 
+def _sinusoidal_pe(seq_len, d_model, device):
+    """⚠️ 必须跟 kaggle_lstm_tfm.py 里同名函数逐字一致(训练时加了位置编码，这里不加的话
+    同样的权重会算出完全不同的隐层)。固定公式，没有可训练参数，不进state_dict。"""
+    pos = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
+    div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float32, device=device)
+                    * (-np.log(10000.0) / d_model))
+    pe = torch.zeros(seq_len, d_model, device=device)
+    pe[:, 0::2] = torch.sin(pos * div)
+    pe[:, 1::2] = torch.cos(pos * div[: d_model // 2])
+    return pe.unsqueeze(0)
+
+
 class TransformerEncoder(nn.Module):
     """多任务版本，道理同 LSTMEncoder：只用于加载权重，结构必须跟训练那边逐字段一致。"""
     def __init__(self, input_dim, d_model=32, nhead=4, num_layers=2, output_dims=(10,), dropout=0.2):
@@ -588,7 +601,9 @@ class TransformerEncoder(nn.Module):
             nn.Sequential(nn.Linear(d_model,32), nn.GELU(), nn.Linear(32,od))
             for od in output_dims])
     def forward(self, x, return_hidden=False):
-        x = self.proj(x); x = self.transformer(x)
+        x = self.proj(x)
+        x = x + _sinusoidal_pe(x.size(1), x.size(2), x.device)
+        x = self.transformer(x)
         pooled = self.pool(x.transpose(1,2)).squeeze(-1)
         logits_list = [head(pooled) for head in self.heads]
         return (logits_list,pooled) if return_hidden else logits_list
@@ -606,6 +621,13 @@ def load_lstm_tfm(game, current_feat_dim=None):
     # 用 .get() 而不是 meta['n_classes_list']，读不到时干净地走"跳过"分支，
     # 而不是让 KeyError 直接把整个训练进程崩掉。
     nc_list = meta.get('n_classes_list')
+    # 模型结构版本必须与本脚本一致(DL_ARCH_VERSION 对应 kaggle_lstm_tfm.py 的 ARCH_VERSION)：
+    # 版本不同说明前向计算变了(比如加了位置编码、输入标准化)，用旧权重+新结构会
+    # 不报错地算出错误的隐层，必须拒绝加载。序列长度同理。
+    if nc_list is not None and (meta.get('arch_version') != DL_ARCH_VERSION or meta.get('seq_len') != SEQ_LEN):
+        print(f"  ! {game} 的LSTM/TFM权重版本(arch={meta.get('arch_version')}, seq_len={meta.get('seq_len')})"
+              f"与本脚本(arch={DL_ARCH_VERSION}, seq_len={SEQ_LEN})不一致，请重新运行 kaggle_lstm_tfm.py，本次跳过LSTM/TFM隐层")
+        return None, None, None
     # 特征维度或目标结构（新旧meta格式不一致、或特征工程改了）任一项不匹配，
     # 直接跳过旧权重，避免运行到forward()/load_state_dict()时形状或key不匹配而崩溃
     if nc_list is None:
@@ -624,20 +646,34 @@ def load_lstm_tfm(game, current_feat_dim=None):
     tfm.eval()
     return lstm, tfm, meta
 
-def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
+def norm_from_meta(meta):
+    """从DL的meta.json取输入标准化统计量；旧权重没有这两个字段时返回None(不做标准化，与旧权重一致)。"""
+    if meta and meta.get('feat_mean') is not None and meta.get('feat_std') is not None:
+        return (np.array(meta['feat_mean'], dtype=np.float32), np.array(meta['feat_std'], dtype=np.float32))
+    return None
+
+
+def _apply_norm(x, norm):
+    """⚠️ 必须跟 kaggle_lstm_tfm.py 的 apply_feature_norm 一致：(x-mean)/std 再截断到±5。"""
+    if norm is None:
+        return x
+    return np.clip((x - norm[0]) / norm[1], -5.0, 5.0).astype(np.float32)
+
+
+def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN, norm=None):
     """计算指定期数idx对应的隐层状态（单次调用，仅用于最后一期推荐）"""
     seq = []
     for j in range(idx-seq_len, idx):
         feat = feat_fn(records, j)
         if feat is None: return None
         seq.append(list(feat.values()))
-    x = torch.FloatTensor([seq])
+    x = torch.FloatTensor(_apply_norm(np.array([seq], dtype=np.float32), norm))
     with torch.no_grad():
         _, h = model(x, return_hidden=True)
     return h.numpy()[0]
 
 
-def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256):
+def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256, norm=None):
     """
     批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
     返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
@@ -648,17 +684,24 @@ def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=2
     # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
     # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
     # 被迫回退成零向量，白白丢掉LSTM/TFM的信息。
+    # 特征缓存：第j期的特征只取决于records[:j]，同一个j原来在20个窗口里被重复计算20次
+    _fc = {}
+    def _feat(j):
+        if j not in _fc:
+            f = feat_fn(records, j)
+            _fc[j] = None if f is None else list(f.values())
+        return _fc[j]
     for idx in range(seq_len, len(records)+1):
         seq = []; valid = True
         for j in range(idx-seq_len, idx):
-            feat = feat_fn(records, j)
-            if feat is None: valid=False; break
-            seq.append(list(feat.values()))
+            fv = _feat(j)
+            if fv is None: valid=False; break
+            seq.append(fv)
         if not valid: continue
         X.append(seq); idxs.append(idx)
     if not X:
         return None, {}
-    X = np.array(X, dtype=np.float32)
+    X = _apply_norm(np.array(X, dtype=np.float32), norm)   # 跟DL训练时同一个标准化变换
     model.eval()
     hs = []
     with torch.no_grad():
@@ -762,34 +805,66 @@ def precompute_omission_3d(records):
 # ══════════════════════════════════════════════════════
 #  ML概率向量 + 遗漏向量
 # ══════════════════════════════════════════════════════
+def _ml_layout(game):
+    """目标顺序和每个目标的分类数。⚠️ 必须跟 kaggle_fucai.py 里 _nc_map 逐项一致——
+    两边独立写死，任何一边改了目标顺序或分类数，另一边不会报错，
+    只会导致walk-forward数组和现场live概率的维度对不上、拼出来的state错位。"""
+    if game == '3d':
+        return (['sum_grp','odd','group_type','big','span_grp','road_dom','arith','prime_cnt','sum_tail','span_odd'],
+                [3,4,3,4,3,3,2,4,10,2])
+    if game == 'ssq':
+        return (['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec','prime_grp','sum_tail','same_tail'],
+                [7,3,3,3,3,7,6,3,10,4])
+    return (['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','prime_grp','ac_grp','same_tail_grp'],
+            [3,4,3,3,5,3,3,3,3,3])
+
+
+# 各游戏各目标是否启用(来自 kaggle_fucai.py 的"目标作用效果回测"，随 {game}_ml_walkforward.json 一起下发)。
+# 没有信息量的目标被关掉：它在状态向量里对应的那一段概率清零。历史数组和现场实时概率
+# 必须用同一张表处理，否则训练时看到的和预测时看到的就不一致了。
+ML_TARGET_ENABLED = {}
+
+
+def mask_ml_wf(arr, game):
+    """把历史walk-forward数组里被关闭目标对应的列清零(只清零，不改维度)。"""
+    en = ML_TARGET_ENABLED.get(game)
+    if not en or arr is None:
+        return arr
+    tk, nc = _ml_layout(game)
+    if arr.shape[1] != sum(nc):
+        print(f"  ! {game} walk-forward数组维度{arr.shape[1]}与目标布局{sum(nc)}不一致，跳过屏蔽")
+        return arr
+    keep = np.ones(arr.shape[1], dtype=np.float32)
+    pos = 0
+    for k, n in zip(tk, nc):
+        if not en.get(k, True):
+            keep[pos:pos+n] = 0.0
+        pos += n
+    return arr * keep
+
+
 def extract_ml_prob_vec(ml_pred, game, verbose=True):
-    # ⚠️ 这里的 tk/nc 列表必须跟 kaggle_fucai.py 的 compute_ml_walkforward 调用处
-    # 完全一致——两边独立写死，任何一边改了目标顺序或分类数，另一边不会报错，
-    # 只会导致walk-forward数组和现场live概率的维度对不上、拼出来的state错位。
     vec = []
     models_data = ml_pred.get('models', {})
-    # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
-    if game=='3d':
-        tk=['sum_grp','odd','group_type','big','span_grp','road_dom','arith','prime_cnt','sum_tail','span_odd']
-        nc=[3,4,3,4,3,3,2,4,10,2]
-    elif game=='ssq':
-        tk=['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec','prime_grp','sum_tail','same_tail']
-        nc=[7,3,3,3,3,7,6,3,10,4]
-    else:
-        tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','prime_grp','ac_grp','same_tail_grp']
-        nc=[3,4,3,3,5,3,3,3,3,3]
-    offsets=[0]*len(tk)
-    found, missing = [], []
-    for tkey,n,off in zip(tk,nc,offsets):
-        m = models_data.get(tkey,{}); probs = m.get('prediction',{}).get('probs',{})
-        seg = [float(probs.get(str(i+off),0.0))/100.0 for i in range(n)]
+    tk, nc = _ml_layout(game)
+    en = ML_TARGET_ENABLED.get(game, {})
+    found, missing, masked = [], [], []
+    for tkey, n in zip(tk, nc):
+        if not en.get(tkey, True):
+            vec.extend([0.0] * n); masked.append(tkey)   # 已关闭：跟历史数组一样清零
+            continue
+        m = models_data.get(tkey, {}); probs = m.get('prediction', {}).get('probs', {})
+        seg = [float(probs.get(str(i), 0.0)) / 100.0 for i in range(n)]
         vec.extend(seg)
-        (found if any(v>0 for v in seg) else missing).append(tkey)
+        (found if any(v > 0 for v in seg) else missing).append(tkey)
     if verbose:
         print(f"    [传统ML状态注入验证] {game}: 成功读到概率的目标={found}")
+        if masked:
+            print(f"    [传统ML状态注入验证] 经作用效果回测已关闭、清零的目标={masked}")
         if missing:
             print(f"    ⚠️ [传统ML状态注入验证] 以下目标概率全为0，未生效={missing}（请确认 kaggle_fucai.py 已用最新目标重新跑过）")
     return np.array(vec, dtype=np.float32)
+
 
 # （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
 
@@ -908,7 +983,7 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
 SEGMENT_ENABLE = {
     '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
-    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':False},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True, '频率':True},
 }
 
 
@@ -1686,8 +1761,9 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
+    _norm = norm_from_meta(meta)   # DL训练时的输入标准化统计量，隐层必须套同一个变换
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm, norm=_norm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm, norm=_norm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2077,8 +2153,9 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
+    _norm = norm_from_meta(meta)   # DL训练时的输入标准化统计量，隐层必须套同一个变换
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm, norm=_norm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm, norm=_norm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2375,8 +2452,9 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
 
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm)
+    _norm = norm_from_meta(meta)   # DL训练时的输入标准化统计量，隐层必须套同一个变换
+    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm, norm=_norm)
+    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm, norm=_norm)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2433,8 +2511,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=10, patience=6, reset_timesteps=True, warmup_chunks=5,
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2769,6 +2847,18 @@ for _g in ['3d', 'ssq', 'kl8']:
             _wf = json.loads(_raw_wf)
             ml_walkforward[_g] = np.array(_wf['probs'], dtype=np.float32)
             print(f"✓ 已读取{_g}逐期ML概率walk-forward数组，形状{ml_walkforward[_g].shape}")
+            # 目标作用效果开关表：先核对payload里的目标顺序跟本脚本的布局完全一致，
+            # 不一致就不屏蔽(宁可不屏蔽，也不能按错位的表去清零错误的列)
+            _en = _wf.get('target_enabled')
+            if _en:
+                if _wf.get('tkeys') == _ml_layout(_g)[0]:
+                    ML_TARGET_ENABLED[_g] = {k: bool(v) for k, v in _en.items()}
+                    ml_walkforward[_g] = mask_ml_wf(ml_walkforward[_g], _g)
+                    _off = [k for k, v in ML_TARGET_ENABLED[_g].items() if not v]
+                    print(f"  [目标作用效果] {_g}: 关闭{len(_off)}个目标" + (f" {_off}" if _off else "")
+                          + "（状态向量里对应概率清零）")
+                else:
+                    print(f"  ! {_g}: payload的目标顺序与本脚本布局不一致，本次不做目标屏蔽")
         except Exception as e:
             print(f"! 解析{_g}_ml_walkforward.json失败: {e}，该游戏本次训练状态里将不含逐期ML概率")
     else:
