@@ -124,6 +124,10 @@ DATASET_ID   = f'megskfdbbskeb/{DATASET_SLUG}'
 LOCAL_DIR    = '/kaggle/working/dl_cache'
 MOUNTED_DIR  = f'/kaggle/input/{DATASET_SLUG}'
 WINDOW = 50; SEQ_LEN = 20
+# 模型结构/前向计算的版本号。v2 = 多任务共享主干 + Transformer位置编码 + 输入标准化。
+# 任何会改变"同样权重算出什么"的改动都要加1：热启动会拒绝版本不同的旧权重，
+# kaggle_rl_daily.py 加载时也会核对，防止新旧结构混用却不报错、悄悄算出错的隐层。
+ARCH_VERSION = 2
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -469,6 +473,27 @@ def build_predict_seq(records, feat_fn, seq_len=SEQ_LEN):
     return np.array([seq], dtype=np.float32)
 
 
+def fit_feature_norm(X, n_fit):
+    """
+    用【训练可用区】(前n_fit个样本，不含RL保留的末段)算每个特征的均值/标准差。
+    原来输入特征完全没标准化：快乐8里有13个特征量级超过100(号码总和类，最大约900)，
+    跟0/1二值特征混在一起直接喂LSTM，输入门/遗忘门被大数值顶到饱和，
+    网络基本只"看得见"那几个大数值特征。
+    统计量只用可用区算，保留区的数据不参与，不泄漏。
+    """
+    fd = X.shape[2]
+    flat = X[:max(1, n_fit)].reshape(-1, fd).astype(np.float64)
+    mean = flat.mean(axis=0)
+    std = flat.std(axis=0)
+    std = np.where(std < 1e-6, 1.0, std)    # 常数特征不除以0，标准化后恒为0
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
+def apply_feature_norm(X, mean, std):
+    """⚠️ kaggle_rl_daily.py 里有同样的变换(precompute_hidden_all)，必须保持一致。"""
+    return np.clip((X - mean) / std, -5.0, 5.0).astype(np.float32)
+
+
 def build_seq_dataset_multi(records, feat_fn, tgt_fns, seq_len=SEQ_LEN):
     """
     一次性把【全部目标】的标签都算出来，共用同一个X——不用像以前那样每个目标各自
@@ -479,12 +504,21 @@ def build_seq_dataset_multi(records, feat_fn, tgt_fns, seq_len=SEQ_LEN):
     tnames = list(tgt_fns.keys())
     X_list = []
     y_lists = {n: [] for n in tnames}
+    # 特征缓存：第j期的特征只取决于records[:j]，跟它出现在哪个序列窗口里无关。
+    # 原来每个样本都把窗口里20期的特征重算一遍，同一个j被重复计算20次
+    # (3D约17万次调用、白耗2分钟)，缓存之后每个j只算一次，结果完全相同。
+    _fc = {}
+    def _feat(j):
+        if j not in _fc:
+            f = feat_fn(records, j)
+            _fc[j] = None if f is None else list(f.values())
+        return _fc[j]
     for i in range(seq_len, len(records)):
         seq = []; valid = True
         for j in range(i-seq_len, i):
-            feat = feat_fn(records, j)
-            if feat is None: valid=False; break
-            seq.append(list(feat.values()))
+            fv = _feat(j)
+            if fv is None: valid=False; break
+            seq.append(fv)
         if not valid: continue
         row = {}
         ok = True
@@ -531,6 +565,23 @@ class LSTMEncoder(nn.Module):
         logits_list = [head(last) for head in self.heads]
         return (logits_list,last) if return_hidden else logits_list
 
+def _sinusoidal_pe(seq_len, d_model, device):
+    """
+    正弦位置编码(固定公式，没有可训练参数，不进state_dict)。
+    原来的Transformer完全没有位置信息：自注意力本身对顺序不敏感，后面又是平均池化，
+    整个模型对"这20期的先后顺序"是完全无感的——打乱顺序输出一模一样，等于把时间序列
+    当成了一袋无序的样本，TFM这条路形同虚设地丢掉了"序列"这个信息。
+    ⚠️ kaggle_rl_daily.py 里有一份同样的函数和同样的加法，必须保持一致。
+    """
+    pos = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
+    div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float32, device=device)
+                    * (-np.log(10000.0) / d_model))
+    pe = torch.zeros(seq_len, d_model, device=device)
+    pe[:, 0::2] = torch.sin(pos * div)
+    pe[:, 1::2] = torch.cos(pos * div[: d_model // 2])
+    return pe.unsqueeze(0)
+
+
 class TransformerEncoder(nn.Module):
     """多任务版本，道理同LSTMEncoder：共享Transformer主干，每个目标一个独立分类头。"""
     def __init__(self, input_dim, d_model=64, nhead=4, num_layers=2, output_dims=(10,), dropout=0.2):
@@ -544,7 +595,9 @@ class TransformerEncoder(nn.Module):
             nn.Sequential(nn.Linear(d_model,32), nn.GELU(), nn.Linear(32,od))
             for od in output_dims])
     def forward(self, x, return_hidden=False):
-        x = self.proj(x); x = self.transformer(x)
+        x = self.proj(x)
+        x = x + _sinusoidal_pe(x.size(1), x.size(2), x.device)   # 加位置编码，让模型知道时间先后
+        x = self.transformer(x)
         pooled = self.pool(x.transpose(1,2)).squeeze(-1)
         logits_list = [head(pooled) for head in self.heads]
         return (logits_list,pooled) if return_hidden else logits_list
@@ -562,9 +615,9 @@ def holdout_size(n_records):
     return max(80, min(300, int(n_records * 0.10)))
 
 
-def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, holdout_n=50,
+def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, holdout_n=None,
                    warm_start_path=None, warm_start_epochs=10, warm_start_lr=1e-4,
-                   warm_start_window=250, predict_X=None):
+                   warm_start_window=250, predict_X=None, n_records=None):
     """
     多任务版本：Y_list 是跟 model_ctor 建出来的多头模型【顺序对齐】的标签数组列表
     （比如3个目标就传3个数组），共享同一条LSTM/Transformer主干同时训练全部目标。
@@ -587,6 +640,15 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
     """
     n = len(X)
     n_targets = len(Y_list)
+    # 回测评估集：原来固定50个样本，二分类准确率的标准误约±7个百分点，
+    # "比基线高/低几个点"全是噪声，白白多训了一整个回测模型。改成跟RL保留区
+    # 同口径(80~300期)，样本量至少翻倍到数倍，至少能看出大一点的差距。
+    # RL保留区必须按【期数】算(跟RL的holdout_size(len(records))同参数)，
+    # 原来按样本数n算：n=期数-25，在10%比例生效的区间(约800~3000期)会比RL少几期，
+    # 等于DL的训练/早停验证偷用了RL保留区开头的几期标签。
+    _n_rec = n_records if n_records is not None else n + SEQ_LEN
+    if holdout_n is None:
+        holdout_n = holdout_size(_n_rec)
     holdout_n = min(holdout_n, max(5, n//5))
     split = max(1, n - holdout_n)
 
@@ -611,7 +673,7 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
         if has_val:
             Xv = torch.FloatTensor(Xval).to(DEVICE)
             yvs = [torch.LongTensor(y).to(DEVICE) for y in yval_list]
-        best_acc, best_state, no_imp, stopped = -1.0, None, 0, ep
+        best_loss, best_acc, best_state, no_imp, stopped = float('inf'), -1.0, None, 0, ep
 
         for e in range(ep):
             m.train()
@@ -629,9 +691,15 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
             with torch.no_grad():
                 logits_list = m(Xv)
                 accs = [(lg.argmax(dim=1)==yv).float().mean().item() for lg,yv in zip(logits_list,yvs)]
-                acc = float(np.mean(accs))   # 早停看全部目标的平均准确率
-            if acc > best_acc:
-                best_acc = acc
+                acc = float(np.mean(accs))
+                # 早停改看验证【损失】(全部目标交叉熵的平均)，不再看准确率：
+                # 这些目标大多接近随机，准确率只在几个百分点内抖动，"哪一轮准确率最高"
+                # 基本是在挑噪声，挑出来的"最佳轮"还会虚高；损失是连续的、平滑得多，
+                # 而且对"模型开始背训练集"(验证损失掉头向上)灵敏——正好顺带压低
+                # 隐层里的样本内记忆(见函数末尾的样本内/外对比)。
+                vloss = float(np.mean([crit(lg, yv).item() for lg, yv in zip(logits_list, yvs)]))
+            if vloss < best_loss - 1e-6:
+                best_loss, best_acc = vloss, acc
                 best_state = {k: v.detach().clone() for k, v in m.state_dict().items()}
                 no_imp = 0
             elif e >= warmup:
@@ -641,7 +709,8 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
         if has_val and best_state is not None:
             m.load_state_dict(best_state)
             if tag:
-                print(f"      [{tag}] 早停于第{stopped}/{ep}轮，内部验证集平均准确率(全部{n_targets}个目标) {best_acc*100:.1f}%")
+                print(f"      [{tag}] 早停于第{stopped}/{ep}轮，最佳轮验证损失{best_loss:.4f}"
+                      f"（该轮平均准确率{best_acc*100:.1f}%，全部{n_targets}个目标）")
         return m
 
     # ── 1) 回测模型：必须从头训练，不能加载旧权重 ──
@@ -673,7 +742,7 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
     # ── 2) 生产模型：优先"滑动窗口热启动微调"，找不到旧权重才全量训练 ──
     # 同样要避开RL保留的末尾_rl_reserved期，道理跟旧版完全一致，只是切片对象
     # 从单个y数组变成Y_list里的每一个都要同步切。
-    _rl_reserved = holdout_size(n)
+    _rl_reserved = holdout_size(_n_rec)
     n_usable = max(1, n - _rl_reserved)
     is_warm_start = False
     prod_new = model_ctor()
@@ -700,6 +769,26 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
         prod_model = _train_one(prod_new, X[:_tr], ytr_p, epochs,
                                 Xval=X[_tr:n_usable], yval_list=yval_p, tag='生产模型')
     prod_model.eval()
+
+    # ── 诊断：生产模型在"训练过的区间"和"RL保留区"上的平均准确率对比 ──
+    # 给RL用的隐层是对【全部历史】逐期算出来的：训练区那一段是模型"见过答案"的样本内输出，
+    # 保留区/今天是没见过的样本外输出。如果样本内准确率明显高于样本外，说明隐层里
+    # 夹带了"记住了训练样本答案"的成分——RL在训练区上学到的"信LSTM/TFM隐层"，
+    # 到了保留区和现场预测就不成立了。这个差距就是衡量它的直接指标。
+    try:
+        with torch.no_grad():
+            def _mean_acc(Xa, ya_list):
+                if len(Xa) == 0: return float('nan')
+                lg = prod_model(torch.FloatTensor(Xa).to(DEVICE))
+                return float(np.mean([(l.argmax(dim=1).cpu().numpy() == ya).mean()
+                                      for l, ya in zip(lg, ya_list)]))
+            _k = min(n_usable, 2000)
+            a_in  = _mean_acc(X[n_usable-_k:n_usable], [y[n_usable-_k:n_usable] for y in Y_list])
+            a_out = _mean_acc(X[n_usable:], [y[n_usable:] for y in Y_list])
+        print(f"      [样本内外对比] 平均准确率: 训练区近{_k}期 {a_in*100:.1f}%  vs  RL保留区{n-n_usable}期 {a_out*100:.1f}%"
+              f"（差{(a_in-a_out)*100:+.1f}个点；差距大=隐层里有对训练样本的记忆）")
+    except Exception as _e:
+        print(f"      [样本内外对比] 计算失败: {_e}")
     hidden_states=[]
     with torch.no_grad():
         Xt_full = torch.FloatTensor(X).to(DEVICE)
@@ -859,9 +948,22 @@ for game, (feat_fn, targets) in configs.items():
     if X is None or len(X)<40:
         print(f"  数据不足，跳过{game}"); continue
     Y_list = [Y_dict[n] for n in tnames]
-    nc_list = [len(set(Y_dict[n].tolist())) for n in tnames]
+    # 分类头的输出维度必须是 max(标签)+1，不能是"出现过几种标签"：
+    # 交叉熵把标签直接当下标用(要求落在 0..nc-1)。原来用len(set(标签))，
+    # 只要某个类别历史上一次都没出现过就会错位——比如快乐8的consec_grp，类别0只占0.14%，
+    # 两千期里约3~6%的概率一次不出现，标签变成{1,2}、输出维度只有2，
+    # 训练时标签2直接越界崩溃。用max+1，没出现过的类别只是概率很低，不会崩。
+    nc_list = [int(Y_dict[n].max()) + 1 for n in tnames]
     fd = X.shape[2]
     predict_X = build_predict_seq(records, feat_fn)
+
+    # 输入特征标准化：统计量只用训练可用区算(不含RL保留区)，并存进meta，
+    # RL那边算隐层时必须套同一个变换，否则LSTM/TFM看到的输入尺度跟训练时对不上。
+    _n_usable = max(1, len(X) - holdout_size(len(records)))
+    feat_mean, feat_std = fit_feature_norm(X, _n_usable)
+    X = apply_feature_norm(X, feat_mean, feat_std)
+    if predict_X is not None:
+        predict_X = apply_feature_norm(predict_X, feat_mean, feat_std)
     print(f"  {len(tnames)}个目标共享同一条主干训练: {tnames}")
     print(f"  各目标分类数: {dict(zip(tnames, nc_list))}")
 
@@ -874,17 +976,18 @@ for game, (feat_fn, targets) in configs.items():
         try:
             with open(prev_meta_path) as f: prev_meta = json.load(f)
             if prev_meta.get('feat_dim')==fd and prev_meta.get('target_names')==tnames \
-               and prev_meta.get('n_classes_list')==nc_list:
+               and prev_meta.get('n_classes_list')==nc_list \
+               and prev_meta.get('arch_version')==ARCH_VERSION:
                 lstm_warm_path = f'{MOUNTED_DIR}/{game}_lstm.pt'
                 tfm_warm_path  = f'{MOUNTED_DIR}/{game}_tfm.pt'
             else:
-                print(f"    ! 上次权重的目标结构/维度与当前不一致(比如新增了目标)，改为全量训练")
+                print(f"    ! 上次权重的目标结构/维度/模型版本与当前不一致(比如新增了目标、加了位置编码)，改为全量训练")
         except Exception as e:
             print(f"    ! 读取上次meta失败({e})，改为全量训练")
 
     lstm_m, lstm_h, _, lstm_p_list, lstm_acc_list, lstm_baseline_list, lstm_warm = train_encoder(
         lambda: LSTMEncoder(fd, hidden_dim=64, output_dims=nc_list), X, Y_list, epochs=20,
-        warm_start_path=lstm_warm_path, predict_X=predict_X)
+        warm_start_path=lstm_warm_path, predict_X=predict_X, n_records=len(records))
     for i, tname in enumerate(tnames):
         print(f"    [{tname}] LSTM 准确率: {lstm_acc_list[i]}%（基线{lstm_baseline_list[i]}%，"
               f"提升{round(lstm_acc_list[i]-lstm_baseline_list[i],1)}%）")
@@ -892,7 +995,7 @@ for game, (feat_fn, targets) in configs.items():
 
     tfm_m, tfm_h, _, tfm_p_list, tfm_acc_list, tfm_baseline_list, tfm_warm = train_encoder(
         lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dims=nc_list), X, Y_list, epochs=20,
-        warm_start_path=tfm_warm_path, predict_X=predict_X)
+        warm_start_path=tfm_warm_path, predict_X=predict_X, n_records=len(records))
     for i, tname in enumerate(tnames):
         print(f"    [{tname}] TFM  准确率: {tfm_acc_list[i]}%（基线{tfm_baseline_list[i]}%，"
               f"提升{round(tfm_acc_list[i]-tfm_baseline_list[i],1)}%）")
@@ -905,13 +1008,18 @@ for game, (feat_fn, targets) in configs.items():
     np.save(f'{LOCAL_DIR}/{game}_lstm_hidden.npy', lstm_h)
     np.save(f'{LOCAL_DIR}/{game}_tfm_hidden.npy',  tfm_h)
     meta = {'feat_dim':fd, 'target_names':tnames, 'n_classes_list':nc_list,
-            'hidden_dim':64, 'd_model':32, 'seq_len':SEQ_LEN}
+            'hidden_dim':64, 'd_model':32, 'seq_len':SEQ_LEN,
+            'arch_version':ARCH_VERSION,        # 模型结构版本：结构/前向变了就加1，RL据此拒绝加载不匹配的旧权重
+            'feat_mean':[float(v) for v in feat_mean],   # 输入标准化统计量，RL算隐层时必须套同一个变换
+            'feat_std':[float(v) for v in feat_std]}
     with open(f'{LOCAL_DIR}/{game}_meta.json','w') as f: json.dump(meta,f)
 
     game_results = {}
     for i, tname in enumerate(tnames):
         ens = lstm_p_list[i]*0.6 + tfm_p_list[i]*0.4
-        classes = sorted(set(Y_dict[tname].tolist()))
+        # 分类头第c个输出就对应标签c(输出维度是max+1)，不再用"出现过的类别排序后的下标"
+        # 去反查标签——那种写法在类别不连续时会把预测标成错误的类别。
+        classes = list(range(len(ens)))
         # 蓝球训练时做了 -1 偏移（1-16 → 0-15分类），这里显示前必须还原回真实号码，
         # 否则会显示"预测值0"这种不存在的蓝球编号，造成误解
         offset = 1 if tname == 'blue' else 0
