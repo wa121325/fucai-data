@@ -744,6 +744,62 @@ def _adaptive_wf_stride(n_records):
     return max(100, min(500, int(n_records * 0.05)))
 
 
+# ══════════════════════════════════════════════════════
+#  逐个目标的"作用效果"回测：这个目标的概率，到底有没有信息量
+#
+#  ── 比较什么 ──
+#  拿walk-forward逐期概率(模型给的)，对比一个"朴素基线"：只用【该期之前】历史上
+#  各类别出现的频率(加拉普拉斯平滑)当预测。基线是因果的、而且每期都用最新频率，
+#  是个很难打的对手——模型要是连它都赢不了，说明这个目标预测出来的概率
+#  只是在复述"历史上各类别占多少"，没有任何额外信息，放进状态向量/选号条件里就是纯噪声。
+#
+#  ── 怎么判断 ──
+#  逐期算 d = log(模型给真实类别的概率) - log(基线给真实类别的概率)，
+#  看平均值是否显著大于0(z = 均值/标准误)。只有显著大于0才算有用，
+#  其余(没差别、或者模型反而更差)都算没用——"没证据证明有用"就关。
+#  评测期数是整个walk-forward历史(3D上千期)，远比RL那80~300期holdout样本多，
+#  所以这里单次运行就有统计功效，不用像RL分段消融那样攒15天。
+# ══════════════════════════════════════════════════════
+TARGET_SKILL_Z = 2.0        # 显著性门槛：平均信息增益要超过这么多倍标准误
+TARGET_SKILL_MIN_N = 300    # 评测期数低于这个数，样本太少，不下结论(保持开启)
+TARGET_SKILL_P_FLOOR = 1e-3 # 评测时给概率设的下限，防止模型偶尔给真实类别0概率时一期就毁掉均值
+
+
+def evaluate_target_skill(y, probs, nc, min_train=300, z_threshold=TARGET_SKILL_Z):
+    """
+    返回 {'n':评测期数, 'gain':平均信息增益(nats/期，>0说明模型比基线好), 'se':标准误,
+          'z':gain/se, 'useful':是否显著有用, 'undecided':样本太少没法判断}
+    y: 全部期的真实类别标签；probs: walk-forward给出的(n, nc)概率，第i行对应y[i]
+    """
+    y = np.asarray(y, dtype=np.int64)
+    n = len(y)
+    if n - min_train < TARGET_SKILL_MIN_N:
+        return {'n': max(n - min_train, 0), 'gain': 0.0, 'se': 0.0, 'z': 0.0,
+                'useful': False, 'undecided': True}
+    # counts[j] = y[:j] 里各类别出现次数（严格只用第j期之前的历史，不含第j期）
+    counts = np.zeros((n + 1, nc), dtype=np.float64)
+    for c in range(nc):
+        counts[1:, c] = np.cumsum(y == c)
+    idx = np.arange(min_train, n)
+    prior = (counts[idx] + 1.0) / (idx[:, None] + nc)
+    p_prior = prior[np.arange(len(idx)), y[idx]]
+    p_model = np.clip(np.asarray(probs, dtype=np.float64)[idx, y[idx]], TARGET_SKILL_P_FLOOR, 1.0)
+    d = np.log(p_model) - np.log(p_prior)
+    gain = float(d.mean())
+    se = float(d.std(ddof=1) / np.sqrt(len(d))) if len(d) > 1 else 0.0
+    z = gain / se if se > 0 else 0.0
+    return {'n': int(len(d)), 'gain': round(gain, 5), 'se': round(se, 5), 'z': round(z, 2),
+            'useful': bool(z > z_threshold), 'undecided': False}
+
+
+# 各游戏各目标当前是否启用(经上面的作用效果评测得出)。选号函数(rec3d/recssq/reckl8)
+# 收集"ML预测条件"时会查这张表，被关掉的目标不再参与条件匹配。默认全开。
+TARGET_ENABLED = {}
+
+def _target_on(game, key):
+    return TARGET_ENABLED.get(game, {}).get(key, True)
+
+
 def diagnose_optimal_stride(X, y, nc, candidates=(50,100,200,300,500,800), test_frac=0.15,
                             min_train=300, verbose=True):
     """
@@ -837,10 +893,19 @@ def compute_ml_walkforward(X, Y, keys, nc_map, stride=None, min_train=300):
                                            random_state=42, n_jobs=-1)
                 m.fit(X[:checkpoint], y_train)
                 p = m.predict_proba(X[checkpoint:end])
+                blk = np.zeros((end - checkpoint, nc_map[k]), dtype=np.float32)
+                seen = set()
                 for ci, cls in enumerate(m.classes_):
                     cls = int(cls)
                     if 0 <= cls < nc_map[k]:
-                        out[k][checkpoint:end, cls] = p[:, ci]
+                        blk[:, cls] = p[:, ci]; seen.add(cls)
+                # 训练窗里一次都没出现过的类别：不能留着初始的1/nc占位(那会让整行概率之和>1，
+                # 而且给罕见类别白送一大块概率)，改成拉普拉斯式的小概率，再整行归一化成真正的分布。
+                for c in range(nc_map[k]):
+                    if c not in seen:
+                        blk[:, c] = 1.0 / (checkpoint + nc_map[k])
+                blk /= blk.sum(axis=1, keepdims=True)
+                out[k][checkpoint:end] = blk
             except Exception as e:
                 print(f"      ! walk-forward重训失败(目标{k}, 检查点{checkpoint}): {e}")
         checkpoint = end; n_ckpt += 1
@@ -1387,6 +1452,8 @@ def rec3d(records, ml, mk, om):
     _conds = {}
     for _k in ['sum_grp', 'odd', 'group_type', 'big', 'span_grp', 'road_dom', 'arith',
                'prime_cnt', 'sum_tail', 'span_odd']:
+        if not _target_on('3d', _k):
+            continue   # 该目标经作用效果回测判定没有信息量，已关闭，不参与选号条件匹配
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
@@ -1567,6 +1634,8 @@ def recssq(records, ml, om):
     _ssq_conds = {}
     for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec',
                'prime_grp','sum_tail','same_tail']:
+        if not _target_on('ssq', _k):
+            continue   # 该目标经作用效果回测判定没有信息量，已关闭，不参与选号条件匹配
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
@@ -1819,6 +1888,8 @@ def reckl8(records, ml, om):
 
     _kl8_conds = {}
     for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','prime_grp']:
+        if not _target_on('kl8', _k):
+            continue   # 该目标经作用效果回测判定没有信息量，已关闭，不参与选号条件匹配
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
@@ -1952,10 +2023,28 @@ def run_ml(history):
                                     [3,4,3,3,5,3,3, 3,3,3]))}[game]
         print(f"    计算逐期ML概率(walk-forward，供RL使用)…")
         _wf = compute_ml_walkforward(X, Y, tkeys, _nc_map)
+
+        # ── 逐个目标的作用效果回测：模型概率有没有比"只看历史频率"的朴素基线显著更好 ──
+        _skill = {k: evaluate_target_skill(Y[k], _wf[k], _nc_map[k]) for k in tkeys}
+        _enabled = {k: bool(_skill[k]['useful'] or _skill[k]['undecided']) for k in tkeys}
+        TARGET_ENABLED[game] = _enabled
+        print(f"    [目标作用效果] {game}（对比朴素基线，z>{TARGET_SKILL_Z}才算有用；gain>0表示比基线好）")
+        for k in tkeys:
+            s = _skill[k]
+            tag = '保留(样本不足，不下结论)' if s['undecided'] else ('保留' if s['useful'] else '关闭')
+            print(f"      {k:14} 评测{s['n']:5}期  gain={s['gain']:+.4f}  z={s['z']:+6.1f}  → {tag}")
+        _off = [k for k in tkeys if not _enabled[k]]
+        print(f"    [目标作用效果] {game}: 保留{len(tkeys)-len(_off)}个，关闭{len(_off)}个"
+              + (f"：{_off}" if _off else ""))
+
         # 按固定顺序拼接成"每期一个概率向量"，顺序必须跟RL的extract_ml_prob_vec完全一致
         _wf_concat = np.concatenate([_wf[k] for k in tkeys], axis=1)   # shape (n, sum(nc))
         _wf_payload = {'game': game, 'tkeys': tkeys,
                        'nc': [_nc_map[k] for k in tkeys],
+                       # 各目标是否启用 + 评测细节。probs保持原始值不改，是否屏蔽由RL按这张表统一处理，
+                       # 这样历史数组和现场实时概率走同一套规则，不会一边屏蔽一边没屏蔽。
+                       'target_enabled': _enabled,
+                       'target_skill': _skill,
                        'n_periods': int(_wf_concat.shape[0]),
                        # X[i]对应"用第i期及之前特征，预测第i+1期"——概率数组第i行也是预测第i+1期，
                        # 跟records的下标关系是：概率数组行i ↔ records[i+1]（即f3d(records, i+1)用到的窗口）
