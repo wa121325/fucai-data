@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-05 17:04",
+  "updated_at": "2026-10-05 22:04",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8772,
-      "updated_at": "2026-10-05 16:31",
+      "updated_at": "2026-10-05 21:30",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -1347,7 +1347,7 @@
     },
     "ssq": {
       "data_count": 3510,
-      "updated_at": "2026-10-05 16:49",
+      "updated_at": "2026-10-05 21:49",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -2667,7 +2667,7 @@
     },
     "kl8": {
       "data_count": 2085,
-      "updated_at": "2026-10-05 16:59",
+      "updated_at": "2026-10-05 21:59",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -4088,7 +4088,7 @@
     "date": "2026-10-05",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-10-05 14:23",
+        "prediction_generated_at": "2026-10-05 16:31",
         "actual_qihao": "2026264",
         "actual_date": "2026-10-05",
         "actual": [
@@ -4100,7 +4100,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-10-05 14:41",
+        "prediction_generated_at": "2026-10-05 16:49",
         "actual_qihao": "2026113",
         "actual_date": "2026-09-29",
         "actual_red": [
@@ -4118,15 +4118,7 @@
             "blue_hit": 1
           },
           {
-            "red_hit": 1,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 1,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 1,
+            "red_hit": 3,
             "blue_hit": 0
           },
           {
@@ -4135,13 +4127,21 @@
           },
           {
             "red_hit": 1,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 1,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 1,
             "blue_hit": 1
           }
         ],
-        "best_red_hit": 2
+        "best_red_hit": 3
       },
       "kl8": {
-        "prediction_generated_at": "2026-10-05 14:51",
+        "prediction_generated_at": "2026-10-05 16:59",
         "actual_qihao": "2026264",
         "actual_date": "2026-10-05",
         "actual": [
@@ -4236,12 +4236,12 @@
                 "won": false
               },
               {
-                "hit": 1,
+                "hit": 0,
                 "balls": 6,
                 "won": false
               },
               {
-                "hit": 0,
+                "hit": 1,
                 "balls": 6,
                 "won": false
               }
