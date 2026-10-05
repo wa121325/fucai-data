@@ -818,6 +818,16 @@ LR_P_FLOOR = 1e-3        # 跟 TARGET_SKILL_P_FLOOR 同口径：算验证损失�
 # 才能让"误把噪声目标判成有用"的概率保持在原来的量级。
 TARGET_SKILL_Z_2MODEL = 2.3
 
+# ── 分层保留：显著有效的目标之外，再保留"相对最好"的几个(观察级) ──
+# 只留显著(z>2.3)的目标太严：如果真有弱规律但样本不够把它推过门槛，会被一刀切掉。
+# 而"误留"的代价其实很小——逻辑回归带交叉验证选C，预测会收缩到历史频率附近，
+# 实测即使留下的全是噪声目标，每期也只亏约0.0007 nats(跟全部目标的平均一样，没有更差)；
+# 反过来，当目标里混有真实弱信号时，前半段按z排名挑出的top5平均含2.8个真信号(随机只有0.7个)。
+# 所以：显著有效的 → 'strong'；不足 TARGET_MIN_KEEP 个时，从剩下的里按z从高到低补足 → 'weak'(观察级)。
+# 注意：没有规律时，这些"相对最好"的只是噪声里运气好的，没有统计意义，只是代价小所以留着。
+TARGET_MIN_KEEP = 3          # 每个游戏至少保留几个目标；设0=严格模式(只留显著有效的)
+TARGET_WEAK_Z_FLOOR = -2.0   # 观察级的下限：最优模型的z低于这个，说明已经显著比"只看历史频率"还差，不留
+
 
 def _full_probs(model, Xte, nc, n_train):
     """把sklearn模型的predict_proba补成完整的(len(Xte), nc)分布。
@@ -890,30 +900,50 @@ def compute_lr_walkforward(X, Y, keys, nc_map, stride=None, min_train=300):
     return out
 
 
-def select_target_models(wf_rf, wf_lr, Y, keys, nc_map, min_train=300, z_thr=TARGET_SKILL_Z_2MODEL):
+def select_target_models(wf_rf, wf_lr, Y, keys, nc_map, min_train=300, z_thr=TARGET_SKILL_Z_2MODEL,
+                         min_keep=TARGET_MIN_KEEP, weak_floor=TARGET_WEAK_Z_FLOOR):
     """
-    每个目标分别评测RF和LR两个walk-forward，选更好的那个；两个都没显著优势就关。
-    返回 (skills, model, enabled, wf_chosen)：
-      skills[k] = {'rf':{...}, 'lr':{...}}；model[k] = 'rf'|'lr'|None；
-      enabled[k] = 是否启用(样本不足无法判断时保持启用，沿用RF)；wf_chosen[k] = 胜出模型的逐期概率
+    每个目标分别评测RF和LR两个walk-forward，选更好的那个。分三层：
+      'strong'    至少一个模型显著优于朴素基线(z>z_thr)，取z更高的
+      'weak'      观察级：显著有效的不足 min_keep 个时，从剩下的里按z从高到低补足(最优z需>weak_floor)
+      'off'       其余关闭
+      'undecided' 样本太少不下结论，保持启用、沿用RF
+    返回 (skills, model, enabled, wf_chosen)：skills[k] = {'rf':{...}, 'lr':{...}, 'tier':层级}；
+    model[k] = 'rf'|'lr'|None；enabled[k]；wf_chosen[k] = 胜出模型的逐期概率
     """
     skills, model, enabled, chosen = {}, {}, {}, {}
     for k in keys:
         sr = evaluate_target_skill(Y[k], wf_rf[k], nc_map[k], min_train=min_train, z_threshold=z_thr)
         sl = evaluate_target_skill(Y[k], wf_lr[k], nc_map[k], min_train=min_train, z_threshold=z_thr)
-        skills[k] = {'rf': sr, 'lr': sl}
+        skills[k] = {'rf': sr, 'lr': sl, 'tier': 'off'}
         if sr['undecided']:
             model[k], enabled[k], chosen[k] = 'rf', True, wf_rf[k]      # 样本太少不下结论：不动，沿用RF
+            skills[k]['tier'] = 'undecided'
             continue
         cands = [(s['z'], name) for name, s in (('rf', sr), ('lr', sl)) if s['useful']]
         if cands:
             name = max(cands)[1]
             model[k], enabled[k] = name, True
             chosen[k] = wf_lr[k] if name == 'lr' else wf_rf[k]
+            skills[k]['tier'] = 'strong'
         else:
-            # 两个模型都没有显著优势：关闭。逐期概率仍留一份(z更高的那个)，RL按开关表清零，不会用到
+            # 先按"关闭"处理；逐期概率仍留一份(z更高的那个)，RL按开关表清零，不会用到
             model[k], enabled[k] = None, False
             chosen[k] = wf_lr[k] if sl['z'] > sr['z'] else wf_rf[k]
+
+    # 第二轮：显著有效的不够 min_keep 个，按z从高到低补足观察级
+    n_on = sum(1 for k in keys if enabled[k])
+    if n_on < min_keep:
+        rest = sorted(((max(skills[k]['rf']['z'], skills[k]['lr']['z']), k) for k in keys if not enabled[k]),
+                      reverse=True)
+        for z, k in rest:
+            if n_on >= min_keep or z <= weak_floor:
+                break
+            name = 'lr' if skills[k]['lr']['z'] >= skills[k]['rf']['z'] else 'rf'
+            model[k], enabled[k] = name, True
+            chosen[k] = wf_lr[k] if name == 'lr' else wf_rf[k]
+            skills[k]['tier'] = 'weak'
+            n_on += 1
     return skills, model, enabled, chosen
 
 
@@ -2190,13 +2220,20 @@ def run_ml(history):
         _mname = {'rf': '随机森林', 'lr': '逻辑回归', None: '关闭'}
         for k in tkeys:
             sr, sl = _skill[k]['rf'], _skill[k]['lr']
-            note = '(样本不足，不下结论，沿用随机森林)' if sr['undecided'] else ''
+            _tier = _skill[k]['tier']
+            note = {'undecided': '(样本不足，不下结论，沿用随机森林)', 'weak': '【观察级：未达显著，相对最好】',
+                    'strong': '【显著有效】', 'off': ''}[_tier]
             print(f"      {k:14} 评测{sr['n']:5}期  RF: gain={sr['gain']:+.4f} z={sr['z']:+6.1f}   "
                   f"LR: gain={sl['gain']:+.4f} z={sl['z']:+6.1f}   → {_mname[_model[k]]}{note}")
         _off = [k for k in tkeys if not _enabled[k]]
         _n_lr = sum(1 for k in tkeys if _model[k] == 'lr')
-        print(f"    [目标作用效果] {game}: 保留{len(tkeys)-len(_off)}个(其中逻辑回归{_n_lr}个)，关闭{len(_off)}个"
-              + (f"：{_off}" if _off else ""))
+        _n_strong = sum(1 for k in tkeys if _skill[k]['tier'] == 'strong')
+        _n_weak = sum(1 for k in tkeys if _skill[k]['tier'] == 'weak')
+        print(f"    [目标作用效果] {game}: 保留{len(tkeys)-len(_off)}个(显著有效{_n_strong}个，观察级{_n_weak}个；其中逻辑回归{_n_lr}个)，"
+              f"关闭{len(_off)}个" + (f"：{_off}" if _off else ""))
+        if _n_strong == 0:
+            print(f"    [目标作用效果] {game}: ⚠️ 没有任何目标显著优于朴素基线——说明这批目标目前没有可学的规律，"
+                  f"保留的观察级目标只是相对最好、不代表有预测力")
 
         # 按固定顺序拼接成"每期一个概率向量"，顺序必须跟RL的extract_ml_prob_vec完全一致
         _wf_concat = np.concatenate([_wf_chosen[k] for k in tkeys], axis=1)   # shape (n, sum(nc))，每个目标取胜出模型的概率
@@ -2206,6 +2243,7 @@ def run_ml(history):
                        # 这样历史数组和现场实时概率走同一套规则，不会一边屏蔽一边没屏蔽。
                        'target_enabled': _enabled,
                        'target_model': _model,      # 每个目标用的是哪个模型：'rf'/'lr'/None(关闭)
+                       'target_tier': {k: _skill[k]['tier'] for k in tkeys},   # strong/weak/off/undecided
                        'target_skill': _skill,      # 两个模型各自的评测细节
                        'n_periods': int(_wf_concat.shape[0]),
                        # X[i]对应"用第i期及之前特征，预测第i+1期"——概率数组第i行也是预测第i+1期，
