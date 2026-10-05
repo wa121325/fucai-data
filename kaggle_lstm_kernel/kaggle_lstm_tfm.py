@@ -673,7 +673,7 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
         if has_val:
             Xv = torch.FloatTensor(Xval).to(DEVICE)
             yvs = [torch.LongTensor(y).to(DEVICE) for y in yval_list]
-        best_loss, best_acc, best_state, no_imp, stopped = float('inf'), -1.0, None, 0, ep
+        best_loss, best_acc, best_state, no_imp, stopped, best_ep = float('inf'), -1.0, None, 0, ep, 0
 
         for e in range(ep):
             m.train()
@@ -699,7 +699,7 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
                 # 隐层里的样本内记忆(见函数末尾的样本内/外对比)。
                 vloss = float(np.mean([crit(lg, yv).item() for lg, yv in zip(logits_list, yvs)]))
             if vloss < best_loss - 1e-6:
-                best_loss, best_acc = vloss, acc
+                best_loss, best_acc, best_ep = vloss, acc, e+1
                 best_state = {k: v.detach().clone() for k, v in m.state_dict().items()}
                 no_imp = 0
             elif e >= warmup:
@@ -709,7 +709,7 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
         if has_val and best_state is not None:
             m.load_state_dict(best_state)
             if tag:
-                print(f"      [{tag}] 早停于第{stopped}/{ep}轮，最佳轮验证损失{best_loss:.4f}"
+                print(f"      [{tag}] 跑到第{stopped}/{ep}轮，保留的是第{best_ep}轮的权重，验证损失{best_loss:.4f}"
                       f"（该轮平均准确率{best_acc*100:.1f}%，全部{n_targets}个目标）")
         return m
 
