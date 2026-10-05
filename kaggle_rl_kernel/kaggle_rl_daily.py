@@ -2559,7 +2559,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
@@ -2910,6 +2910,11 @@ for _g in ['3d', 'ssq', 'kl8']:
                         _lr = [k for k, v in _tm.items() if v == 'lr']
                         print(f"  [目标模型] {_g}: 逻辑回归{len(_lr)}个{_lr if _lr else ''}，"
                               f"随机森林{sum(1 for v in _tm.values() if v == 'rf')}个")
+                    _tt = _wf.get('target_tier') or {}
+                    if _tt:
+                        _st = [k for k, v in _tt.items() if v == 'strong']; _wk = [k for k, v in _tt.items() if v == 'weak']
+                        print(f"  [目标层级] {_g}: 显著有效{len(_st)}个{_st if _st else ''}，"
+                              f"观察级(相对最好、未达显著){len(_wk)}个{_wk if _wk else ''}")
                 else:
                     print(f"  ! {_g}: payload的目标顺序与本脚本布局不一致，本次不做目标屏蔽")
         except Exception as e:
