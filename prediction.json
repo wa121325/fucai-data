@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-05 22:04",
+  "updated_at": "2026-10-06 01:18",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8772,
-      "updated_at": "2026-10-05 21:30",
+      "updated_at": "2026-10-06 00:43",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -128,7 +128,17 @@
               "pred_lgb": 1,
               "hit": 1
             }
-          ]
+          ],
+          "wf_prediction": {
+            "model": "rf",
+            "value": 1,
+            "confidence": 53.9,
+            "probs": {
+              "0": 21.05,
+              "1": 53.92,
+              "2": 25.03
+            }
+          }
         },
         "odd": {
           "target": "3d_odd",
@@ -361,7 +371,17 @@
               "pred_lgb": 2,
               "hit": 0
             }
-          ]
+          ],
+          "wf_prediction": {
+            "model": "lr",
+            "value": 2,
+            "confidence": 68.4,
+            "probs": {
+              "0": 1.04,
+              "1": 30.54,
+              "2": 68.43
+            }
+          }
         },
         "big": {
           "target": "3d_big",
@@ -1180,7 +1200,16 @@
               "pred_lgb": 1,
               "hit": 0
             }
-          ]
+          ],
+          "wf_prediction": {
+            "model": "lr",
+            "value": 0,
+            "confidence": 50.3,
+            "probs": {
+              "0": 50.3,
+              "1": 49.7
+            }
+          }
         }
       },
       "recommendation": {
@@ -1191,29 +1220,29 @@
             8
           ],
           [
-            3,
-            3,
-            8
-          ],
-          [
-            3,
-            4,
-            8
-          ],
-          [
-            9,
+            7,
             2,
             8
           ],
           [
             9,
             3,
-            8
+            4
           ],
           [
             3,
-            2,
+            6,
             2
+          ],
+          [
+            3,
+            0,
+            8
+          ],
+          [
+            7,
+            3,
+            4
           ]
         ],
         "pos_candidates": [
@@ -1318,36 +1347,36 @@
             8
           ],
           [
-            3,
-            3,
-            8
-          ],
-          [
-            3,
-            4,
-            8
-          ],
-          [
-            9,
+            7,
             2,
             8
           ],
           [
             9,
             3,
-            8
+            4
           ],
           [
             3,
-            2,
+            6,
             2
+          ],
+          [
+            3,
+            0,
+            8
+          ],
+          [
+            7,
+            3,
+            4
           ]
         ]
       }
     },
     "ssq": {
       "data_count": 3510,
-      "updated_at": "2026-10-05 21:49",
+      "updated_at": "2026-10-06 01:02",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -2418,7 +2447,24 @@
               "pred_lgb": 6,
               "hit": 0
             }
-          ]
+          ],
+          "wf_prediction": {
+            "model": "rf",
+            "value": 0,
+            "confidence": 14.6,
+            "probs": {
+              "0": 14.58,
+              "1": 8.48,
+              "2": 11.1,
+              "3": 9.22,
+              "4": 9.75,
+              "5": 11.42,
+              "6": 8.39,
+              "7": 9.0,
+              "8": 7.82,
+              "9": 10.22
+            }
+          }
         },
         "same_tail": {
           "target": "ssq_same_tail",
@@ -2565,13 +2611,46 @@
           {
             "red": [
               4,
+              5,
+              6,
+              9,
+              11,
+              25
+            ],
+            "blue": 5
+          },
+          {
+            "red": [
+              2,
+              5,
+              6,
+              18,
+              24,
+              25
+            ],
+            "blue": 14
+          },
+          {
+            "red": [
+              1,
+              2,
+              10,
+              13,
+              24,
+              30
+            ],
+            "blue": 3
+          },
+          {
+            "red": [
+              4,
               8,
               18,
               24,
               25,
               30
             ],
-            "blue": 5
+            "blue": 4
           },
           {
             "red": [
@@ -2581,39 +2660,6 @@
               23,
               24,
               30
-            ],
-            "blue": 14
-          },
-          {
-            "red": [
-              4,
-              5,
-              6,
-              9,
-              11,
-              25
-            ],
-            "blue": 3
-          },
-          {
-            "red": [
-              4,
-              5,
-              9,
-              11,
-              23,
-              25
-            ],
-            "blue": 4
-          },
-          {
-            "red": [
-              4,
-              5,
-              6,
-              11,
-              14,
-              18
             ],
             "blue": 11
           }
@@ -2667,7 +2713,7 @@
     },
     "kl8": {
       "data_count": 2085,
-      "updated_at": "2026-10-05 21:59",
+      "updated_at": "2026-10-06 01:13",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -4085,10 +4131,10 @@
     }
   },
   "backtest": {
-    "date": "2026-10-05",
+    "date": "2026-10-06",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-10-05 16:31",
+        "prediction_generated_at": "2026-10-05 21:30",
         "actual_qihao": "2026264",
         "actual_date": "2026-10-05",
         "actual": [
@@ -4100,7 +4146,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-10-05 16:49",
+        "prediction_generated_at": "2026-10-05 21:49",
         "actual_qihao": "2026113",
         "actual_date": "2026-09-29",
         "actual_red": [
@@ -4141,7 +4187,7 @@
         "best_red_hit": 3
       },
       "kl8": {
-        "prediction_generated_at": "2026-10-05 16:59",
+        "prediction_generated_at": "2026-10-05 21:59",
         "actual_qihao": "2026264",
         "actual_date": "2026-10-05",
         "actual": [
