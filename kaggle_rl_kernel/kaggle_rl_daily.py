@@ -128,7 +128,7 @@ D3_POOL_N = 5
 # 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
 # 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
 # 改这里就行，不用碰 D3_N_BETS。
-D3_SAMPLE_N = 12
+D3_SAMPLE_N = 30
 # 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
 # D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
 D3_SAMPLE_DISPLAY_N = 12
@@ -1009,7 +1009,7 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
 SEGMENT_ENABLE = {
     '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
-    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '重号斜连':True, '遗漏':True, '频率':True},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '重号斜连':True, '遗漏':True, '频率':False},
 }
 
 
@@ -2394,7 +2394,7 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            model, 200000, lambda: _eval_holdout(model), '3D首训',
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
