@@ -813,29 +813,6 @@ def evaluate_target_skill(y, probs, nc, min_train=300, z_threshold=TARGET_SKILL_
 LR_C_GRID = (0.0005, 0.003, 0.02, 0.1)
 LR_VAL_FRAC = 0.25
 LR_P_FLOOR = 1e-3        # 跟 TARGET_SKILL_P_FLOOR 同口径：算验证损失时给概率设下限
-# 两个模型各测一遍、每个目标取更好的那个，等于对同一个目标做了两次检验再取最大——
-# 假阳性概率大约翻倍。单模型门槛是z>2.0(单侧约2.3%)，取最大后要把门槛提到约2.3，
-# 才能让"误把噪声目标判成有用"的概率保持在原来的量级。
-TARGET_SKILL_Z_2MODEL = 2.3
-
-# ── 分层保留：显著有效的目标之外，再保留"相对最好"的几个(观察级) ──
-# 只留显著(z>2.3)的目标太严：如果真有弱规律但样本不够把它推过门槛，会被一刀切掉。
-# 而"误留"的代价其实很小——逻辑回归带交叉验证选C，预测会收缩到历史频率附近，
-# 实测即使留下的全是噪声目标，每期也只亏约0.0007 nats(跟全部目标的平均一样，没有更差)；
-# 反过来，当目标里混有真实弱信号时，前半段按z排名挑出的top5平均含2.8个真信号(随机只有0.7个)。
-# 所以：显著有效的 → 'strong'；不足 TARGET_MIN_KEEP 个时，从剩下的里按z从高到低补足 → 'weak'(观察级)。
-# 注意：没有规律时，这些"相对最好"的只是噪声里运气好的，没有统计意义，只是代价小所以留着。
-TARGET_MIN_KEEP = 3          # 每个游戏至少保留几个目标；设0=严格模式(只留显著有效的)
-# 观察级的下限，用【绝对代价】(nats/期)，不用z：
-#   原来用 z>-2("不显著差于基线")，但z衡量的是"测不测得出来"，不是"差了多少"，
-#   同一个z门槛在不同游戏里对应的实际容忍度差好几倍。实测纯噪声目标的逻辑回归代价：
-#   3D -0.0031(8441期、标准误0.0008，z=-2仅容忍-0.0016，噪声全被拒)，
-#   双色球 -0.0065(1560期、标准误0.0030，z=-2容忍-0.0060，反而放过2个)，
-#   快乐8 -0.0045(1780期，放过4个)——代价最小的游戏被卡得最严，是反着的。
-#   观察级特征对RL的危害取决于它差了多少nats，所以改成各游戏统一的绝对代价下限：
-#   -0.01 ≈ 逻辑回归噪声代价(约-0.003~-0.0065)的2倍、随机森林噪声代价(实测约-0.02)的一半，
-#   能把随机森林式的噪声挡掉，又不会误杀带交叉验证、会收缩到基线附近的逻辑回归。
-TARGET_WEAK_GAIN_FLOOR = -0.01
 
 
 def _full_probs(model, Xte, nc, n_train):
@@ -909,98 +886,52 @@ def compute_lr_walkforward(X, Y, keys, nc_map, stride=None, min_train=300):
     return out
 
 
-def select_target_models(wf_rf, wf_lr, Y, keys, nc_map, min_train=300, z_thr=TARGET_SKILL_Z_2MODEL,
-                         min_keep=TARGET_MIN_KEEP, gain_floor=TARGET_WEAK_GAIN_FLOOR):
+def select_target_models(wf_rf, wf_lr, Y, keys, nc_map, min_train=300):
     """
-    每个目标分别评测RF和LR两个walk-forward，选更好的那个。分三层：
-      'strong'    至少一个模型显著优于朴素基线(z>z_thr)，取z更高的
-      'weak'      观察级：显著有效的不足 min_keep 个时，从剩下的里按z从高到低补足(该模型的gain需>gain_floor，各游戏统一的绝对代价下限)
-      'off'       其余关闭
-      'undecided' 样本太少不下结论，保持启用、沿用RF
-    返回 (skills, model, enabled, wf_chosen)：skills[k] = {'rf':{...}, 'lr':{...}, 'tier':层级}；
-    model[k] = 'rf'|'lr'|None；enabled[k]；wf_chosen[k] = 胜出模型的逐期概率
+    择优选择：每个目标把随机森林和逻辑回归两个walk-forward都评测一遍，
+    谁在回测里对"朴素基线(只用历史类别频率)"的信息增益更显著(z更高)，这个目标就用谁。
+
+    ⚠️ 只决定"用哪个模型"，不决定"用不用"：所有目标始终保留，不做任何关闭/清零。
+    (之前那套"没有显著优势就关闭目标、再补观察级"的逻辑已经撤掉。)
+    样本太少没法比较时沿用随机森林。
+
+    返回 (skills, model, enabled, wf_chosen)：
+      skills[k] = {'rf':{...}, 'lr':{...}}；model[k] = 'rf'|'lr'；
+      enabled[k] 恒为True(接口保留，下游代码不用改)；wf_chosen[k] = 胜出模型的逐期概率
     """
     skills, model, enabled, chosen = {}, {}, {}, {}
     for k in keys:
-        sr = evaluate_target_skill(Y[k], wf_rf[k], nc_map[k], min_train=min_train, z_threshold=z_thr)
-        sl = evaluate_target_skill(Y[k], wf_lr[k], nc_map[k], min_train=min_train, z_threshold=z_thr)
-        skills[k] = {'rf': sr, 'lr': sl, 'tier': 'off'}
-        if sr['undecided']:
-            model[k], enabled[k], chosen[k] = 'rf', True, wf_rf[k]      # 样本太少不下结论：不动，沿用RF
-            skills[k]['tier'] = 'undecided'
-            continue
-        cands = [(s['z'], name) for name, s in (('rf', sr), ('lr', sl)) if s['useful']]
-        if cands:
-            name = max(cands)[1]
-            model[k], enabled[k] = name, True
-            chosen[k] = wf_lr[k] if name == 'lr' else wf_rf[k]
-            skills[k]['tier'] = 'strong'
+        sr = evaluate_target_skill(Y[k], wf_rf[k], nc_map[k], min_train=min_train)
+        sl = evaluate_target_skill(Y[k], wf_lr[k], nc_map[k], min_train=min_train)
+        skills[k] = {'rf': sr, 'lr': sl}
+        enabled[k] = True
+        if sr['undecided'] or sl['z'] <= sr['z']:      # 样本不足，或随机森林不输(平局也用随机森林，保持原状)
+            model[k], chosen[k] = 'rf', wf_rf[k]
         else:
-            # 先按"关闭"处理；逐期概率仍留一份(z更高的那个)，RL按开关表清零，不会用到
-            model[k], enabled[k] = None, False
-            chosen[k] = wf_lr[k] if sl['z'] > sr['z'] else wf_rf[k]
-
-    # 第二轮：显著有效的不够 min_keep 个，按z从高到低补足观察级。
-    # 每个模型单独过下限：只有 gain > gain_floor 的模型才有资格(比如随机森林在噪声上代价约-0.02，
-    # 过不了-0.01，就不会被选中；逻辑回归带交叉验证会收缩到基线附近，通常能过)。
-    n_on = sum(1 for k in keys if enabled[k])
-    if n_on < min_keep:
-        cands = []
-        for k in keys:
-            if enabled[k]:
-                continue
-            ok = [(skills[k][m]['z'], m) for m in ('rf', 'lr') if skills[k][m]['gain'] > gain_floor]
-            if ok:
-                z, name = max(ok)
-                cands.append((z, k, name))
-        for z, k, name in sorted(cands, reverse=True):
-            if n_on >= min_keep:
-                break
-            model[k], enabled[k] = name, True
-            chosen[k] = wf_lr[k] if name == 'lr' else wf_rf[k]
-            skills[k]['tier'] = 'weak'
-            n_on += 1
+            model[k], chosen[k] = 'lr', wf_lr[k]
     return skills, model, enabled, chosen
 
 
-def rf_live_probs(X, y, Xlast, nc):
-    """RF-only的现场概率：超参跟 compute_ml_walkforward 完全一致，这样RF胜出的目标，
-    现场概率跟历史walk-forward才是同一个模型(原来现场用的是RF+XGB+LGB集成，历史只有RF)。"""
-    m = RandomForestClassifier(n_estimators=150, max_depth=8, min_samples_leaf=3,
-                               random_state=42, n_jobs=-1).fit(X, y)
-    return _full_probs(m, Xlast, nc, len(X))
-
-
 def compute_wf_live(X, Y, last_X, keys, nc_map, model):
-    """给每个启用的目标，用【胜出模型】预测真正的下一期。返回的格式跟 prediction 一致
-    ({'value','confidence','probs':{str(类别):百分比}})，RL/选号函数优先读它。"""
+    """只给【逻辑回归胜出】的目标算现场概率，用跟历史walk-forward同一个入口(lr_fit_predict_cv)，
+    这样历史和现场是同一个模型。格式跟 prediction 一致({'value','confidence','probs':{str(类别):百分比}})，
+    RL/选号函数优先读它。随机森林胜出的目标不在这里算：沿用原来的集成预测(prediction)，保持原状。"""
     out = {}
     for k in keys:
         name = model.get(k)
-        if name is None or not HAS_SKL:
+        if name != 'lr' or not HAS_SKL:
             continue
         try:
             y = np.asarray(Y[k])
             if len(set(y.tolist())) < 2:
                 continue
-            if name == 'lr':
-                p, _C = lr_fit_predict_cv(X, y, last_X, nc_map[k]); p = p[0]
-            else:
-                p = rf_live_probs(X, y, last_X, nc_map[k])[0]
+            p, _C = lr_fit_predict_cv(X, y, last_X, nc_map[k]); p = p[0]
             out[k] = {'model': name, 'value': int(np.argmax(p)),
                       'confidence': round(float(p.max()) * 100, 1),
                       'probs': {str(c): round(float(p[c]) * 100, 2) for c in range(nc_map[k])}}
         except Exception as e:
             print(f"      ! 目标{k}的现场概率({name})计算失败: {e}")
     return out
-
-
-# 各游戏各目标当前是否启用(经上面的作用效果评测得出)。选号函数(rec3d/recssq/reckl8)
-# 收集"ML预测条件"时会查这张表，被关掉的目标不再参与条件匹配。默认全开。
-TARGET_ENABLED = {}
-
-def _target_on(game, key):
-    return TARGET_ENABLED.get(game, {}).get(key, True)
 
 
 def diagnose_optimal_stride(X, y, nc, candidates=(50,100,200,300,500,800), test_frac=0.15,
@@ -1655,8 +1586,6 @@ def rec3d(records, ml, mk, om):
     _conds = {}
     for _k in ['sum_grp', 'odd', 'group_type', 'big', 'span_grp', 'road_dom', 'arith',
                'prime_cnt', 'sum_tail', 'span_odd']:
-        if not _target_on('3d', _k):
-            continue   # 该目标经作用效果回测判定没有信息量，已关闭，不参与选号条件匹配
         _m = ml.get(_k, {})
         _p = (_m.get('wf_prediction') or _m.get('prediction') or {}) if _m else {}   # 优先用胜出模型的预测
         if _p.get('value') is not None:
@@ -1837,8 +1766,6 @@ def recssq(records, ml, om):
     _ssq_conds = {}
     for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec',
                'prime_grp','sum_tail','same_tail']:
-        if not _target_on('ssq', _k):
-            continue   # 该目标经作用效果回测判定没有信息量，已关闭，不参与选号条件匹配
         _m = ml.get(_k, {})
         _p = (_m.get('wf_prediction') or _m.get('prediction') or {}) if _m else {}   # 优先用胜出模型的预测
         if _p.get('value') is not None:
@@ -2091,8 +2018,6 @@ def reckl8(records, ml, om):
 
     _kl8_conds = {}
     for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','prime_grp']:
-        if not _target_on('kl8', _k):
-            continue   # 该目标经作用效果回测判定没有信息量，已关闭，不参与选号条件匹配
         _m = ml.get(_k, {})
         _p = (_m.get('wf_prediction') or _m.get('prediction') or {}) if _m else {}   # 优先用胜出模型的预测
         if _p.get('value') is not None:
@@ -2228,38 +2153,23 @@ def run_ml(history):
         _wf = compute_ml_walkforward(X, Y, tkeys, _nc_map)
         _wf_lr = compute_lr_walkforward(X, Y, tkeys, _nc_map)
 
-        # ── 逐个目标的作用效果回测：随机森林/逻辑回归各测一遍，对比"只看历史频率"的朴素基线，
-        #    谁显著更好就用谁，两个都没有显著优势就关闭该目标 ──
+        # ── 择优选模型：每个目标比较随机森林与逻辑回归的回测，用更好的那个。所有目标都保留，不关闭 ──
         _skill, _model, _enabled, _wf_chosen = select_target_models(_wf, _wf_lr, Y, tkeys, _nc_map)
-        TARGET_ENABLED[game] = _enabled
-        print(f"    [目标作用效果] {game}（对比朴素基线；gain>0表示比基线好；两个模型取最大，门槛z>{TARGET_SKILL_Z_2MODEL}）")
-        _mname = {'rf': '随机森林', 'lr': '逻辑回归', None: '关闭'}
+        _mname = {'rf': '随机森林', 'lr': '逻辑回归'}
+        print(f"    [择优选模型] {game}：每个目标对比随机森林与逻辑回归(相对朴素基线的信息增益gain，z=gain/标准误)，用更好的；目标全部保留")
         for k in tkeys:
             sr, sl = _skill[k]['rf'], _skill[k]['lr']
-            _tier = _skill[k]['tier']
-            note = {'undecided': '(样本不足，不下结论，沿用随机森林)', 'weak': '【观察级：未达显著，相对最好】',
-                    'strong': '【显著有效】', 'off': ''}[_tier]
             print(f"      {k:14} 评测{sr['n']:5}期  RF: gain={sr['gain']:+.4f} z={sr['z']:+6.1f}   "
-                  f"LR: gain={sl['gain']:+.4f} z={sl['z']:+6.1f}   → {_mname[_model[k]]}{note}")
-        _off = [k for k in tkeys if not _enabled[k]]
+                  f"LR: gain={sl['gain']:+.4f} z={sl['z']:+6.1f}   → {_mname[_model[k]]}")
         _n_lr = sum(1 for k in tkeys if _model[k] == 'lr')
-        _n_strong = sum(1 for k in tkeys if _skill[k]['tier'] == 'strong')
-        _n_weak = sum(1 for k in tkeys if _skill[k]['tier'] == 'weak')
-        print(f"    [目标作用效果] {game}: 保留{len(tkeys)-len(_off)}个(显著有效{_n_strong}个，观察级{_n_weak}个；其中逻辑回归{_n_lr}个)，"
-              f"关闭{len(_off)}个" + (f"：{_off}" if _off else ""))
-        if _n_strong == 0:
-            print(f"    [目标作用效果] {game}: ⚠️ 没有任何目标显著优于朴素基线——说明这批目标目前没有可学的规律，"
-                  f"保留的观察级目标只是相对最好、不代表有预测力")
+        print(f"    [择优选模型] {game}: 逻辑回归{_n_lr}个，随机森林{len(tkeys)-_n_lr}个")
 
         # 按固定顺序拼接成"每期一个概率向量"，顺序必须跟RL的extract_ml_prob_vec完全一致
         _wf_concat = np.concatenate([_wf_chosen[k] for k in tkeys], axis=1)   # shape (n, sum(nc))，每个目标取胜出模型的概率
         _wf_payload = {'game': game, 'tkeys': tkeys,
                        'nc': [_nc_map[k] for k in tkeys],
-                       # 各目标是否启用 + 评测细节。probs保持原始值不改，是否屏蔽由RL按这张表统一处理，
-                       # 这样历史数组和现场实时概率走同一套规则，不会一边屏蔽一边没屏蔽。
-                       'target_enabled': _enabled,
+                       # 每个目标用的模型和两个模型的评测细节(仅供查看，不用来关闭任何目标)
                        'target_model': _model,      # 每个目标用的是哪个模型：'rf'/'lr'/None(关闭)
-                       'target_tier': {k: _skill[k]['tier'] for k in tkeys},   # strong/weak/off/undecided
                        'target_skill': _skill,      # 两个模型各自的评测细节
                        'n_periods': int(_wf_concat.shape[0]),
                        # X[i]对应"用第i期及之前特征，预测第i+1期"——概率数组第i行也是预测第i+1期，
@@ -2279,17 +2189,15 @@ def run_ml(history):
                 ml_res['models'][tname]=r
                 acc=r.get('accuracy',{}); pred=r.get('prediction',{})
                 print(f"    集成{acc.get('ensemble','—')}%  预测下一期→{pred.get('value','?')}(置信{pred.get('confidence','?')}%)")
-        # 胜出模型的现场预测：跟RL训练时用的历史walk-forward概率是【同一个模型】
-        # (之前现场用RF+XGB+LGB集成、历史只有RF，两边不是一个东西)。
-        # 原有的 prediction(集成)保持不动，页面展示不变；RL和选号函数优先读 wf_prediction。
+        # 逻辑回归胜出的目标：现场预测也用逻辑回归，跟RL训练时用的历史walk-forward概率是同一个模型。
+        # 随机森林胜出的目标不动，沿用原来的集成预测(prediction)。页面展示的 prediction 一律保持不变。
         try:
             _live = compute_wf_live(X, Y, last_X if last_X is not None else X[-1:], tkeys, _nc_map, _model)
             for _t, _v in _live.items():
                 if _t in ml_res['models']:
                     ml_res['models'][_t]['wf_prediction'] = _v
-            print(f"    [现场概率] {game}: 已用胜出模型为{len(_live)}个启用目标算出现场概率"
-                  f"(随机森林{sum(1 for v in _live.values() if v['model']=='rf')}个，"
-                  f"逻辑回归{sum(1 for v in _live.values() if v['model']=='lr')}个)")
+            print(f"    [现场概率] {game}: 逻辑回归胜出的{len(_live)}个目标已用逻辑回归算出现场概率；"
+                  f"其余目标沿用原来的集成预测(prediction)")
         except Exception as _e:
             print(f"    ! 现场概率(胜出模型)计算失败，沿用集成预测: {_e}")
         if game=='3d':
