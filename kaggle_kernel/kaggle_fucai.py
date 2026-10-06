@@ -826,7 +826,16 @@ TARGET_SKILL_Z_2MODEL = 2.3
 # 所以：显著有效的 → 'strong'；不足 TARGET_MIN_KEEP 个时，从剩下的里按z从高到低补足 → 'weak'(观察级)。
 # 注意：没有规律时，这些"相对最好"的只是噪声里运气好的，没有统计意义，只是代价小所以留着。
 TARGET_MIN_KEEP = 3          # 每个游戏至少保留几个目标；设0=严格模式(只留显著有效的)
-TARGET_WEAK_Z_FLOOR = -2.0   # 观察级的下限：最优模型的z低于这个，说明已经显著比"只看历史频率"还差，不留
+# 观察级的下限，用【绝对代价】(nats/期)，不用z：
+#   原来用 z>-2("不显著差于基线")，但z衡量的是"测不测得出来"，不是"差了多少"，
+#   同一个z门槛在不同游戏里对应的实际容忍度差好几倍。实测纯噪声目标的逻辑回归代价：
+#   3D -0.0031(8441期、标准误0.0008，z=-2仅容忍-0.0016，噪声全被拒)，
+#   双色球 -0.0065(1560期、标准误0.0030，z=-2容忍-0.0060，反而放过2个)，
+#   快乐8 -0.0045(1780期，放过4个)——代价最小的游戏被卡得最严，是反着的。
+#   观察级特征对RL的危害取决于它差了多少nats，所以改成各游戏统一的绝对代价下限：
+#   -0.01 ≈ 逻辑回归噪声代价(约-0.003~-0.0065)的2倍、随机森林噪声代价(实测约-0.02)的一半，
+#   能把随机森林式的噪声挡掉，又不会误杀带交叉验证、会收缩到基线附近的逻辑回归。
+TARGET_WEAK_GAIN_FLOOR = -0.01
 
 
 def _full_probs(model, Xte, nc, n_train):
@@ -901,11 +910,11 @@ def compute_lr_walkforward(X, Y, keys, nc_map, stride=None, min_train=300):
 
 
 def select_target_models(wf_rf, wf_lr, Y, keys, nc_map, min_train=300, z_thr=TARGET_SKILL_Z_2MODEL,
-                         min_keep=TARGET_MIN_KEEP, weak_floor=TARGET_WEAK_Z_FLOOR):
+                         min_keep=TARGET_MIN_KEEP, gain_floor=TARGET_WEAK_GAIN_FLOOR):
     """
     每个目标分别评测RF和LR两个walk-forward，选更好的那个。分三层：
       'strong'    至少一个模型显著优于朴素基线(z>z_thr)，取z更高的
-      'weak'      观察级：显著有效的不足 min_keep 个时，从剩下的里按z从高到低补足(最优z需>weak_floor)
+      'weak'      观察级：显著有效的不足 min_keep 个时，从剩下的里按z从高到低补足(该模型的gain需>gain_floor，各游戏统一的绝对代价下限)
       'off'       其余关闭
       'undecided' 样本太少不下结论，保持启用、沿用RF
     返回 (skills, model, enabled, wf_chosen)：skills[k] = {'rf':{...}, 'lr':{...}, 'tier':层级}；
@@ -931,15 +940,22 @@ def select_target_models(wf_rf, wf_lr, Y, keys, nc_map, min_train=300, z_thr=TAR
             model[k], enabled[k] = None, False
             chosen[k] = wf_lr[k] if sl['z'] > sr['z'] else wf_rf[k]
 
-    # 第二轮：显著有效的不够 min_keep 个，按z从高到低补足观察级
+    # 第二轮：显著有效的不够 min_keep 个，按z从高到低补足观察级。
+    # 每个模型单独过下限：只有 gain > gain_floor 的模型才有资格(比如随机森林在噪声上代价约-0.02，
+    # 过不了-0.01，就不会被选中；逻辑回归带交叉验证会收缩到基线附近，通常能过)。
     n_on = sum(1 for k in keys if enabled[k])
     if n_on < min_keep:
-        rest = sorted(((max(skills[k]['rf']['z'], skills[k]['lr']['z']), k) for k in keys if not enabled[k]),
-                      reverse=True)
-        for z, k in rest:
-            if n_on >= min_keep or z <= weak_floor:
+        cands = []
+        for k in keys:
+            if enabled[k]:
+                continue
+            ok = [(skills[k][m]['z'], m) for m in ('rf', 'lr') if skills[k][m]['gain'] > gain_floor]
+            if ok:
+                z, name = max(ok)
+                cands.append((z, k, name))
+        for z, k, name in sorted(cands, reverse=True):
+            if n_on >= min_keep:
                 break
-            name = 'lr' if skills[k]['lr']['z'] >= skills[k]['rf']['z'] else 'rf'
             model[k], enabled[k] = name, True
             chosen[k] = wf_lr[k] if name == 'lr' else wf_rf[k]
             skills[k]['tier'] = 'weak'
