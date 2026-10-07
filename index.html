@@ -2430,25 +2430,22 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
 ═══════════════════════════════════════════════════ */
 document.getElementById('loadPredictBtn').addEventListener('click', loadPrediction);
 
-/* ═══ 预测块下载为图片（自动附带默认二维码）═══ */
-async function downloadBlockImage(block, title, btn){
+/* ═══ 球区下载为图片（自动附带默认二维码）═══ */
+async function downloadBallImage(nodes, title, btn){
   const old = btn ? btn.textContent : '';
   if(btn){ btn.textContent='生成中…'; btn.disabled=true; }
   const wrap = document.createElement('div');
-  wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:640px;background:#fff;padding:16px;box-sizing:border-box;color:#222;font-family:inherit;';
-  const clone = block.cloneNode(true);
-  clone.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
-  clone.style.maxWidth='none';
+  wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:520px;background:#fff;padding:16px;box-sizing:border-box;color:#222;font-family:inherit;';
   const head = document.createElement('div');
   head.style.cssText='font-size:15px;font-weight:700;margin-bottom:8px;color:#1a1a2e;';
   head.textContent = title;
-  if(!block.querySelector('h2')) wrap.appendChild(head);
-  wrap.appendChild(clone);
+  wrap.appendChild(head);
+  nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove()); wrap.appendChild(c); });
   const qrImg = (state.qr && state.qr.image) || '';
   if(qrImg){
     const q = document.createElement('div');
     q.style.cssText='text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
-    q.innerHTML = `<img src="${qrImg}" style="width:150px;height:150px;display:inline-block;">`
+    q.innerHTML = `<img src="${qrImg}" style="width:140px;height:140px;display:inline-block;">`
       + (state.qr.caption ? `<div style="font-size:12px;color:#666;margin-top:4px;">${state.qr.caption.replace(/</g,'&lt;')}</div>` : '');
     wrap.appendChild(q);
   }
@@ -2458,39 +2455,39 @@ async function downloadBlockImage(block, title, btn){
   try{
     const canvas = await html2canvas(wrap,{backgroundColor:'#ffffff',scale:2,useCORS:true,allowTaint:true});
     const a = document.createElement('a');
-    a.download = `预测_${title.replace(/[\\\/:*?"<>|\s]+/g,'_')}_${new Date().toISOString().slice(0,10)}.png`;
+    a.download = `${title.replace(/[\\\/:*?"<>|\s]+/g,'_')}_${new Date().toISOString().slice(0,10)}.png`;
     a.href = canvas.toDataURL('image/png');
     a.click();
   }catch(e){ alert('生成图片失败：'+e.message); }
   finally{ document.body.removeChild(wrap); if(btn){ btn.textContent=old; btn.disabled=false; } }
 }
 function attachBlockDownloads(){
-  const items = [];
-  const bt = document.getElementById('backtestPanel');
-  if(bt && bt.style.display!=='none') items.push([bt,'昨日预测回测结果']);
-  ['gamePredict3d','gamePredictSSQ','gamePredictKL8'].forEach(id=>{
-    const p=document.getElementById(id);
-    const panel=p && p.querySelector('.panel');
-    if(panel && p.style.display!=='none') items.push([panel,(panel.querySelector('h2')||{}).textContent||id]);
-  });
-  const dl = document.getElementById('dlResultContent');
-  if(dl){
-    let sec='';
-    [...dl.children].forEach(ch=>{
-      if(ch.classList.contains('sectionTitle')){ sec=ch.textContent.replace(/[（(].*$/,'').replace(/[^\u4e00-\u9fa5A-Za-z0-9+ ]/g,' ').replace(/\s+/g,' ').trim(); return; }
-      if(ch.tagName!=='DIV' || ch.textContent.trim().length<20 || ch.classList.contains('status')) return;
-      const g=(ch.firstElementChild&&ch.firstElementChild.textContent||'').trim().slice(0,10);
-      items.push([ch, `${sec} ${g}`.trim()]);
-    });
-  }
-  items.forEach(([el,title])=>{
-    if(el.querySelector(':scope > .blk-dl-btn')) return;
+  document.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
+  const gameOf = el=>{
+    const top = el.closest('#dlResultContent > div');
+    if(top){ const t=(top.firstElementChild&&top.firstElementChild.textContent||''); const m=t.match(/福彩3D|双色球|快乐8/); if(m) return m[0]; }
+    const pn = el.closest('.panel'); const h = pn && pn.querySelector('h2');
+    const m = h && h.textContent.match(/福彩3D|双色球|快乐8/); return m?m[0]:'';
+  };
+  const sel='.ball-flex, .ball-line, .rec-group';
+  const done = new Set();
+  document.querySelectorAll('#predictContent '+sel.split(', ').join(', #predictContent ')).forEach(el=>{
+    if(done.has(el) || (!el.classList.contains('ball-flex') && el.closest('.ball-flex'))) return;
+    const parent = el.parentElement;
+    // 同一父节点下连续的球行合为一个导出单元
+    const kids=[...parent.children]; let k=kids.indexOf(el);
+    const group=[];
+    while(k<kids.length && kids[k].matches(sel)){ group.push(kids[k]); done.add(kids[k]); k++; }
+    const prev = el.previousElementSibling;
+    const nodes = (prev && prev.classList.contains('ball-label')) ? [prev,...group] : group;
+    const g = gameOf(el);
+    const title = `${g} 推荐号码`.trim();
     const b=document.createElement('button');
     b.className='blk-dl-btn';
     b.textContent='🖼 下载图片';
     b.style.cssText='float:right;font-size:11px;padding:3px 8px;margin:0 0 4px 6px;border:1px solid #bbb;border-radius:6px;background:#fff;color:#444;cursor:pointer;';
-    b.addEventListener('click',e=>{e.stopPropagation();downloadBlockImage(el,title.replace(/\s+/g,' ').trim(),b);});
-    el.insertBefore(b, el.firstChild);
+    b.addEventListener('click',e=>{e.stopPropagation();downloadBallImage(nodes,title,b);});
+    parent.insertBefore(b, nodes[0]);
   });
 }
 
@@ -2741,7 +2738,7 @@ function renderDLResult(dlResult){
         // 再加 white-space:nowrap 兜底——就算还是不够，也是整行等比收缩，
         // 不会出现"一张卡片里球换行"这种断裂感。
         const _d3Ball = (cls,n)=>`<span class="${cls}" style="width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;${cls==='ball-r'?'background:#8b1a1a;':''}">${n}</span>`;
-        html += `<div style="display:flex; flex-wrap:nowrap; gap:8px; align-items:flex-start;">`;
+        html += `<div class="ball-flex" style="display:flex; flex-wrap:nowrap; gap:8px; align-items:flex-start;">`;
         html += `<div style="flex:1 1 0; min-width:0;">`;
         html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
         d3Rl.ppo_groups.forEach((g,i)=>{
@@ -2759,7 +2756,7 @@ function renderDLResult(dlResult){
         html += `</div>`;
         html += renderD3SampleStats(d3Rl.sampled_stats, (d3Rl.sampled_groups||[]).length);
       } else if(d3Rl.ppo_pred){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO预测组合：</span></div>`;
+        html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐组合：</span></div>`;
         html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
       }
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${d3Rl.note||''}</div>`;
@@ -2816,7 +2813,7 @@ function renderDLResult(dlResult){
         for(const n of [4,5,6,9,10]){
           const nums = kl8Rl.picks_by_n[n]||kl8Rl.picks_by_n[String(n)];
           if(!nums || !nums.length) continue;
-          html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${playNames[n]}：</span>`;
+          html += `<div class="ball-line" style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${playNames[n]}：</span>`;
           html += nums.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
           html += `</div>`;
         }
@@ -2879,7 +2876,7 @@ function renderDLResult(dlResult){
           ssqRl.red_core.forEach(n=>{ html += `<span style="display:inline-block;background:#c81e1e;color:#fff;border-radius:4px;padding:1px 7px;margin-right:5px;font-weight:700;">${String(n).padStart(2,'0')}</span>`; });
           html += `　候选池${ssqRl.red_pool?.length||'—'}球</div>`;
         }
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐（${ssqRl.ppo_groups.length}注，模型预测${nBlue}个蓝球候选）：</span></div>`;
+        html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐（${ssqRl.ppo_groups.length}注，${nBlue}个蓝球候选）：</span></div>`;
         ssqRl.ppo_groups.forEach((g,i)=>{
           html += `<div class="rec-group">第${i+1}注：`;
           (g.red||[]).forEach(n=>{ html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`; });
@@ -2889,7 +2886,7 @@ function renderDLResult(dlResult){
           html += `</div>`;
         });
       } else if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
-        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">PPO推荐整注：</span></div>`;
+        html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐整注：</span></div>`;
         html += `<div class="rec-group" style="display:block;">`;
         (ssqRl.ppo_red_selected||[]).forEach(n=>{
           html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`;
