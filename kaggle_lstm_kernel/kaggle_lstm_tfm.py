@@ -806,7 +806,25 @@ def train_encoder(model_ctor, X, Y_list, epochs=60, lr=5e-4, batch_size=32, hold
             logits_list, last_h = prod_model(Xt_full[-1:], return_hidden=True)
         probs_list = [torch.softmax(lg,dim=1)[0].cpu().numpy() for lg in logits_list]
 
-    return prod_model, hidden_states, last_h.cpu().numpy()[0], probs_list, acc_list, baseline_list, is_warm_start
+    # ── 样本外对数损失所需的原始材料：生产模型在RL保留区(训练和早停都没碰过)上的概率 ──
+    # 准确率(argmax是否猜对)在这些接近随机的目标上全是噪声；对数损失看的是"给真实结果的概率"，
+    # 连续、灵敏，且可以跟"均匀随机"和"只看历史频率"两条基线直接比较。
+    holdout_diag = None
+    try:
+        with torch.no_grad():
+            if n - n_usable > 0:
+                _lg = prod_model(torch.FloatTensor(X[n_usable:]).to(DEVICE))
+                holdout_diag = {
+                    'probs': [torch.softmax(l, dim=1).cpu().numpy() for l in _lg],
+                    'y': [y[n_usable:] for y in Y_list],
+                    # 频率基线：只用训练可用区的标签频率（拉普拉斯平滑），代表"完全不看特征"的最佳常数预测
+                    'freq': [(np.bincount(y[:n_usable], minlength=l.shape[1])[:l.shape[1]] + 1.0)
+                             / (len(y[:n_usable]) + l.shape[1]) for y, l in zip(Y_list, _lg)],
+                }
+    except Exception as _e:
+        print(f"      [样本外对数损失] 取材失败: {_e}")
+
+    return prod_model, hidden_states, last_h.cpu().numpy()[0], probs_list, acc_list, baseline_list, is_warm_start, holdout_diag
 
 # ══════════════════════════════════════════════════════
 #  主流程
@@ -985,7 +1003,7 @@ for game, (feat_fn, targets) in configs.items():
         except Exception as e:
             print(f"    ! 读取上次meta失败({e})，改为全量训练")
 
-    lstm_m, lstm_h, _, lstm_p_list, lstm_acc_list, lstm_baseline_list, lstm_warm = train_encoder(
+    lstm_m, lstm_h, _, lstm_p_list, lstm_acc_list, lstm_baseline_list, lstm_warm, lstm_hd = train_encoder(
         lambda: LSTMEncoder(fd, hidden_dim=64, output_dims=nc_list), X, Y_list, epochs=20,
         warm_start_path=lstm_warm_path, predict_X=predict_X, n_records=len(records))
     for i, tname in enumerate(tnames):
@@ -993,13 +1011,51 @@ for game, (feat_fn, targets) in configs.items():
               f"提升{round(lstm_acc_list[i]-lstm_baseline_list[i],1)}%）")
     print(f"    LSTM 主干 {'[热启动微调]' if lstm_warm else '[全量训练]'}")
 
-    tfm_m, tfm_h, _, tfm_p_list, tfm_acc_list, tfm_baseline_list, tfm_warm = train_encoder(
+    tfm_m, tfm_h, _, tfm_p_list, tfm_acc_list, tfm_baseline_list, tfm_warm, tfm_hd = train_encoder(
         lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dims=nc_list), X, Y_list, epochs=20,
         warm_start_path=tfm_warm_path, predict_X=predict_X, n_records=len(records))
     for i, tname in enumerate(tnames):
         print(f"    [{tname}] TFM  准确率: {tfm_acc_list[i]}%（基线{tfm_baseline_list[i]}%，"
               f"提升{round(tfm_acc_list[i]-tfm_baseline_list[i],1)}%）")
     print(f"    TFM  主干 {'[热启动微调]' if tfm_warm else '[全量训练]'}")
+
+    # ══ 样本外对数损失对比：这一版 DL 到底有没有学到东西 ══
+    # 比较对象（都在RL保留区上算，模型训练/早停都没碰过这段）：
+    #   均匀随机 = ln(类别数)；历史频率 = 只用训练区标签频率的常数预测；LSTM / TFM / 两者按0.6:0.4融合。
+    # 数值越低越好。关键看"融合 对比 历史频率"的差：>0 才说明比不看特征的常数预测强；
+    # z = 差的均值 / 标准误（逐期配对），|z|<2 基本等同于没有差别。
+    # 想比较新旧版本：对同一份history分别跑两个版本的脚本，看这张表里的"融合"那一列谁更低。
+    holdout_report = {}
+    try:
+        if lstm_hd and tfm_hd and len(lstm_hd['y'][0]) > 0:
+            def _ll_each(p, y): return -np.log(np.clip(p[np.arange(len(y)), y], 1e-9, 1.0))
+            nh = len(lstm_hd['y'][0])
+            print(f"    [样本外对数损失] RL保留区{nh}期（越低越好；差>0表示比\"历史频率\"强）")
+            print(f"      {'目标':<14}{'均匀':>8}{'频率':>8}{'LSTM':>8}{'TFM':>8}{'融合':>8}{'融合-频率':>10}{'z':>7}")
+            _gains = []
+            for i, tname in enumerate(tnames):
+                y = lstm_hd['y'][i]
+                nc_i = lstm_hd['probs'][i].shape[1]
+                pf = np.tile(lstm_hd['freq'][i], (len(y), 1))
+                pe = 0.6 * lstm_hd['probs'][i] + 0.4 * tfm_hd['probs'][i]
+                l_f, l_l, l_t, l_e = (_ll_each(p, y) for p in (pf, lstm_hd['probs'][i], tfm_hd['probs'][i], pe))
+                d = l_f - l_e                      # 逐期：频率基线损失 - 融合损失（>0 表示融合更好）
+                z = float(d.mean() / (d.std(ddof=1) / np.sqrt(len(d)) + 1e-12)) if len(d) > 2 else 0.0
+                _gains.append(float(d.mean()))
+                holdout_report[tname] = {
+                    'n': int(nh), 'uniform': round(float(np.log(nc_i)), 4), 'freq': round(float(l_f.mean()), 4),
+                    'lstm': round(float(l_l.mean()), 4), 'tfm': round(float(l_t.mean()), 4),
+                    'ensemble': round(float(l_e.mean()), 4), 'ens_minus_freq': round(float(d.mean()), 4), 'z': round(z, 2)}
+                print(f"      {tname:<14}{np.log(nc_i):>8.4f}{l_f.mean():>8.4f}{l_l.mean():>8.4f}{l_t.mean():>8.4f}"
+                      f"{l_e.mean():>8.4f}{d.mean():>+10.4f}{z:>+7.1f}")
+            _n_pos = sum(1 for g in _gains if g > 0)
+            _n_sig = sum(1 for t in holdout_report.values() if t['z'] >= 2)
+            print(f"      小结：{len(_gains)}个目标里 融合比频率强的 {_n_pos} 个，其中 z≥2(显著) {_n_sig} 个；"
+                  f"平均差 {np.mean(_gains):+.4f}。")
+            print(f"      解读：显著的个数≈0 且平均差≈0 → 这版DL没有学到超出历史频率的东西（彩票接近随机时这是正常结果）；"
+                  f"{len(_gains)}个目标里碰巧有1个 z≥2 属于多重比较下的正常偶然。")
+    except Exception as _e:
+        print(f"    [样本外对数损失] 计算失败: {_e}")
 
     # 保存权重（供每日RL加载，也供下次本脚本运行时热启动微调）——
     # 现在只有一套主干权重需要存，不再是"存第一个、丢其余六个"
@@ -1030,6 +1086,7 @@ for game, (feat_fn, targets) in configs.items():
             'ensemble_pred': int(pred_class) + offset,
             'confidence': round(float(max(ens))*100,1),
             'probs': {str(int(c)+offset):round(float(p)*100,1) for c,p in zip(classes,ens)},
+            'holdout_logloss': holdout_report.get(tname),   # 样本外对数损失对比（均匀/频率/LSTM/TFM/融合），None=没算出来
         }
 
     dl_results[game] = game_results
