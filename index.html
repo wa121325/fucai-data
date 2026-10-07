@@ -4469,15 +4469,26 @@ function extractBottomTextLine(src){
   const d = sctx.getImageData(0,0,sw,sh).data;
   const gray = new Float32Array(sw*sh);
   for(let i=0;i<sw*sh;i++) gray[i] = 0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
-  const sorted = Float32Array.from(gray).sort();
+  const real = []; for(let i=0;i<gray.length;i++){ if(Math.abs(gray[i]-128)>1.5) real.push(gray[i]); }
+  const sorted = Float32Array.from(real.length?real:gray).sort();
   const white = sorted[Math.floor(sorted.length*0.9)];
   const thr = white*0.55;
-  const x0 = Math.floor(sw*0.04), x1 = Math.ceil(sw*0.96);
+  // 标签两端斜切处会带进红/蓝背景的楔形，先按"白色像素足够多的列"确定标签真正的水平范围
+  const wt = white*0.8, wcol = new Float32Array(sw); let wmax=0;
+  for(let x=0;x<sw;x++){ let c=0; for(let y=0;y<sh;y++) if(gray[y*sw+x]>wt) c++; wcol[x]=c; if(c>wmax) wmax=c; }
+  let ex0=0, ex1=sw-1;
+  while(ex0<sw-1 && wcol[ex0] < wmax*0.5) ex0++;
+  while(ex1>ex0 && wcol[ex1] < wmax*0.5) ex1--;
+  const x0 = ex0 + Math.floor((ex1-ex0)*0.03), x1 = ex1 - Math.floor((ex1-ex0)*0.03) + 1;
   const frac = new Float32Array(sh);
   for(let y=0;y<sh;y++){ let c=0; for(let x=x0;x<x1;x++) if(gray[y*sw+x]<thr) c++; frac[y]=c/(x1-x0); }
+  // 阈值按条码峰值自适应：条码与文字间的窄缝、标签边缘残留的少量深色像素都低于它
+  const nz = Array.from(frac).filter(v=>v>0.01).sort((a,b)=>a-b);
+  const peak = nz.length ? nz[Math.min(nz.length-1, Math.floor(nz.length*0.97))] : 0;
+  const bthr = Math.max(0.05, 0.2*peak);
   const bands=[]; let st=-1;
   for(let y=0;y<=sh;y++){
-    const on = y<sh && frac[y]>0.05;
+    const on = y<sh && frac[y]>bthr;
     if(on && st<0) st=y;
     if(!on && st>=0){
       if(bands.length && st-bands[bands.length-1][1] <= 2) bands[bands.length-1][1]=y;
@@ -4486,22 +4497,26 @@ function extractBottomTextLine(src){
     }
   }
   // 贴着上/下边缘的深色带是标签边框或背景，不是文字
-  const tall = bands.filter(b=> b[1]-b[0] >= sh*0.12 && b[0] > 1 && b[1] < sh-2);
+  // 标签占整幅画布的比例不定（旋转后画布更大），所以"够高"按最高那条带的相对高度判断
+  let realRows=0;
+  for(let y=0;y<sh;y++){ let c=0; for(let x=ex0;x<=ex1;x++) if(Math.abs(gray[y*sw+x]-128)>1.5) c++; if(c>0.3*(ex1-ex0+1)) realRows++; }
+  const maxBand = bands.reduce((m,b)=>Math.max(m,b[1]-b[0]),0);
+  const tall = bands.filter(b=> b[1]-b[0] >= Math.max(3, maxBand*0.4) && b[0] > 1 && b[1] < sh-2);
   if(!tall.length) return [];
   let [bs,be] = tall[tall.length-1];
   const mk = (a,b)=>{
     // 横向：只保留有笔画的列；整列几乎全黑的是标签边缘/背景，要去掉（否则会被读成多余字符）
     let xa=-1, xb=-1;
-    for(let x=0;x<sw;x++){
+    for(let x=ex0;x<=ex1;x++){
       let c=0; for(let y=a;y<b;y++) if(gray[y*sw+x]<thr) c++;
       const f=c/(b-a);
       if(f>0.02 && f<0.6){ if(xa<0) xa=x; xb=x; }
     }
-    if(xa<0){ xa=0; xb=sw-1; }
+    if(xa<0){ xa=ex0; xb=ex1; }
     const hpad = Math.round((b-a)*0.5);
     const cx0 = Math.max(0, Math.round((xa-hpad)/sc)), cx1 = Math.min(w, Math.round((xb+hpad)/sc));
     const cw = Math.max(1, cx1-cx0);
-    const pad = Math.round((b-a)*0.06);
+    const pad = Math.round((b-a)*0.08);
     const sy = Math.max(0, Math.round((a-pad)/sc)), ey = Math.min(h, Math.round((b+pad)/sc));
     const lh = Math.max(1, ey-sy);
     const outH = 80, k = outH/lh;
@@ -4515,7 +4530,7 @@ function extractBottomTextLine(src){
   };
   const res = [mk(bs,be)];
   // 条码与文字行间隙太小被合并成一条厚带时，再给一个"只取厚带下部"的候选
-  if(be-bs > sh*0.42) res.push(mk(be-Math.round(sh*0.30), be));
+  if(be-bs > Math.max(realRows,1)*0.42) res.push(mk(be-Math.round(Math.max(realRows,1)*0.30), be));
   return res;
 }
 /* 在整张照片里找白色标签（大面积、扁长的近白连通区域），返回标签区域画布 */
@@ -4543,40 +4558,96 @@ function locateWhiteLabel(img){
     if(!mask[s]||lab[s]) continue;
     const id=++nid;
     let sp=0; stack[sp++]=s; lab[s]=id;
-    let area=0,minx=w,miny=h,maxx=0,maxy=0;
+    let area=0,minx=w,miny=h,maxx=0,maxy=0,Sx=0,Sy=0,Sxx=0,Syy=0,Sxy=0;
     while(sp){
       const p=stack[--sp]; const x=p%w, y=(p/w)|0; area++;
+      Sx+=x;Sy+=y;Sxx+=x*x;Syy+=y*y;Sxy+=x*y;
       if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
       if(x>0&&mask[p-1]&&!lab[p-1]){lab[p-1]=id;stack[sp++]=p-1;}
       if(x<w-1&&mask[p+1]&&!lab[p+1]){lab[p+1]=id;stack[sp++]=p+1;}
       if(y>0&&mask[p-w]&&!lab[p-w]){lab[p-w]=id;stack[sp++]=p-w;}
       if(y<h-1&&mask[p+w]&&!lab[p+w]){lab[p+w]=id;stack[sp++]=p+w;}
     }
-    const bw=maxx-minx+1, bh=maxy-miny+1;
-    if(area>=w*h*0.02 && bw/bh>=1.5 && bw>=w*0.3 && (!best||area>best.area)) best={id,area,minx,miny,maxx,maxy};
+    // 用二阶矩求主轴方向与扁长程度（任意倾斜角都适用，不依赖外接框的宽高比）
+    const mx_=Sx/area, my_=Sy/area;
+    const cxx=Sxx/area-mx_*mx_, cyy=Syy/area-my_*my_, cxy=Sxy/area-mx_*my_;
+    const tr=cxx+cyy, dt=Math.sqrt(Math.max(0,((cxx-cyy)/2)**2+cxy*cxy));
+    const l1=tr/2+dt, l2=Math.max(1e-6,tr/2-dt);
+    const elong=Math.sqrt(l1/l2);
+    const pang=0.5*Math.atan2(2*cxy,cxx-cyy);   // 主轴与水平方向夹角（y向下为正）
+    if(area>=w*h*0.012 && elong>=2.2 && Math.sqrt(12*l1)>=w*0.25 && (!best||area>best.area)) best={id,area,minx,miny,maxx,maxy,pang};
   }
   if(!best) return null;
-  // 用标签上下沿拟合倾斜角（最小二乘：列号→上沿/下沿 y）
-  let sx=0,sy=0,sxx=0,sxy=0,n=0;
-  for(let x=best.minx;x<=best.maxx;x++){
-    let top=-1,bot=-1;
-    for(let y=best.miny;y<=best.maxy;y++){ if(lab[y*w+x]===best.id){ if(top<0) top=y; bot=y; } }
-    if(top<0||bot-top<(best.maxy-best.miny)*0.3) continue;
-    const yc=(top+bot)/2; sx+=x; sy+=yc; sxx+=x*x; sxy+=x*yc; n++;
-  }
-  let ang=0;
-  if(n>10){ const den=n*sxx-sx*sx; if(den>0){ ang=Math.atan((n*sxy-sx*sy)/den); } }
-  if(Math.abs(ang)>20*Math.PI/180) ang=0;
+  // 逐列取标签上沿/下沿（换算回原图坐标），用来估计倾斜角和透视变形
   const m=2;
   const rx=Math.max(0,Math.floor((best.minx-m)/sc)), ry=Math.max(0,Math.floor((best.miny-m)/sc));
   const rw=Math.min(W0-rx,Math.ceil((best.maxx-best.minx+1+2*m)/sc)), rh=Math.min(H0-ry,Math.ceil((best.maxy-best.miny+1+2*m)/sc));
+  const tops=[], bots=[];
+  for(let x=best.minx;x<=best.maxx;x++){
+    let top=-1,bot=-1;
+    for(let y=best.miny;y<=best.maxy;y++){ if(lab[y*w+x]===best.id){ if(top<0) top=y; bot=y; } }
+    if(top<0||bot-top<(best.maxy-best.miny)*0.25) continue;
+    const xc=x/sc-rx;
+    tops.push([xc, top/sc-ry]); bots.push([xc, (bot+1)/sc-ry]);
+  }
+  const fit=(pts)=>{   // 最小二乘直线 y=a*x+b，剔除一次离群点
+    for(let pass=0;pass<2;pass++){
+      let sx=0,sy=0,sxx=0,sxy=0,n=pts.length;
+      if(n<10) return null;
+      pts.forEach(([x,y])=>{sx+=x;sy+=y;sxx+=x*x;sxy+=x*y;});
+      const den=n*sxx-sx*sx; if(den<=0) return null;
+      const a=(n*sxy-sx*sy)/den, b=(sy-a*sx)/n;
+      if(pass===1) return {a,b};
+      const res=pts.map(([x,y])=>Math.abs(y-(a*x+b)));
+      const sd=Math.sqrt(res.reduce((t,v)=>t+v*v,0)/n)||1;
+      pts=pts.filter((pt,k)=>res[k]<=2*sd+2);
+    }
+  };
+  const lt=fit(tops), lb=fit(bots);
+  const angPCA = best.pang;
+  const angEdge = (lt && lb) ? Math.atan((lt.a+lb.a)/2) : angPCA;
   const crop=document.createElement('canvas'); crop.width=rw; crop.height=rh;
-  crop.getContext('2d').drawImage(img,rx,ry,rw,rh,0,0,rw,rh);
-  if(Math.abs(ang) < 0.3*Math.PI/180) return crop;
-  // 转正：绕中心反向旋转，空出的角用白色填充
-  const out=document.createElement('canvas'); out.width=rw; out.height=rh;
-  const o=out.getContext('2d'); o.fillStyle='#fff'; o.fillRect(0,0,rw,rh);
-  o.translate(rw/2,rh/2); o.rotate(-ang); o.drawImage(crop,-rw/2,-rh/2);
+  const cctx=crop.getContext('2d');
+  cctx.drawImage(img,rx,ry,rw,rh,0,0,rw,rh);
+  // 把标签上下沿之外的背景（红蓝图案、桌面）涂成中灰，避免被当成文字带
+  if(lt && lb){
+    cctx.fillStyle='#808080';
+    for(let x=0;x<rw;x+=3){
+      const y0=lt.a*(x+1.5)+lt.b, y1=lb.a*(x+1.5)+lb.b;
+      if(y0>0) cctx.fillRect(x,0,3,Math.min(rh,y0));
+      if(y1<rh) cctx.fillRect(x,Math.max(0,y1),3,rh-Math.max(0,y1));
+    }
+  }
+  return {crop, ang:angPCA, angEdge, lt, lb};
+}
+/* 绕中心旋转标签画布（空出的角填中灰，不会被当成白色标签或文字） */
+function rotateLabel(crop, ang){
+  if(Math.abs(ang) < 0.2*Math.PI/180) return crop;
+  const rw=crop.width, rh=crop.height;
+  // 画布放大到能容纳旋转后的整个标签（大角度时直接旋转会把两端切掉）
+  const W=Math.ceil(Math.abs(rw*Math.cos(ang))+Math.abs(rh*Math.sin(ang)))+4;
+  const H=Math.ceil(Math.abs(rw*Math.sin(ang))+Math.abs(rh*Math.cos(ang)))+4;
+  const out=document.createElement('canvas'); out.width=W; out.height=H;
+  const o=out.getContext('2d'); o.fillStyle='#808080'; o.fillRect(0,0,W,H);
+  o.translate(W/2,H/2); o.rotate(-ang); o.drawImage(crop,-rw/2,-rh/2);
+  return out;
+}
+/* 按上下沿直线逐列"拉直"：同时修正倾斜和手机斜拍造成的梯形透视 */
+function straightenLabel(info){
+  const {crop, lt, lb} = info;
+  if(!lt || !lb) return null;
+  const rw=crop.width;
+  const hs=[]; for(let x=0;x<rw;x+=50) hs.push((lb.a*x+lb.b)-(lt.a*x+lt.b));
+  const H=Math.round(hs.reduce((t,v)=>t+v,0)/hs.length);
+  if(!(H>20)) return null;
+  const out=document.createElement('canvas'); out.width=rw; out.height=H;
+  const o=out.getContext('2d'); o.fillStyle='#808080'; o.fillRect(0,0,rw,H);
+  const step=3;
+  for(let x=0;x<rw;x+=step){
+    const xm=x+step/2, y0=lt.a*xm+lt.b, y1=lb.a*xm+lb.b;
+    if(y1-y0<4) continue;
+    o.drawImage(crop, x, Math.max(0,y0), step, Math.min(crop.height,y1)-Math.max(0,y0), x, 0, step, H);
+  }
   return out;
 }
 const CODE_WL='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-';
@@ -4591,19 +4662,39 @@ async function recognizeCodeLine(worker, lineCanvas){
       if(c) cands.push(c);
     }catch(e){}
   }
-  if(!cands.length) return '';
-  const cnt={}; cands.forEach(c=>cnt[c]=(cnt[c]||0)+1);
-  cands.sort((a,b)=> ticketCodeScore(b)-ticketCodeScore(a) || cnt[b]-cnt[a] || b.length-a.length);
-  return cands[0];
+  return cands;   // 每种模式一个候选，交给上层跨变体投票
 }
-async function recognizeCodeSmart(worker, img){
-  const label = locateWhiteLabel(img);
-  const lines = label ? extractBottomTextLine(label) : [];
-  for(const line of lines){
-    const got = await recognizeCodeLine(worker, line);
-    if(ticketCodeScore(got) >= 2) return got;
+async function recognizeCodeSmart(worker, img, onProgress){
+  const info = locateWhiteLabel(img);
+  if(!info) return '';
+  // 依次尝试多种"摆正"假设：按边缘估计的角度 → 逐列拉直(透视) → 在估计角度上再加减几度
+  // 手机歪着拍时，估计角度偶尔会不准，多试几种比单押一个更稳；任何一种读出完整编号就停
+  const D=Math.PI/180;
+  const variants = [
+    ()=>rotateLabel(info.crop, info.ang),
+    ()=> Math.abs(info.angEdge-info.ang) > 1.5*D ? rotateLabel(info.crop, info.angEdge) : null,
+    ()=>straightenLabel(info),
+    ...[3,-3,6,-6].map(dg=>()=>rotateLabel(info.crop, info.ang + dg*D)),
+  ];
+  const tally={};   // 候选 → 出现次数；完全符合标准格式的结果出现 2 次（不同模式/不同摆正方式互相印证）才采用
+  const add=(c)=>{ tally[c]=(tally[c]||0)+1; return tally[c]; };
+  let vi=0;
+  for(const mkv of variants){
+    vi++;
+    if(onProgress && vi>1) onProgress(`正在尝试其它摆正角度（${vi}/${variants.length}）…`);
+    let lab=null; try{ lab = mkv(); }catch(e){}
+    if(!lab) continue;
+    const lines = extractBottomTextLine(lab);
+    for(const line of lines){
+      const cands = await recognizeCodeLine(worker, line);
+      for(const c of cands){
+        if(ticketCodeScore(c) >= 2 && add(c) >= 2 && ticketCodeScore(c) >= 3) return c;
+      }
+    }
   }
-  return '';
+  // 没有任何结果得到印证：取得分最高、出现次数最多的
+  const all=Object.keys(tally).sort((a,b)=> ticketCodeScore(b)-ticketCodeScore(a) || tally[b]-tally[a]);
+  return all[0]||'';
 }
 
 async function onPhotoLoaded(img){
@@ -4627,7 +4718,7 @@ async function onPhotoLoaded(img){
     // 编号：先走"定位白色标签→只取最下面一行文字→语法纠错"的精确流程
     if(scanCaptureMode === 'code'){
       statusEl.textContent = '正在定位编号行…';
-      const smart = await recognizeCodeSmart(worker, img);
+      const smart = await recognizeCodeSmart(worker, img, (t)=>{ statusEl.textContent = t; });
       if(smart){
         document.getElementById(cfg.fieldId).value = smart;
         statusEl.className = 'status ok';
@@ -4830,7 +4921,8 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
       // 框里若含条码，先切出最下面的文字行再识别；切不出就把整个框当一行
       const lns = extractBottomTextLine(canvas);
       for(const cv of [...lns, canvas]){
-        const got = await recognizeCodeLine(worker, cv);
+        const gots = (await recognizeCodeLine(worker, cv)).sort((a,b)=>ticketCodeScore(b)-ticketCodeScore(a));
+        const got = gots[0] || '';
         if(ticketCodeScore(got) >= 2){ cleaned = got; break; }
         if(!cleaned && got) cleaned = got;
       }
