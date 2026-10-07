@@ -2430,6 +2430,70 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
 ═══════════════════════════════════════════════════ */
 document.getElementById('loadPredictBtn').addEventListener('click', loadPrediction);
 
+/* ═══ 预测块下载为图片（自动附带默认二维码）═══ */
+async function downloadBlockImage(block, title, btn){
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.textContent='生成中…'; btn.disabled=true; }
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:640px;background:#fff;padding:16px;box-sizing:border-box;color:#222;font-family:inherit;';
+  const clone = block.cloneNode(true);
+  clone.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
+  clone.style.maxWidth='none';
+  const head = document.createElement('div');
+  head.style.cssText='font-size:15px;font-weight:700;margin-bottom:8px;color:#1a1a2e;';
+  head.textContent = title;
+  if(!block.querySelector('h2')) wrap.appendChild(head);
+  wrap.appendChild(clone);
+  const qrImg = (state.qr && state.qr.image) || '';
+  if(qrImg){
+    const q = document.createElement('div');
+    q.style.cssText='text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
+    q.innerHTML = `<img src="${qrImg}" style="width:150px;height:150px;display:inline-block;">`
+      + (state.qr.caption ? `<div style="font-size:12px;color:#666;margin-top:4px;">${state.qr.caption.replace(/</g,'&lt;')}</div>` : '');
+    wrap.appendChild(q);
+  }
+  document.body.appendChild(wrap);
+  await Promise.all([...wrap.querySelectorAll('img')].map(im=> im.complete ? 0 : new Promise(r=>{im.onload=im.onerror=r;})));
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  try{
+    const canvas = await html2canvas(wrap,{backgroundColor:'#ffffff',scale:2,useCORS:true,allowTaint:true});
+    const a = document.createElement('a');
+    a.download = `预测_${title.replace(/[\\\/:*?"<>|\s]+/g,'_')}_${new Date().toISOString().slice(0,10)}.png`;
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+  }catch(e){ alert('生成图片失败：'+e.message); }
+  finally{ document.body.removeChild(wrap); if(btn){ btn.textContent=old; btn.disabled=false; } }
+}
+function attachBlockDownloads(){
+  const items = [];
+  const bt = document.getElementById('backtestPanel');
+  if(bt && bt.style.display!=='none') items.push([bt,'昨日预测回测结果']);
+  ['gamePredict3d','gamePredictSSQ','gamePredictKL8'].forEach(id=>{
+    const p=document.getElementById(id);
+    const panel=p && p.querySelector('.panel');
+    if(panel && p.style.display!=='none') items.push([panel,(panel.querySelector('h2')||{}).textContent||id]);
+  });
+  const dl = document.getElementById('dlResultContent');
+  if(dl){
+    let sec='';
+    [...dl.children].forEach(ch=>{
+      if(ch.classList.contains('sectionTitle')){ sec=ch.textContent.replace(/[（(].*$/,'').replace(/[^\u4e00-\u9fa5A-Za-z0-9+ ]/g,' ').replace(/\s+/g,' ').trim(); return; }
+      if(ch.tagName!=='DIV' || ch.textContent.trim().length<20 || ch.classList.contains('status')) return;
+      const g=(ch.firstElementChild&&ch.firstElementChild.textContent||'').trim().slice(0,10);
+      items.push([ch, `${sec} ${g}`.trim()]);
+    });
+  }
+  items.forEach(([el,title])=>{
+    if(el.querySelector(':scope > .blk-dl-btn')) return;
+    const b=document.createElement('button');
+    b.className='blk-dl-btn';
+    b.textContent='🖼 下载图片';
+    b.style.cssText='float:right;font-size:11px;padding:3px 8px;margin:0 0 4px 6px;border:1px solid #bbb;border-radius:6px;background:#fff;color:#444;cursor:pointer;';
+    b.addEventListener('click',e=>{e.stopPropagation();downloadBlockImage(el,title.replace(/\s+/g,' ').trim(),b);});
+    el.insertBefore(b, el.firstChild);
+  });
+}
+
 async function loadPrediction(){
   const statusEl=document.getElementById('predictStatus');
   const btn=document.getElementById('loadPredictBtn');
@@ -2441,13 +2505,21 @@ async function loadPrediction(){
   }
   btn.disabled=true; statusEl.className='status'; statusEl.textContent='正在并行加载三份预测文件…';
 
+  // 失败时记录【真实原因】，不再一律吞成 null：原来网络不通、404、JSON格式坏了
+  // 全都表现为"加载失败，先去触发 kaggle_fucai.py"，会把人引到错误的方向上。
+  const fetchErrs = {};
   const fetchJson = async (name) => {
     const url = `https://raw.githubusercontent.com/${repo}/main/${name}?t=${Date.now()}`;
     try{
       const resp = await fetch(url);
-      if(!resp.ok) return null;
-      return await resp.json();
-    } catch(e){ return null; }
+      if(!resp.ok){ fetchErrs[name] = `HTTP ${resp.status}`; return null; }
+      const txt = await resp.text();
+      try{ return JSON.parse(txt); }
+      catch(pe){ fetchErrs[name] = `文件内容不是合法JSON（${String(pe.message).slice(0,50)}）`; return null; }
+    } catch(e){
+      fetchErrs[name] = `网络请求失败（${String(e && e.message || e).slice(0,40)}；可能是当前网络访问不了 raw.githubusercontent.com）`;
+      return null;
+    }
   };
 
   try{
@@ -2459,7 +2531,7 @@ async function loadPrediction(){
     ]);
 
     if(!mlData){
-      throw new Error('prediction.json 加载失败 — 先手动触发一次 kaggle_fucai.py 运行');
+      throw new Error('prediction.json 加载失败：' + (fetchErrs['prediction.json'] || '未知原因'));
     }
 
     // 拼装成原有渲染函数期望的结构，保持renderBacktest/renderGamePredict/renderDLResult不用改
@@ -2472,19 +2544,31 @@ async function loadPrediction(){
     };
     window._lastPrediction = combined;
 
-    renderBacktest(combined.backtest||{});
-    renderGamePredict('3d',  combined.predictions?.['3d']);
-    renderGamePredict('ssq', combined.predictions?.ssq);
-    renderGamePredict('kl8', combined.predictions?.kl8);
-    if(combined.dl_result) renderDLResult(combined.dl_result);
+    // 每一块单独 try/catch：某一块渲染出错(比如数据结构变了)只影响它自己，
+    // 其余部分照常显示，并且把出错的是哪一块、报了什么错写在状态栏里，方便定位。
+    const renderErrs = [];
+    const safe = (label, fn) => { try{ fn(); } catch(e){ renderErrs.push(`${label}：${e.message}`); console.error('渲染失败', label, e); } };
+    safe('回测',  () => renderBacktest(combined.backtest||{}));
+    safe('3D',    () => renderGamePredict('3d',  combined.predictions?.['3d']));
+    safe('双色球', () => renderGamePredict('ssq', combined.predictions?.ssq));
+    safe('快乐8',  () => renderGamePredict('kl8', combined.predictions?.kl8));
+    safe('DL/RL', () => { if(combined.dl_result) renderDLResult(combined.dl_result); });
 
     document.getElementById('predictContent').style.display='block';
+    try{ attachBlockDownloads(); }catch(e){ console.error('下载按钮', e); }
 
     const parts = [`基础ML更新于 ${mlData.updated_at||'未知'}`];
     if(lstmData) parts.push(`LSTM/TFM更新于 ${lstmData.updated_at||'未知'}`);
+    else parts.push(`LSTM/TFM读取失败：${fetchErrs['dl_lstm_tfm.json']||'文件不存在'}`);
     if(rlData)   parts.push(`RL更新于 ${rlData.updated_at||'未知'}`);
-    statusEl.className='status ok';
-    statusEl.textContent=`✓ 加载成功（${parts.join(' · ')}）`;
+    else parts.push(`RL读取失败：${fetchErrs['dl_rl.json']||'文件不存在'}`);
+    if(renderErrs.length){
+      statusEl.className='status err';
+      statusEl.textContent=`⚠ 数据已读取，但部分内容渲染失败 — ${renderErrs.join('；')}（${parts.join(' · ')}）`;
+    } else {
+      statusEl.className='status ok';
+      statusEl.textContent=`✓ 加载成功（${parts.join(' · ')}）`;
+    }
   } catch(e){
     statusEl.className='status err'; statusEl.textContent='加载失败：'+e.message;
   }
