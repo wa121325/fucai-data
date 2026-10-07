@@ -4432,6 +4432,180 @@ async function tryRecognize(worker, canvas, psm, whitelist, autoExtract){
   } catch(e){ return ''; }
 }
 
+/* ═══ 编号行精确定位 + 纠错（只针对"J0791-26148-0756294-114-3"这一小行）═══
+   问题根源：票面白色标签里，上面是条码、下面才是文字行。框选区域一旦包含条码，
+   Tesseract 会把条码当文字乱读，整行结果就废了。做法：
+   ① 在整张照片里找出白色标签 ② 标签内按行扫描，条码和文字行之间有空白间隔，
+   取最下面一条足够高的"文字带" ③ 只裁这一行、放缩到合适字高再识别
+   ④ 按编号语法纠错（数字位置上的 O→0、I→1 等），并去掉首尾多余横线。 */
+function _fixDigits(s){
+  return s.replace(/[OQD]/g,'0').replace(/[IL|]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/Z/g,'2').replace(/G/g,'6');
+}
+function normalizeTicketCode(raw){
+  let t = String(raw||'').toUpperCase().replace(/[^A-Z0-9\-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
+  const parts = t.split('-');
+  if(parts.length < 2) return t;
+  parts[0] = parts[0].charAt(0) + _fixDigits(parts[0].slice(1));
+  for(let i=1;i<parts.length;i++) parts[i] = _fixDigits(parts[i]);
+  const joined = parts.join('-');
+  const m5 = joined.match(/^[A-Z]\d{3,6}(?:-\d{1,8}){4}/);
+  return m5 ? m5[0] : joined;   // 第5段之后的多余字符（边缘噪点）直接丢弃
+}
+function ticketCodeScore(c){
+  // 3=完全符合 5段(字母+4位-5位-7位-3位-1位)；2=5段且各段全数字；1=段数≥4；0=其它
+  if(/^[A-Z]\d{4}-\d{5}-\d{7}-\d{3}-\d$/.test(c)) return 3;
+  if(/^[A-Z]\d{3,6}(-\d{1,8}){4}$/.test(c)) return 2;
+  if(c.split('-').length >= 4) return 1;
+  return 0;
+}
+/* 在任意画布里找"最下面一条足够高的文字带"，返回裁好并缩放到合适字高的灰度画布 */
+function extractBottomTextLine(src){
+  const w = src.width, h = src.height;
+  const sc = Math.min(1, 400 / h);
+  const sw = Math.max(1, Math.round(w*sc)), sh = Math.max(1, Math.round(h*sc));
+  const sm = document.createElement('canvas'); sm.width=sw; sm.height=sh;
+  const sctx = sm.getContext('2d', {willReadFrequently:true});
+  sctx.drawImage(src,0,0,sw,sh);
+  const d = sctx.getImageData(0,0,sw,sh).data;
+  const gray = new Float32Array(sw*sh);
+  for(let i=0;i<sw*sh;i++) gray[i] = 0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
+  const sorted = Float32Array.from(gray).sort();
+  const white = sorted[Math.floor(sorted.length*0.9)];
+  const thr = white*0.55;
+  const x0 = Math.floor(sw*0.04), x1 = Math.ceil(sw*0.96);
+  const frac = new Float32Array(sh);
+  for(let y=0;y<sh;y++){ let c=0; for(let x=x0;x<x1;x++) if(gray[y*sw+x]<thr) c++; frac[y]=c/(x1-x0); }
+  const bands=[]; let st=-1;
+  for(let y=0;y<=sh;y++){
+    const on = y<sh && frac[y]>0.05;
+    if(on && st<0) st=y;
+    if(!on && st>=0){
+      if(bands.length && st-bands[bands.length-1][1] <= 2) bands[bands.length-1][1]=y;
+      else bands.push([st,y]);
+      st=-1;
+    }
+  }
+  // 贴着上/下边缘的深色带是标签边框或背景，不是文字
+  const tall = bands.filter(b=> b[1]-b[0] >= sh*0.12 && b[0] > 1 && b[1] < sh-2);
+  if(!tall.length) return [];
+  let [bs,be] = tall[tall.length-1];
+  const mk = (a,b)=>{
+    // 横向：只保留有笔画的列；整列几乎全黑的是标签边缘/背景，要去掉（否则会被读成多余字符）
+    let xa=-1, xb=-1;
+    for(let x=0;x<sw;x++){
+      let c=0; for(let y=a;y<b;y++) if(gray[y*sw+x]<thr) c++;
+      const f=c/(b-a);
+      if(f>0.02 && f<0.6){ if(xa<0) xa=x; xb=x; }
+    }
+    if(xa<0){ xa=0; xb=sw-1; }
+    const hpad = Math.round((b-a)*0.5);
+    const cx0 = Math.max(0, Math.round((xa-hpad)/sc)), cx1 = Math.min(w, Math.round((xb+hpad)/sc));
+    const cw = Math.max(1, cx1-cx0);
+    const pad = Math.round((b-a)*0.06);
+    const sy = Math.max(0, Math.round((a-pad)/sc)), ey = Math.min(h, Math.round((b+pad)/sc));
+    const lh = Math.max(1, ey-sy);
+    const outH = 80, k = outH/lh;
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(cw*k)) + 30; out.height = outH + 30;
+    const octx = out.getContext('2d');
+    octx.fillStyle='#fff'; octx.fillRect(0,0,out.width,out.height);
+    octx.imageSmoothingQuality='high';
+    octx.drawImage(src,cx0,sy,cw,lh,15,15,out.width-30,outH);
+    return out;
+  };
+  const res = [mk(bs,be)];
+  // 条码与文字行间隙太小被合并成一条厚带时，再给一个"只取厚带下部"的候选
+  if(be-bs > sh*0.42) res.push(mk(be-Math.round(sh*0.30), be));
+  return res;
+}
+/* 在整张照片里找白色标签（大面积、扁长的近白连通区域），返回标签区域画布 */
+function locateWhiteLabel(img){
+  const W0=img.naturalWidth, H0=img.naturalHeight;
+  const sc = Math.min(1, 700/Math.max(W0,H0));
+  const w=Math.round(W0*sc), h=Math.round(H0*sc);
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0,w,h);
+  const d=ctx.getImageData(0,0,w,h).data;
+  // 亮度阈值按整张图自适应（暗光/偏黄光下白标签也只有 120~160 的亮度）
+  const mins=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++) mins[i]=Math.min(d[i*4],d[i*4+1],d[i*4+2]);
+  const ms=Uint8Array.from(mins).sort();
+  const p97=ms[Math.floor(ms.length*0.97)];
+  const thrB=Math.max(70, p97*0.72);
+  const mask=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const mx=Math.max(d[i*4],d[i*4+1],d[i*4+2]);
+    mask[i]=(mins[i]>thrB && mx-mins[i] < 0.2*mx+8)?1:0;
+  }
+  const lab=new Int32Array(w*h); let nid=0; let best=null;
+  const stack=new Int32Array(w*h);
+  for(let s=0;s<w*h;s++){
+    if(!mask[s]||lab[s]) continue;
+    const id=++nid;
+    let sp=0; stack[sp++]=s; lab[s]=id;
+    let area=0,minx=w,miny=h,maxx=0,maxy=0;
+    while(sp){
+      const p=stack[--sp]; const x=p%w, y=(p/w)|0; area++;
+      if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+      if(x>0&&mask[p-1]&&!lab[p-1]){lab[p-1]=id;stack[sp++]=p-1;}
+      if(x<w-1&&mask[p+1]&&!lab[p+1]){lab[p+1]=id;stack[sp++]=p+1;}
+      if(y>0&&mask[p-w]&&!lab[p-w]){lab[p-w]=id;stack[sp++]=p-w;}
+      if(y<h-1&&mask[p+w]&&!lab[p+w]){lab[p+w]=id;stack[sp++]=p+w;}
+    }
+    const bw=maxx-minx+1, bh=maxy-miny+1;
+    if(area>=w*h*0.02 && bw/bh>=1.5 && bw>=w*0.3 && (!best||area>best.area)) best={id,area,minx,miny,maxx,maxy};
+  }
+  if(!best) return null;
+  // 用标签上下沿拟合倾斜角（最小二乘：列号→上沿/下沿 y）
+  let sx=0,sy=0,sxx=0,sxy=0,n=0;
+  for(let x=best.minx;x<=best.maxx;x++){
+    let top=-1,bot=-1;
+    for(let y=best.miny;y<=best.maxy;y++){ if(lab[y*w+x]===best.id){ if(top<0) top=y; bot=y; } }
+    if(top<0||bot-top<(best.maxy-best.miny)*0.3) continue;
+    const yc=(top+bot)/2; sx+=x; sy+=yc; sxx+=x*x; sxy+=x*yc; n++;
+  }
+  let ang=0;
+  if(n>10){ const den=n*sxx-sx*sx; if(den>0){ ang=Math.atan((n*sxy-sx*sy)/den); } }
+  if(Math.abs(ang)>20*Math.PI/180) ang=0;
+  const m=2;
+  const rx=Math.max(0,Math.floor((best.minx-m)/sc)), ry=Math.max(0,Math.floor((best.miny-m)/sc));
+  const rw=Math.min(W0-rx,Math.ceil((best.maxx-best.minx+1+2*m)/sc)), rh=Math.min(H0-ry,Math.ceil((best.maxy-best.miny+1+2*m)/sc));
+  const crop=document.createElement('canvas'); crop.width=rw; crop.height=rh;
+  crop.getContext('2d').drawImage(img,rx,ry,rw,rh,0,0,rw,rh);
+  if(Math.abs(ang) < 0.3*Math.PI/180) return crop;
+  // 转正：绕中心反向旋转，空出的角用白色填充
+  const out=document.createElement('canvas'); out.width=rw; out.height=rh;
+  const o=out.getContext('2d'); o.fillStyle='#fff'; o.fillRect(0,0,rw,rh);
+  o.translate(rw/2,rh/2); o.rotate(-ang); o.drawImage(crop,-rw/2,-rh/2);
+  return out;
+}
+const CODE_WL='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-';
+/* 对"只含一行编号"的画布，用两种单行模式各识别一次，纠错后投票取最合格的 */
+async function recognizeCodeLine(worker, lineCanvas){
+  const cands=[];
+  for(const psm of ['7','13']){
+    try{
+      await worker.setParameters({ tessedit_char_whitelist:CODE_WL, tessedit_pageseg_mode:psm });
+      const { data:{ text } } = await worker.recognize(lineCanvas);
+      const c = normalizeTicketCode(text);
+      if(c) cands.push(c);
+    }catch(e){}
+  }
+  if(!cands.length) return '';
+  const cnt={}; cands.forEach(c=>cnt[c]=(cnt[c]||0)+1);
+  cands.sort((a,b)=> ticketCodeScore(b)-ticketCodeScore(a) || cnt[b]-cnt[a] || b.length-a.length);
+  return cands[0];
+}
+async function recognizeCodeSmart(worker, img){
+  const label = locateWhiteLabel(img);
+  const lines = label ? extractBottomTextLine(label) : [];
+  for(const line of lines){
+    const got = await recognizeCodeLine(worker, line);
+    if(ticketCodeScore(got) >= 2) return got;
+  }
+  return '';
+}
+
 async function onPhotoLoaded(img){
   cropImgNaturalW = img.naturalWidth;
   cropImgNaturalH = img.naturalHeight;
@@ -4450,6 +4624,18 @@ async function onPhotoLoaded(img){
   statusEl.className = 'status'; statusEl.textContent = '正在识别，请稍候…';
   try{
     const worker = await ensureScanWorker(workerLangFor(scanCaptureMode));
+    // 编号：先走"定位白色标签→只取最下面一行文字→语法纠错"的精确流程
+    if(scanCaptureMode === 'code'){
+      statusEl.textContent = '正在定位编号行…';
+      const smart = await recognizeCodeSmart(worker, img);
+      if(smart){
+        document.getElementById(cfg.fieldId).value = smart;
+        statusEl.className = 'status ok';
+        statusEl.textContent = `✓ 自动识别成功：${smart}（如有误，可点字段旁「重新框选」手动修正）`;
+        return;
+      }
+      statusEl.textContent = '未找到标准编号行，改用常规识别…';
+    }
     const results = [];
 
     // 候选区域：横向一律取满宽（编号那行常贴近票面左右边缘，
@@ -4640,7 +4826,17 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
     const worker = await ensureScanWorker(workerLangFor(scanCaptureMode));
     // 多策略尝试：原图/对比度增强图 × 单行/块状模式，任一策略提取成功就采用
     let cleaned = '';
-    if(cfg.autoExtract){
+    if(scanCaptureMode === 'code'){
+      // 框里若含条码，先切出最下面的文字行再识别；切不出就把整个框当一行
+      const lns = extractBottomTextLine(canvas);
+      for(const cv of [...lns, canvas]){
+        const got = await recognizeCodeLine(worker, cv);
+        if(ticketCodeScore(got) >= 2){ cleaned = got; break; }
+        if(!cleaned && got) cleaned = got;
+      }
+      if(ticketCodeScore(cleaned) < 2) cleaned = '';
+    }
+    if(!cleaned && cfg.autoExtract){
       for(const [cv, psm] of [[canvas,'7'], [enhanceForOcr(canvas),'7'], [canvas,'6'], [enhanceForOcr(canvas),'11']]){
         const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
         if(got){ cleaned = got; break; }
