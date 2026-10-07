@@ -5,6 +5,10 @@ on:
     - cron: '30 13 * * *'   # UTC 13:30 = 北京时间 21:30
   workflow_dispatch:
 
+env:
+  KERNEL: megskfdbbskeb/fucai-ml-daily
+  DATA_REPO: wa121325/fucai-data     # ML 脚本把 prediction.json 推送到的数据仓库
+
 jobs:
   trigger-kaggle:
     runs-on: ubuntu-latest
@@ -25,27 +29,63 @@ jobs:
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
+          # 先记下"本次触发的时刻"：后面用它判断 prediction.json 是不是【这一轮】产出的
+          echo "START_EPOCH=$(date -u +%s)" >> "$GITHUB_ENV"
           kaggle kernels push -p ./kaggle_kernel/
           echo "✓ 已推送，Kaggle 开始运行"
 
-      - name: 等待运行完成（最多 40 分钟）
+      # ── 为什么要改成这样 ─────────────────────────────────────────────
+      # 原来的写法有两个会让下游 RL 在 ML 还在跑时就启动的漏洞：
+      #  ① push 之后 Kaggle 的状态要过一会儿才从上一次的 COMPLETE 切到 QUEUED/RUNNING，
+      #    第一次查询（60秒后）仍可能读到"上一次的 complete"，脚本就误判"已完成"退出；
+      #  ② 等满 40 分钟超时后写的是 exit 0（成功），下游 RL 照样被触发。
+      # 现在：只有"Kaggle 状态为 complete"并且"prediction.json 的更新时间晚于本次触发时刻"
+      # 两个条件同时成立才算成功；失败/超时一律 exit 1，下游 RL 不会被触发。
+      - name: 等待 ML 真正跑完
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
-          KERNEL="megskfdbbskeb/fucai-ml-daily"
-          echo "监控 $KERNEL …"
-          for i in $(seq 1 40); do
-            sleep 60
-            STATUS=$(kaggle kernels status $KERNEL 2>&1)
-            echo "$(date +'%H:%M:%S') [$i/40] $STATUS"
-            if echo "$STATUS" | grep -qi "complete"; then
-              echo "✓ Kaggle 运行完成"
-              exit 0
-            fi
-            if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then
-              echo "✗ Kaggle 运行失败"
-              exit 1
-            fi
+          fresh() {
+            # prediction.json 的 updated_at（Kaggle 机器是 UTC）是否不早于本次触发时刻(留2分钟余量，因为它只精确到分钟)
+            python3 - "$START_EPOCH" <<'PY'
+          import sys, json, time, urllib.request, calendar
+          start = int(sys.argv[1])
+          url = f"https://raw.githubusercontent.com/{__import__('os').environ['DATA_REPO']}/main/prediction.json?t={int(time.time())}"
+          try:
+              req = urllib.request.Request(url, headers={'Cache-Control': 'no-cache', 'User-Agent': 'ci'})
+              ua = json.loads(urllib.request.urlopen(req, timeout=60).read().decode('utf-8')).get('updated_at', '')
+              ts = calendar.timegm(time.strptime(ua[:16], '%Y-%m-%d %H:%M'))
+              ok = ts >= start - 120
+              print(f"    prediction.json 更新于 {ua} UTC，{'是' if ok else '不是'}本轮产出")
+              sys.exit(0 if ok else 1)
+          except Exception as e:
+              print(f"    读取 prediction.json 失败: {e}")
+              sys.exit(1)
+          PY
+          }
+
+          echo "监控 $KERNEL …（触发时刻 $(date -u -d @$START_EPOCH +'%H:%M:%S') UTC）"
+
+          # 阶段1：等 Kaggle 开始新一轮（最多10分钟）。看到 running/queued 即可进入阶段2；
+          # 一直没看到也不要紧，阶段2 靠数据新鲜度兜底，不会被旧的 COMPLETE 骗过
+          for i in $(seq 1 20); do
+            sleep 30
+            STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
+            echo "$(date +'%H:%M:%S') [启动 $i/20] $STATUS"
+            if echo "$STATUS" | grep -qiE "running|queued"; then break; fi
+            if echo "$STATUS" | grep -qiE "error|cancel|fail"; then echo "✗ Kaggle 运行失败"; exit 1; fi
           done
-          echo "⚠️ 超时 40 分钟"
-          exit 0
+
+          # 阶段2：等完成（最多60分钟）；完成后必须再通过数据新鲜度检查
+          for i in $(seq 1 60); do
+            STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
+            echo "$(date +'%H:%M:%S') [运行 $i/60] $STATUS"
+            if echo "$STATUS" | grep -qiE "error|cancel|fail"; then echo "✗ Kaggle 运行失败"; exit 1; fi
+            if echo "$STATUS" | grep -qi "complete"; then
+              if fresh; then echo "✓ ML 运行完成，且本轮预测已写入数据仓库"; exit 0; fi
+              echo "  状态是 complete 但 prediction.json 还是旧的（多半是上一轮的完成状态），继续等待…"
+            fi
+            sleep 60
+          done
+          echo "✗ 等待超过60分钟，ML 仍未产出本轮结果。按失败处理，下游 RL 不会启动。"
+          exit 1
