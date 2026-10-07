@@ -1269,7 +1269,7 @@
 
           <div class="cropStage" id="cropStage">
             <img id="cropSourceImg" alt="拍摄的照片">
-            <div class="cropBox" id="cropBox" style="left:5%;top:15%;width:90%;height:35%;">
+            <div class="cropBox" id="cropBox" style="left:2%;top:8%;width:96%;height:55%;">
               <div class="cropHandle" id="cropHandle"></div>
             </div>
           </div>
@@ -1311,6 +1311,7 @@
               </div>
             </div>
             <button class="btn" id="scanConfirmBtn" style="margin-top:4px;">✓ 加入清单</button>
+            <button class="btn ghost" id="scanNewTicketBtn" style="margin-top:4px;">🔄 换新票（清空票名和面值）</button>
             <div class="status" id="scanFormStatus"></div>
           </div>
         </div>
@@ -4376,8 +4377,8 @@ function getDefaultCropRegion(mode){
   // 每次都要手动拖大。这里把默认框整体放大，宽度贴近全宽、高度翻倍以上，
   // 中心位置基本保持不变（只是往外扩），减少手动调整的次数。
   return mode === 'code'
-    ? { left:0.05, top:0.55, width:0.90, height:0.25 }
-    : { left:0.05, top:0.15, width:0.90, height:0.35 };
+    ? { left:0.02, top:0.45, width:0.96, height:0.45 }
+    : { left:0.02, top:0.08, width:0.96, height:0.55 };
 }
 
 function cropToCanvas(img, region, naturalW, naturalH, targetMaxDim){
@@ -4676,6 +4677,32 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
   }
 });
 
+
+/* ── 票名/面值短期记忆（localStorage，8小时有效；换新票点按钮清空）── */
+const SCAN_MEM_KEY='fucaiScanNameAmountMem', SCAN_MEM_TTL=8*3600*1000;
+function saveScanMemory(){
+  try{
+    const name=document.getElementById('fieldName').value.trim(), amount=document.getElementById('fieldAmount').value.trim();
+    if(!name && !amount){ localStorage.removeItem(SCAN_MEM_KEY); return; }
+    localStorage.setItem(SCAN_MEM_KEY, JSON.stringify({name,amount,t:Date.now()}));
+  }catch(e){}
+}
+function restoreScanMemory(){
+  try{
+    const m=JSON.parse(localStorage.getItem(SCAN_MEM_KEY)||'null');
+    if(!m || Date.now()-m.t>SCAN_MEM_TTL){ localStorage.removeItem(SCAN_MEM_KEY); return; }
+    const n=document.getElementById('fieldName'), a=document.getElementById('fieldAmount');
+    if(!n.value) n.value=m.name||''; if(!a.value) a.value=m.amount||'';
+  }catch(e){}
+}
+['fieldName','fieldAmount'].forEach(id=>document.getElementById(id).addEventListener('input',saveScanMemory));
+document.getElementById('scanNewTicketBtn').addEventListener('click',()=>{
+  ['fieldName','fieldAmount','fieldCode','fieldPrize'].forEach(id=>document.getElementById(id).value='');
+  try{ localStorage.removeItem(SCAN_MEM_KEY); }catch(e){}
+  const st=document.getElementById('scanFormStatus'); st.className='status ok'; st.textContent='已清空，请录入新票的票名和面值。';
+});
+restoreScanMemory();
+
 /* ── 加入清单 ── */
 document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
   const formStatus = document.getElementById('scanFormStatus');
@@ -4691,12 +4718,12 @@ document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
 
   await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
 
-  document.getElementById('fieldName').value = '';
-  document.getElementById('fieldAmount').value = '';
+  // 票名/面值短期记忆：同一批同款彩票不用重复输入，只清编号和中奖金额
+  saveScanMemory();
   document.getElementById('fieldCode').value = '';
   document.getElementById('fieldPrize').value = '';
   formStatus.className = 'status ok';
-  formStatus.textContent = '✓ 已加入清单';
+  formStatus.textContent = '✓ 已加入清单（票名、面值已保留，换新票请点「换新票」）';
 });
 
 /* ── 清空全部 ── */
