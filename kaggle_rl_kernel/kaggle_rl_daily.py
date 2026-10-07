@@ -673,13 +673,13 @@ def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN, norm=None):
     return h.numpy()[0]
 
 
-def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256, norm=None):
+def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256, norm=None, return_probs=False):
     """
     批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
     返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
     """
     if model is None:
-        return None, {}
+        return (None, {}, None) if return_probs else (None, {})
     X, idxs = [], []
     # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
     # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
@@ -700,17 +700,23 @@ def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=2
         if not valid: continue
         X.append(seq); idxs.append(idx)
     if not X:
-        return None, {}
+        return (None, {}, None) if return_probs else (None, {})
     X = _apply_norm(np.array(X, dtype=np.float32), norm)   # 跟DL训练时同一个标准化变换
     model.eval()
-    hs = []
+    hs = []; ps = None
     with torch.no_grad():
         for i in range(0, len(X), batch_size):
             xb = torch.FloatTensor(X[i:i+batch_size])
-            _, h = model(xb, return_hidden=True)
+            logits_list, h = model(xb, return_hidden=True)
             hs.append(h.numpy())
+            if return_probs:
+                pb = [torch.softmax(lg, dim=1).numpy() for lg in logits_list]
+                ps = [[p] for p in pb] if ps is None else [a + [p] for a, p in zip(ps, pb)]
     hs = np.vstack(hs)
     idx_to_row = {idx:i for i,idx in enumerate(idxs)}
+    if return_probs:
+        # 每个分类头一个 (期数×类别数) 数组：DL 对各特征目标的概率，概率直出模式直接使用
+        return hs, idx_to_row, [np.vstack(a) for a in ps]
     return hs, idx_to_row
 
 
@@ -1009,7 +1015,7 @@ def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason
 SEGMENT_ENABLE = {
     '3d':  {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
     'ssq': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '遗漏':True},
-    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '重号斜连':True, '遗漏':True, '频率':False},
+    'kl8': {'走势特征':True, 'ML概率(walk-forward)':True, 'LSTM隐层':True, 'TFM隐层':True, '重号斜连':True, '遗漏':True, '频率':True},
 }
 
 
@@ -1656,6 +1662,279 @@ def push_rl_dataset():
 # ══════════════════════════════════════════════════════
 #  主流程：kl8 增量微调
 # ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  概率直出模式（RL_MODE='prob_direct'，默认）
+#
+#  为什么有这个模式：彩票每期独立随机，PPO 的奖励（有没有命中）是纯噪声，
+#  训练出来的策略没有可学的东西，推荐号码说不清依据。这个模式不训练 PPO，
+#  直接把 ML 和 DL 对"各个特征分类"的概率合成"每一注号码的概率"：
+#
+#    ML 和 DL 各自给出 10 个特征目标的概率（和值区间、奇偶个数、组型、跨度…）。
+#    把这 10 个判断合成号码级别的概率——对每一种号码组合，看它落在各目标的
+#    哪一类里，用「模型给该类的概率 ÷ 该类在随机组合里的占比」当似然比，
+#    10 个似然比连乘作为这注的权重（乘积专家/朴素贝叶斯）。
+#      · 福彩3D：1000 种组合全部枚举，权重归一化后就是每一注的联合概率；
+#      · 双色球红球/快乐8：组合太多，蒙特卡洛抽样加权，得到每个号码的入选概率。
+#
+#  输出的 JSON 字段与 PPO 模式完全一致，网页不用改；RL_MODE='ppo' 即可恢复训练。
+#  PPO 训练代码一行没删。
+# ══════════════════════════════════════════════════════
+RL_MODE = os.environ.get('RL_MODE', 'prob_direct')   # 'prob_direct' | 'ppo'
+DIRECT_ALPHA   = 1.0      # 似然比指数；<1 表示对 ML/DL 的判断打折（10个目标并不独立，1.0 偏激进）
+DIRECT_ML_W    = 0.5      # ML 与 DL 融合时 ML 的权重（DL=1-该值；缺一方就只用另一方）
+DIRECT_NSAMP_LIVE = 300000   # 今日推荐的蒙特卡洛样本数（越大号码概率越稳）
+DIRECT_NSAMP_BT   = 40000    # 回测每期的样本数
+DIRECT_BLUE_HALFLIFE = 100   # 蓝球没有对应模型，用指数衰减频率，半衰期（期）
+
+_D3_ALL = np.array([[b, s, g] for b in range(10) for s in range(10) for g in range(10)], dtype=np.int64)
+_PRIME_ARR_80 = np.zeros(81, dtype=bool)
+for _p in [2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79]:
+    _PRIME_ARR_80[_p] = True
+
+
+def _grp3(x, lo, hi):
+    """x<=lo → 0；x<=hi → 1；否则 2（向量版）"""
+    return np.where(x <= lo, 0, np.where(x <= hi, 1, 2))
+
+
+def _count_unique_diffs(S):
+    """每行（已排序）所有两两差值里不同值的个数 → AC值=该个数-(k-1)"""
+    n, k = S.shape
+    iu, ju = np.triu_indices(k, 1)
+    d = np.sort(S[:, ju] - S[:, iu], axis=1)
+    return 1 + (d[:, 1:] != d[:, :-1]).sum(axis=1)
+
+
+def _same_tail_pairs(S):
+    oh = np.zeros((S.shape[0], 10), dtype=np.int32)
+    for c in range(S.shape[1]):
+        np.add.at(oh, (np.arange(S.shape[0]), S[:, c] % 10), 1)
+    return (oh * (oh - 1) // 2).sum(axis=1)
+
+
+def direct_feats_3d(C):
+    """3D 的10个目标分类，C: (N,3)。⚠️ 定义必须与 kaggle_lstm_tfm.py/kaggle_fucai.py 的标签函数一致（有单测对拍）"""
+    sm = C.sum(axis=1)
+    tri = (C[:, 0] == C[:, 1]) & (C[:, 1] == C[:, 2])
+    eq = (C[:, 0] == C[:, 1]) | (C[:, 1] == C[:, 2]) | (C[:, 0] == C[:, 2])
+    s3 = np.sort(C, axis=1)
+    span = C.max(axis=1) - C.min(axis=1)
+    rd = C % 3
+    rc = np.stack([(rd == r).sum(axis=1) for r in range(3)], axis=1)
+    return {
+        'sum_grp': _grp3(sm, 9, 17),
+        'odd': (C % 2 != 0).sum(axis=1),
+        'group_type': np.where(tri, 0, np.where(eq, 1, 2)),
+        'big': (C >= 5).sum(axis=1),
+        'span_grp': _grp3(span, 3, 6),
+        'road_dom': rc.argmax(axis=1),
+        'arith': (((s3[:, 1] - s3[:, 0]) == (s3[:, 2] - s3[:, 1])) & ((s3[:, 2] - s3[:, 0]) > 0)).astype(np.int64),
+        'prime_cnt': np.isin(C, [2, 3, 5, 7]).sum(axis=1),
+        'sum_tail': sm % 10,
+        'span_odd': span % 2,
+    }
+
+
+def direct_feats_ssq(S):
+    """双色球红球(已排序 N×6，值1..33)的10个目标分类"""
+    sm = S.sum(axis=1)
+    gaps = np.diff(S, axis=1)
+    z = np.stack([(S <= 11).sum(axis=1), ((S >= 12) & (S <= 22)).sum(axis=1), (S >= 23).sum(axis=1)], axis=1)
+    ac = _count_unique_diffs(S) - (S.shape[1] - 1)
+    pr = _PRIME_ARR_80[S].sum(axis=1)
+    return {
+        'odd': (S % 2 != 0).sum(axis=1),
+        'sum_grp': np.where(sm < 70, 0, np.where(sm < 100, 1, 2)),
+        'ac_grp': _grp3(ac, 2, 5),
+        'red_zone_dom': z.argmax(axis=1),
+        'gap_grp': _grp3(gaps.max(axis=1), 5, 10),
+        'big': (S > 16).sum(axis=1),
+        'consec': (gaps == 1).sum(axis=1),
+        'prime_grp': np.where(pr <= 1, 0, np.where(pr == 2, 1, 2)),
+        'sum_tail': sm % 10,
+        'same_tail': np.minimum(_same_tail_pairs(S), 3),
+    }
+
+
+def direct_feats_kl8(S):
+    """快乐8开奖20球(已排序 N×20，值1..80)的10个目标分类"""
+    sm = S.sum(axis=1)
+    odd = (S % 2 != 0).sum(axis=1)
+    big = (S > 40).sum(axis=1)
+    zone = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1,20),(21,40),(41,60),(61,80)]], axis=1)
+    five = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]], axis=1)
+    adj = (np.diff(S, axis=1) == 1)
+    runs = adj[:, 0].astype(np.int64) + (adj[:, 1:] & ~adj[:, :-1]).sum(axis=1)   # 连号"段"的个数
+    rng = S[:, -1] - S[:, 0]
+    pr = _PRIME_ARR_80[S].sum(axis=1)
+    ac = _count_unique_diffs(S) - (S.shape[1] - 1)
+    st = _same_tail_pairs(S)
+    return {
+        'odd_grp': np.where(odd < 9, 0, np.where(odd <= 11, 1, 2)),
+        'zone_dom': zone.argmax(axis=1),
+        'tot_grp': np.where(sm < 640, 0, np.where(sm < 820, 1, 2)),
+        'big_grp': np.where(big < 9, 0, np.where(big <= 11, 1, 2)),
+        'five_dom': five.argmax(axis=1),
+        'consec_grp': np.where(runs == 0, 0, np.where(runs <= 2, 1, 2)),
+        'range_grp': np.where(rng < 60, 0, np.where(rng < 70, 1, 2)),
+        'prime_grp': np.where(pr <= 4, 0, np.where(pr <= 6, 1, 2)),
+        'ac_grp': _grp3(ac, 44, 49),
+        'same_tail_grp': np.where(st <= 15, 0, np.where(st <= 18, 1, 2)),
+    }
+
+
+def direct_sample_subsets(rng, n, pool, k):
+    """从1..pool里等概率不放回抽k个，返回已排序的 (n,k) 数组"""
+    r = rng.random((n, pool))
+    idx = np.argpartition(r, k, axis=1)[:, :k] + 1
+    idx.sort(axis=1)
+    return idx.astype(np.int64)
+
+
+def direct_tilt_logw(feats, fused, ncs, alpha=DIRECT_ALPHA):
+    """乘积专家：对每个目标 log(模型概率/随机占比)，累加成每个组合的对数权重"""
+    n = len(next(iter(feats.values())))
+    logw = np.zeros(n, dtype=np.float64)
+    used = 0
+    for name, p in fused.items():
+        if p is None or name not in feats:
+            continue
+        nc = ncs[name]
+        f = feats[name]
+        q = np.bincount(f, minlength=nc)[:nc] / n
+        p = np.clip(np.asarray(p, dtype=np.float64)[:nc], 1e-3, 1.0)
+        p = p / p.sum()
+        ratio = np.where(q > 0, p / np.maximum(q, 1e-12), 1.0)
+        logw += alpha * np.log(ratio[np.minimum(f, nc - 1)])
+        used += 1
+    return logw, used
+
+
+class DirectModel:
+    """概率直出的"模型"：接口模仿 PPO 的 predict()，让下游选号/回测代码一行不改地复用。
+    使用前由 build_state 设置 cur_idx（本次要预测的是第几期之前的状态）。"""
+    def __init__(self, game, records, ml_wf, ml_pred, dl_probs=None, dl_meta=None):
+        self.game = game
+        self.records = records
+        self.tk, self.nc = _ml_layout(game)
+        self.ncs = dict(zip(self.tk, self.nc))
+        self.offs = np.concatenate([[0], np.cumsum(self.nc)])
+        self.ml_wf = ml_wf
+        self.ml_live = extract_ml_prob_vec(ml_pred, game, verbose=False) if ml_pred else None
+        # dl_probs: {'lstm':(probs_list, idx2row), 'tfm':(probs_list, idx2row)}，列表顺序=dl_meta['target_names']
+        self.dl = dl_probs or {}
+        self.dl_names = (dl_meta or {}).get('target_names', [])
+        self.cur_idx = len(records)
+        self._cache = {}
+        self.last_info = {}
+
+    # —— 取某期某目标的 ML / DL 概率 ——
+    def _ml_seg(self, idx, i):
+        n = self.nc[i]
+        if idx >= len(self.records):
+            v = self.ml_live
+        elif self.ml_wf is not None and 0 <= idx - 1 < len(self.ml_wf):
+            v = self.ml_wf[idx - 1]
+        else:
+            v = None
+        if v is None or len(v) < self.offs[-1]:
+            return None
+        seg = np.asarray(v[self.offs[i]:self.offs[i + 1]], dtype=np.float64)
+        return seg / seg.sum() if seg.sum() > 0 else None
+
+    def _dl_seg(self, idx, name, n):
+        if name not in self.dl_names:
+            return None
+        ti = self.dl_names.index(name)
+        segs = []
+        for key in ('lstm', 'tfm'):
+            pk = self.dl.get(key)
+            if not pk or pk[0] is None:
+                continue
+            probs_list, idx2row = pk
+            if idx not in idx2row or ti >= len(probs_list):
+                continue
+            row = np.asarray(probs_list[ti][idx2row[idx]], dtype=np.float64)
+            out = np.zeros(n); m = min(n, len(row)); out[:m] = row[:m]
+            if out.sum() > 0:
+                segs.append(out / out.sum())
+        if not segs:
+            return None
+        w = np.array([0.6, 0.4][:len(segs)]) if len(segs) == 2 else np.array([1.0])
+        return sum(wi * s for wi, s in zip(w / w.sum(), segs))
+
+    def fused(self, idx):
+        res = {}; n_ml = n_dl = 0
+        for i, name in enumerate(self.tk):
+            m = self._ml_seg(idx, i); d = self._dl_seg(idx, name, self.nc[i])
+            n_ml += m is not None; n_dl += d is not None
+            if m is not None and d is not None:
+                p = DIRECT_ML_W * m + (1 - DIRECT_ML_W) * d
+            else:
+                p = m if m is not None else d
+            res[name] = p
+        self.last_info = {'ml_targets': n_ml, 'dl_targets': n_dl, 'total': len(self.tk)}
+        return res
+
+    # —— 3D：1000组合精确联合概率 ——
+    def joint(self, idx=None):
+        idx = self.cur_idx if idx is None else idx
+        key = ('j', idx)
+        if key in self._cache:
+            return self._cache[key]
+        feats = direct_feats_3d(_D3_ALL)
+        logw, used = direct_tilt_logw(feats, self.fused(idx), self.ncs)
+        w = np.exp(logw - logw.max()); w /= w.sum()
+        self.last_info['used'] = used
+        self._cache[key] = w
+        return w
+
+    def pos_probs(self, idx=None):
+        w = self.joint(idx)
+        return [np.bincount(_D3_ALL[:, j], weights=w, minlength=10) for j in range(3)]
+
+    # —— 双色球/快乐8：号码入选概率（蒙特卡洛） ——
+    def inclusion(self, idx, n_samp):
+        key = ('inc', idx, n_samp)
+        if key in self._cache:
+            return self._cache[key]
+        rng = np.random.default_rng(20240607 + int(idx))   # 每期固定种子：同样输入必得同样输出
+        if self.game == 'ssq':
+            S = direct_sample_subsets(rng, n_samp, 33, 6); feats = direct_feats_ssq(S); pool = 33
+        else:
+            S = direct_sample_subsets(rng, n_samp, 80, 20); feats = direct_feats_kl8(S); pool = 80
+        logw, used = direct_tilt_logw(feats, self.fused(idx), self.ncs)
+        w = np.exp(logw - logw.max()); w /= w.sum()
+        inc = np.zeros(pool)
+        for c in range(S.shape[1]):
+            inc += np.bincount(S[:, c] - 1, weights=w, minlength=pool)
+        ess = 1.0 / float((w ** 2).sum())
+        self.last_info.update({'used': used, 'ess': ess})
+        self._cache[key] = inc
+        return inc
+
+    def blue_scores(self, idx):
+        """蓝球：没有对应的ML/DL目标，用指数衰减频率（半衰期 DIRECT_BLUE_HALFLIFE 期）"""
+        recs = self.records[:min(idx, len(self.records))]
+        cnt = np.ones(16)   # 拉普拉斯平滑
+        lam = 0.5 ** (1.0 / DIRECT_BLUE_HALFLIFE)
+        for age, r in enumerate(reversed(recs)):
+            cnt[r['blue'] - 1] += lam ** age
+        return cnt / cnt.sum()
+
+    def predict(self, state, deterministic=True):
+        """与 PPO 的 predict 同接口：返回当前 cur_idx 对应的打分向量（3D返回各位Top1数字）"""
+        idx = self.cur_idx
+        if self.game == '3d':
+            pp = self.pos_probs(idx)
+            return np.array([int(np.argmax(p)) for p in pp]), None
+        n = DIRECT_NSAMP_LIVE if idx >= len(self.records) else DIRECT_NSAMP_BT
+        inc = self.inclusion(idx, n)
+        if self.game == 'ssq':
+            return np.concatenate([inc, self.blue_scores(idx)]), None
+        return inc, None
+
+
 def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
 
@@ -1672,8 +1951,8 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
     _norm = norm_from_meta(meta)   # DL训练时的输入标准化统计量，隐层必须套同一个变换
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm, norm=_norm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm, norm=_norm)
+    lstm_hidden, lstm_idx2row, lstm_probs = precompute_hidden_all(records, fkl8, lstm, norm=_norm, return_probs=True)
+    tfm_hidden,  tfm_idx2row,  tfm_probs  = precompute_hidden_all(records, fkl8, tfm, norm=_norm, return_probs=True)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -1735,7 +2014,16 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
 
-    if is_new:
+    if RL_MODE == 'prob_direct':
+        # 概率直出：不训练PPO，ML+DL对10个特征目标的概率直接合成号码概率（详见 DirectModel 说明）
+        model = DirectModel('kl8', records, ml_wf, ml_pred,
+                            dl_probs={'lstm': (lstm_probs, lstm_idx2row), 'tfm': (tfm_probs, tfm_idx2row)},
+                            dl_meta=meta)
+        is_new = False
+        model.fused(len(records)); _inf = model.last_info
+        print(f"  [概率直出模式] 跳过PPO训练（RL_MODE='ppo' 可恢复）。今日融合：ML提供{_inf['ml_targets']}/{_inf['total']}个目标，"
+              f"DL提供{_inf['dl_targets']}/{_inf['total']}个目标")
+    elif is_new:
         print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                     n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
@@ -1743,7 +2031,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 200000, lambda: _eval_holdout(model), '快乐8首训',
-            n_chunks=5, patience=6, reset_timesteps=True, warmup_chunks=5,
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（2万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -1776,13 +2064,16 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
         _best = _eval_holdout(model)
         print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
               f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    if RL_MODE != 'prob_direct':
+        print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
 
-    save_ppo(model, 'kl8')
+    if RL_MODE != 'prob_direct':
+        save_ppo(model, 'kl8')
 
     def build_state(idx):
+        if RL_MODE == 'prob_direct': model.cur_idx = idx   # 概率直出：告诉 DirectModel 现在要算哪一期
         feat = fkl8(records, idx)
         if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
@@ -2035,7 +2326,10 @@ def run_kl8_daily(records, ml_pred, prev_result=None, ml_wf=None):
             'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
             'ref_info':ref_info,            # 参考信息：遗漏/频率/ML预测，仅供理解RL判断依据，不影响排序
             'is_first_train':is_new,
-            'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'}
+            'mode':RL_MODE,   # 'prob_direct'=概率直出(不训练)；'ppo'=PPO训练。网页据此显示标签
+            'note':(f'按ML+DL对10个特征目标的概率合成每个号码的入选概率后排序，选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示'
+                    if RL_MODE == 'prob_direct' else
+                    f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/频率/走势特征），选六净收益{avg_net}元/期，遗漏/频率/ML预测仅作参考展示')}
 
 
 def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
@@ -2054,8 +2348,8 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
     _norm = norm_from_meta(meta)   # DL训练时的输入标准化统计量，隐层必须套同一个变换
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm, norm=_norm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm, norm=_norm)
+    lstm_hidden, lstm_idx2row, lstm_probs = precompute_hidden_all(records, fssq, lstm, norm=_norm, return_probs=True)
+    tfm_hidden,  tfm_idx2row,  tfm_probs  = precompute_hidden_all(records, fssq, tfm, norm=_norm, return_probs=True)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2109,7 +2403,16 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
 
-    if is_new:
+    if RL_MODE == 'prob_direct':
+        # 概率直出：不训练PPO，ML+DL对10个特征目标的概率直接合成号码概率（详见 DirectModel 说明）
+        model = DirectModel('ssq', records, ml_wf, ml_pred,
+                            dl_probs={'lstm': (lstm_probs, lstm_idx2row), 'tfm': (tfm_probs, tfm_idx2row)},
+                            dl_meta=meta)
+        is_new = False
+        model.fused(len(records)); _inf = model.last_info
+        print(f"  [概率直出模式] 跳过PPO训练（RL_MODE='ppo' 可恢复）。今日融合：ML提供{_inf['ml_targets']}/{_inf['total']}个目标，"
+              f"DL提供{_inf['dl_targets']}/{_inf['total']}个目标")
+    elif is_new:
         print("  首次训练（15万步，红球33全量打分+蓝球联合优化）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
                     n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
@@ -2117,7 +2420,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 150000, lambda: _eval_holdout(model), '双色球首训',
-            n_chunks=5, patience=6, reset_timesteps=True, warmup_chunks=5,
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1.5万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2143,13 +2446,16 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
         _best = _eval_holdout(model)
         print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
               f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    if RL_MODE != 'prob_direct':
+        print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
 
-    save_ppo(model, 'ssq')
+    if RL_MODE != 'prob_direct':
+        save_ppo(model, 'ssq')
 
     def build_state(idx):
+        if RL_MODE == 'prob_direct': model.cur_idx = idx   # 概率直出：告诉 DirectModel 现在要算哪一期
         feat = fssq(records, idx)
         if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
@@ -2270,8 +2576,11 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
 
         # ── 蓝球：模型预测几个算几个，全部展示 ──
         # 对16个蓝球分数做softmax，把高于均匀分布(1/16=6.25%)的候选都算作模型的预测，最多3个
-        _bexp = np.exp(blue_scores - np.max(blue_scores))
-        _bprob = _bexp / (_bexp.sum() + 1e-12)
+        if RL_MODE == 'prob_direct':
+            _bprob = blue_scores / (blue_scores.sum() + 1e-12)   # 直出模式的蓝球分数本身就是概率（指数衰减频率）
+        else:
+            _bexp = np.exp(blue_scores - np.max(blue_scores))
+            _bprob = _bexp / (_bexp.sum() + 1e-12)
         _border = np.argsort(_bprob)[::-1]
         blue_cands, blue_probs = [], []
         for bi in _border[:3]:
@@ -2318,7 +2627,10 @@ def run_ssq_daily(records, ml_pred, prev_result=None, ml_wf=None):
             'ppo_groups':groups,'ref_info':ref_info,
             'red_core':red_core_info,'red_pool':red_pool_info,
             'is_first_train':is_new,
-            'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
+            'mode':RL_MODE,   # 'prob_direct'=概率直出(不训练)；'ppo'=PPO训练。网页据此显示标签
+            'note':(f'红球按ML+DL对10个特征目标的概率合成每个号码的入选概率后排序（概率直出，未训练），蓝球按指数衰减频率；红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'
+                    if RL_MODE == 'prob_direct' else
+                    f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示')}
 
 
 def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
@@ -2336,8 +2648,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
     print("  批量预计算 LSTM/TFM 隐层状态…")
     t0 = time.time()
     _norm = norm_from_meta(meta)   # DL训练时的输入标准化统计量，隐层必须套同一个变换
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm, norm=_norm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm, norm=_norm)
+    lstm_hidden, lstm_idx2row, lstm_probs = precompute_hidden_all(records, f3d, lstm, norm=_norm, return_probs=True)
+    tfm_hidden,  tfm_idx2row,  tfm_probs  = precompute_hidden_all(records, f3d, tfm, norm=_norm, return_probs=True)
     print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
 
     print("  批量预计算遗漏向量…")
@@ -2387,15 +2699,24 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
             print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
             model = None; is_new = True
 
-    if is_new:
+    if RL_MODE == 'prob_direct':
+        # 概率直出：不训练PPO，ML+DL对10个特征目标的概率直接合成号码概率（详见 DirectModel 说明）
+        model = DirectModel('3d', records, ml_wf, ml_pred,
+                            dl_probs={'lstm': (lstm_probs, lstm_idx2row), 'tfm': (tfm_probs, tfm_idx2row)},
+                            dl_meta=meta)
+        is_new = False
+        model.fused(len(records)); _inf = model.last_info
+        print(f"  [概率直出模式] 跳过PPO训练（RL_MODE='ppo' 可恢复）。今日融合：ML提供{_inf['ml_targets']}/{_inf['total']}个目标，"
+              f"DL提供{_inf['dl_targets']}/{_inf['total']}个目标")
+    elif is_new:
         print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
         model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
                     n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=5, patience=6, reset_timesteps=True, warmup_chunks=5,
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2421,13 +2742,16 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
         _best = _eval_holdout(model)
         print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
               f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
+    if RL_MODE != 'prob_direct':
+        print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
     print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
           f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
 
-    save_ppo(model, '3d')
+    if RL_MODE != 'prob_direct':
+        save_ppo(model, '3d')
 
     def build_state(idx):
+        if RL_MODE == 'prob_direct': model.cur_idx = idx   # 概率直出：告诉 DirectModel 现在要算哪一期
         feat = f3d(records, idx)
         if feat is None: return None
         raw = np.array(list(feat.values()),dtype=np.float32)
@@ -2461,15 +2785,23 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
     # 命中X位(比如'2位命中1期')也只是计数，不说明是哪两位，
     # 逐位Top1/2/3命中率才能看出模型是不是在某一位上确实学到了东西。
     rank_hit = [[0,0,0,0] for _ in range(3)]   # 每位[Top1命中,Top2命中,Top3命中,前3都没中]次数
+    _dir_ll, _dir_n, _dir_top = 0.0, 0, 0       # 概率直出：对数损失累计 / 期数 / 开奖组合落入推荐Top-N的期数
     for idx in range(start, len(records)):
         state = build_state(idx)
         if state is None: continue
         actual=records[idx]['digits']
         try:
-            _obs, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
-            with torch.no_grad():
-                _dist = model.policy.get_distribution(_obs)
-            _pp = [d.probs.detach().cpu().numpy()[0] for d in _dist.distribution]
+            if RL_MODE == 'prob_direct':
+                _pp = model.pos_probs(idx)
+                # 直出模式的真实质量指标：开奖组合在 1000 种组合里被模型给了多大概率
+                _jt = model.joint(idx); _ai = actual[0]*100 + actual[1]*10 + actual[2]
+                _dir_ll += -float(np.log(max(_jt[_ai], 1e-12))); _dir_n += 1
+                _dir_top += int(_ai in set(np.argsort(-_jt)[:D3_N_BETS].tolist()))
+            else:
+                _obs, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+                with torch.no_grad():
+                    _dist = model.policy.get_distribution(_obs)
+                _pp = [d.probs.detach().cpu().numpy()[0] for d in _dist.distribution]
             pred = [int(np.argmax(p)) for p in _pp]   # Top1，跟原来deterministic预测等价
             for i in range(3):
                 _ranked = np.argsort(_pp[i])[::-1]   # 该位10个数字按概率从高到低排序
@@ -2506,17 +2838,31 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
     # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
     # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
     # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
+    _direct_eval = {}
+    if RL_MODE == 'prob_direct' and _dir_n:
+        _ll = _dir_ll / _dir_n
+        _direct_eval = {'periods': _dir_n, 'logloss': round(_ll, 4), 'uniform_logloss': round(float(np.log(1000)), 4),
+                        'gain_vs_uniform': round(float(np.log(1000)) - _ll, 4),
+                        'topN_hit_pct': round(_dir_top / _dir_n * 100, 2),
+                        'topN_random_pct': round(D3_N_BETS / 10, 2)}
+        print(f"  [直出质量·样本外{_dir_n}期] 开奖组合的平均对数损失 {_ll:.4f}（均匀随机={np.log(1000):.4f}，越低越好；"
+              f"差值{np.log(1000)-_ll:+.4f}≈0说明和随机没区别）；开奖组合落入推荐{D3_N_BETS}注的比例 "
+              f"{_dir_top/_dir_n*100:.1f}%（随机期望{D3_N_BETS/10:.1f}%）")
     idx=len(records); state=build_state(idx)
     groups=[]; pos_candidates=[]; _sampled=[]; _same=None
     if state is not None:
         # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
         # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
         try:
-            obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
-            with torch.no_grad():
-                dist = model.policy.get_distribution(obs_tensor)
-            # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
-            pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
+            if RL_MODE == 'prob_direct':
+                pos_probs = model.pos_probs(idx)     # 1000种组合的联合概率边缘化得到的百/十/个位分布
+                _jt_live = model.joint(idx)
+            else:
+                obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
+                with torch.no_grad():
+                    dist = model.policy.get_distribution(obs_tensor)
+                # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
+                pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
 
             # 每位取Top3候选。之前用纯联合概率取Top6有个问题：
             # 联合概率是相乘的，某一位第1名只要比第2名高出一截，乘法会把优势放大，
@@ -2571,6 +2917,13 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                 if tuple(c) not in seen:
                     picked.append((c, pr)); seen.add(tuple(c))
             picked.sort(key=lambda x: -x[1])
+            if RL_MODE == 'prob_direct':
+                # 直出模式：推荐就是联合概率最高的 N 注（1000种组合已全部枚举，不需要候选池/轮转）
+                _ord = np.argsort(-_jt_live)[:D3_N_BETS]
+                picked = [([int(v) for v in _D3_ALL[i]], float(_jt_live[i])) for i in _ord]
+                print(f"  [直出] 联合概率最高的{len(picked)}注合计概率 {sum(p for _, p in picked)*100:.2f}%"
+                      f"（均匀随机下{len(picked)}注合计{len(picked)/10:.1f}%）；"
+                      f"ML提供{model.last_info.get('ml_targets')}/10 DL提供{model.last_info.get('dl_targets')}/10个目标")
             groups = [c for c, _ in picked]
 
             # ══════════════════════════════════════════════════════
@@ -2595,7 +2948,8 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
                 _sampled, _seen_s, _guard = [], set(), 0
                 while len(_sampled) < D3_SAMPLE_N and _guard < D3_SAMPLE_N * 200:
                     _guard += 1
-                    _c = [int(_rng.choice(10, p=pos_probs[i])) for i in range(3)]
+                    _c = ([int(v) for v in _D3_ALL[int(_rng.choice(1000, p=_jt_live))]] if RL_MODE == 'prob_direct'
+                          else [int(_rng.choice(10, p=pos_probs[i])) for i in range(3)])
                     if tuple(_c) not in _seen_s:
                         _seen_s.add(tuple(_c)); _sampled.append(_c)
                 _same = len(set(map(tuple, groups)) & set(map(tuple, _sampled)))
@@ -2683,25 +3037,66 @@ def run_3d_daily(records, ml_pred, prev_result=None, ml_wf=None):
             'sampled_stats':_sample_stats,   # 采样注的频率统计，网页在两栏推荐下方展示
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
-            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
+            'mode':RL_MODE,   # 'prob_direct'=概率直出(不训练)；'ppo'=PPO训练。网页据此显示标签
+            'direct_eval':_direct_eval,   # 概率直出的样本外质量指标（对数损失/落入推荐比例），ppo模式为空
+            'note':(f'按ML+DL对10个特征目标的概率，枚举1000种组合算出每一注的联合概率，取概率最高的{len(groups)}注（概率直出，未训练），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
+                    if RL_MODE == 'prob_direct' else
+                    f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。')+
                    f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'
                    f'{_sample_note}'}
 
 # ══════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════
-print(f"\n{'#'*55}\nPPO 强化学习 每日增量微调  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
+_mode_title = 'PPO 强化学习 每日增量微调' if RL_MODE == 'ppo' else '概率直出（ML+DL合成，不训练PPO）'
+print(f"\n{'#'*55}\n{_mode_title}  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
 
-raw = gh_raw('history.json')
-if not raw: print("失败"); sys.exit(1)
-history = json.loads(raw)
+# ── 等 ML 跑完再开始 ──
+# ML(kaggle_fucai.py) 的推送顺序是 history.json → 各游戏 walkforward → prediction.json(最后)。
+# 如果这个脚本在 ML 还没跑完时就启动（比如上游工作流误判"已完成"），读到的就是
+# 新历史 + 旧预测，两边对不上，会悄悄算出错的结果。这里用一个与时间无关的硬条件判断：
+# prediction.json 里每个游戏的 data_count（ML用了多少期）必须等于 history.json 的期数。
+# 不一致就每分钟重读一次，最多等 RL_WAIT_ML_MIN 分钟；仍不一致就报错退出，不用旧预测硬跑。
+# （手动想强行运行：设置环境变量 RL_ALLOW_STALE_ML=1）
+RL_WAIT_ML_MIN = int(os.environ.get('RL_WAIT_ML_MIN', '30'))
 
-# 读取 prediction.json 取ML概率向量（RL状态的一部分）
-raw_ml = gh_raw('prediction.json')
-ml_preds = {}
-if raw_ml:
-    try: ml_preds = json.loads(raw_ml).get('predictions', {})
-    except Exception: pass
+def _load_history_and_ml():
+    h = gh_raw('history.json')
+    m = gh_raw('prediction.json')
+    hist = json.loads(h) if h else None
+    mlp = {}
+    if m:
+        try: mlp = json.loads(m).get('predictions', {})
+        except Exception: mlp = {}
+    return hist, mlp
+
+def _ml_stale_games(hist, mlp):
+    bad = []
+    if not hist: return ['history.json读取失败']
+    for g in ['3d', 'ssq', 'kl8']:
+        recs = hist.get(g)
+        if not isinstance(recs, list) or len(recs) < 65: continue
+        dc = (mlp.get(g) or {}).get('data_count')
+        if dc is None:
+            continue   # ML没产出该游戏的预测（比如它自己跳过了）：不算"没跑完"，该游戏按无ML信息继续
+        if int(dc) != len(recs):
+            bad.append(f"{g}: history={len(recs)}期 / ML预测基于{dc}期")
+    return bad
+
+history, ml_preds = _load_history_and_ml()
+if not history: print("失败"); sys.exit(1)
+_stale = _ml_stale_games(history, ml_preds)
+_t_wait = time.time()
+while _stale and not os.environ.get('RL_ALLOW_STALE_ML') and (time.time() - _t_wait) < RL_WAIT_ML_MIN * 60:
+    print(f"  ⏳ ML 似乎还没跑完（{'; '.join(_stale)}），60秒后重新检查…（已等{(time.time()-_t_wait)/60:.0f}/{RL_WAIT_ML_MIN}分钟）")
+    time.sleep(60)
+    history, ml_preds = _load_history_and_ml()
+    if not history: print("失败"); sys.exit(1)
+    _stale = _ml_stale_games(history, ml_preds)
+if _stale and not os.environ.get('RL_ALLOW_STALE_ML'):
+    print(f"✗ 等了{RL_WAIT_ML_MIN}分钟 ML 仍未更新完成（{'; '.join(_stale)}）。为避免用旧预测算出错误结果，本次退出。")
+    sys.exit(1)
+print("✓ ML预测与历史数据期数一致，开始运行" if not _stale else "! 已忽略ML未更新的检查（RL_ALLOW_STALE_ML）")
 
 # 读取逐期ML概率（walk-forward，kaggle_fucai.py新产出）：每期的概率来自
 # 只用该期之前历史训练出的模型，不是"今天的概率广播给全部历史"这个常数问题。
@@ -2752,11 +3147,11 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
         print(f"{game} 失败: {e}")
 
 # 推送RL模型到Kaggle Dataset
-print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
+print(f"\n{'='*50}\n{'保存PPO模型…' if RL_MODE == 'ppo' else '概率直出模式：无PPO模型需要保存'}\n{'='*50}")
 # 判断这次是不是"全部游戏都跳过了训练"（比如手动运行、没有任何新开奖数据）。
 # carry_over_result 会在结果里标 skipped=True；只要有一个游戏真的训练过，
 # 就不算"全部跳过"，因为那个游戏确实产生了要保存的新内容。
-_all_skipped = bool(rl_results) and all(r.get('skipped') for r in rl_results.values())
+_all_skipped = (RL_MODE != 'ppo') or (bool(rl_results) and all(r.get('skipped') for r in rl_results.values()))
 if _all_skipped:
     print("  本次全部游戏都无新数据、跳过了训练，本地也没有产生任何新的模型文件，"
           "跳过推送——不做无意义的Dataset版本更新，也避免用不完整的本地目录覆盖已保存的内容。")
@@ -2769,8 +3164,10 @@ else:
 # ── 写入独立文件 dl_rl.json（不再读取/合并 prediction.json，速度更快）──
 out = {
     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    'method': 'PPO强化学习（每日增量微调）',
-    'state_composition': '原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量',
+    'method': ('PPO强化学习（每日增量微调）' if RL_MODE == 'ppo' else '概率直出（ML+DL融合）'),
+    'mode': RL_MODE,
+    'state_composition': ('原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量' if RL_MODE == 'ppo'
+                          else 'ML对10个特征目标的概率 + DL(LSTM/Transformer)对同样10个目标的概率，乘积专家合成号码概率'),
     'results': rl_results,
 }
 out_json = json.dumps(out, ensure_ascii=False, indent=2)
@@ -2779,7 +3176,7 @@ if not GH_TOKEN:
     print("\n[DRY RUN] 未配置 GH_TOKEN")
 else:
     print("\n推送 dl_rl.json…")
-    gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    gh_put('dl_rl.json', out_json, f"{'PPO每日微调' if RL_MODE == 'ppo' else '概率直出'} {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✓ 完成")
 
 print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
