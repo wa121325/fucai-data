@@ -2440,7 +2440,9 @@ async function downloadBallImage(nodes, title, btn){
   head.style.cssText='font-size:15px;font-weight:700;margin-bottom:8px;color:#1a1a2e;';
   head.textContent = title;
   wrap.appendChild(head);
-  nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove()); wrap.appendChild(c); });
+  nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
+    if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
+    wrap.appendChild(c); });
   const qrImg = (state.qr && state.qr.image) || '';
   if(qrImg){
     const q = document.createElement('div');
@@ -2469,17 +2471,19 @@ function attachBlockDownloads(){
     const pn = el.closest('.panel'); const h = pn && pn.querySelector('h2');
     const m = h && h.textContent.match(/福彩3D|双色球|快乐8/); return m?m[0]:'';
   };
-  const sel='.ball-flex, .ball-line, .rec-group';
+  const sel='.ball-unit, .ball-flex, .ball-line, .rec-group';
   const done = new Set();
   document.querySelectorAll('#predictContent '+sel.split(', ').join(', #predictContent ')).forEach(el=>{
-    if(done.has(el) || (!el.classList.contains('ball-flex') && el.closest('.ball-flex'))) return;
+    if(done.has(el) || (!el.classList.contains('ball-flex') && el.closest('.ball-flex')) || (!el.classList.contains('ball-unit') && el.closest('.ball-unit'))) return;
     const parent = el.parentElement;
     // 同一父节点下连续的球行合为一个导出单元
     const kids=[...parent.children]; let k=kids.indexOf(el);
     const group=[];
     while(k<kids.length && kids[k].matches(sel)){ group.push(kids[k]); done.add(kids[k]); k++; }
     const prev = el.previousElementSibling;
-    const nodes = (prev && prev.classList.contains('ball-label')) ? [prev,...group] : group;
+    let nodes = (prev && prev.classList.contains('ball-label')) ? [prev,...group] : group;
+    const pp = nodes[0].previousElementSibling;
+    if(pp && pp.classList.contains('ball-cand')) nodes = [pp,...nodes];
     const g = gameOf(el);
     const title = `${g} 推荐号码`.trim();
     const b=document.createElement('button');
@@ -2720,7 +2724,7 @@ function renderDLResult(dlResult){
       // 每位候选明细：让模型对百/十/个位各自看好哪几个数字一目了然
       if(d3Rl.pos_candidates?.length === 3){
         const posNames = ['百位','十位','个位'];
-        html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:8px 10px;margin-bottom:8px;">`;
+        html += `<div class="ball-cand" style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:8px 10px;margin-bottom:8px;">`;
         html += `<div style="margin-bottom:4px;">模型对各位的候选判断：</div>`;
         d3Rl.pos_candidates.forEach((cands, pi)=>{
           html += `<div style="margin:2px 0;">${posNames[pi]}：`;
@@ -2796,6 +2800,7 @@ function renderDLResult(dlResult){
         html += `<div style="font-size:10px;color:#888;margin-bottom:8px;">★ 标记为近期回测表现最好的玩法（历史回测仅供参考，彩票开奖完全随机，不代表未来表现）</div>`;
       }
       if(kl8Rl.plays){
+        html += `<div class="ball-unit">`;
         for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
           const play = kl8Rl.plays[pk];
           if(!play || !play.groups?.length) continue;
@@ -2807,6 +2812,7 @@ function renderDLResult(dlResult){
             html += `</div>`;
           });
         }
+        html += `</div>`;
       } else if(kl8Rl.picks_by_n){
         // 兼容旧结构
         const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
@@ -2872,7 +2878,7 @@ function renderDLResult(dlResult){
       if(ssqRl.ppo_groups?.length){
         const nBlue = ssqRl.ppo_groups[0]?.blues?.length || 1;
         if(ssqRl.red_core?.length){
-          html += `<div style="font-size:11px;color:#888;margin-bottom:6px;">🎯 胆码（模型最确信，每注必含）：`;
+          html += `<div class="ball-cand" style="font-size:11px;color:#888;margin-bottom:6px;padding:6px 10px;">🎯 胆码（模型最确信，每注必含）：`;
           ssqRl.red_core.forEach(n=>{ html += `<span style="display:inline-block;background:#c81e1e;color:#fff;border-radius:4px;padding:1px 7px;margin-right:5px;font-weight:700;">${String(n).padStart(2,'0')}</span>`; });
           html += `　候选池${ssqRl.red_pool?.length||'—'}球</div>`;
         }
