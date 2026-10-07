@@ -2706,7 +2706,7 @@ function renderDLResult(dlResult){
 
   // ── PPO 强化学习结果与推荐（每日） ──
   if(rl && rl.results){
-    html += `<div class="sectionTitle" style="font-size:13px;margin-top:14px;">🤖 PPO 强化学习策略（每日增量微调）</div>`;
+    html += `<div class="sectionTitle" style="font-size:13px;margin-top:14px;">🤖 强化学习策略（${(rl.mode==='prob_direct')?'概率直出':'每日增量微调'}）</div>`;
     html += `<div style="font-size:11px;color:#888;margin-bottom:10px;">${rl.state_composition||''}</div>`;
 
     // 福彩3D
@@ -2717,7 +2717,7 @@ function renderDLResult(dlResult){
       const md = d3Rl.match_distribution||{};
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
         回测（近${d3Rl.games_tested??'—'}期）：平均命中<b>${d3Rl.avg_match_digits??'—'}</b>位，全中率<b>${d3Rl.exact_hit_rate_pct??'—'}%</b>（随机基准0.1%）
-        ${d3Rl.is_first_train?'（首次训练）':'（增量微调）'}
+        ${d3Rl.mode==='prob_direct'?'（概率直出）':(d3Rl.is_first_train?'（首次训练）':'（增量微调）')}
       </div>`;
       html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
         命中分布：0位${md[0]??0}期 1位${md[1]??0}期 2位${md[2]??0}期 3位${md[3]??0}期
@@ -2775,7 +2775,7 @@ function renderDLResult(dlResult){
       html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">快乐8</div>`;
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
         回测（近${kl8Rl.games_tested??'—'}期）
-        ${kl8Rl.is_first_train?'（首次训练）':'（增量微调）'}
+        ${kl8Rl.mode==='prob_direct'?'（概率直出）':(kl8Rl.is_first_train?'（首次训练）':'（增量微调）')}
       </div>`;
       if(kl8Rl.ref_info){
         const ri = kl8Rl.ref_info;
@@ -2862,7 +2862,7 @@ function renderDLResult(dlResult){
       }
       html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
         回测（近${ssqRl.games_tested??'—'}期）：红球平均命中<b>${ssqRl.avg_red_hit??'—'}</b>个　蓝球准确率<b>${ssqRl.blue_acc_pct??'—'}%</b>（随机基准6.25%）
-        ${ssqRl.is_first_train?'（首次训练）':'（增量微调）'}
+        ${ssqRl.mode==='prob_direct'?'（概率直出）':(ssqRl.is_first_train?'（首次训练）':'（增量微调）')}
       </div>`;
       const rhd = ssqRl.red_hit_distribution;
       if(rhd){
