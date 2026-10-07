@@ -7,15 +7,14 @@ on:
   workflow_dispatch:
   # 注意：不再设置 cron 兜底。
   # 之前加的兜底 cron 是"无脑触发"，不会检查当天是否已经通过 workflow_run 跑过，
-  # 结果导致 RL 一天内被触发两次（workflow_run一次 + cron一次），
-  # 每次都在昨天权重基础上继续学2万步，等于当天学习量翻倍，即"过度学习"。
-  # 如果 workflow_run 因为某种极端情况没有触发，手动点 workflow_dispatch 补跑一次即可，
-  # 比放一个可能导致重复执行的定时兜底更可控。
+  # 结果导致 RL 一天内被触发两次。如果 workflow_run 因为某种极端情况没有触发，
+  # 手动点 workflow_dispatch 补跑一次即可。
 
 jobs:
   trigger-rl:
-    runs-on: ubuntu-latest
+    # 只有上游(ML)工作流成功才启动；crawl.yml 现在只会在"ML 真正跑完且本轮预测已写入"时才算成功。
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: pip install kaggle
@@ -27,20 +26,24 @@ jobs:
       - name: 推送并触发
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
-        run: kaggle kernels push -p ./kaggle_rl_kernel/
+        run: |
+          echo "START_EPOCH=$(date -u +%s)" >> "$GITHUB_ENV"
+          kaggle kernels push -p ./kaggle_rl_kernel/
       - name: 等待 Kaggle 初始化 Kernel
         run: sleep 90
-      - name: 等待完成（最多30分钟）
+      # 等待上限放宽到 60 分钟：kaggle_rl_daily.py 自己启动时还会再核对一次
+      # "prediction.json 的期数 == history.json 的期数"，不一致最多等 30 分钟（双保险）。
+      - name: 等待完成（最多60分钟）
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
         run: |
           KERNEL="megskfdbbskeb/fucai-rl-daily"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             STATUS=$(kaggle kernels status $KERNEL 2>&1 | tail -1)
-            echo "$(date +'%H:%M:%S') [$i/30] $STATUS"
+            echo "$(date +'%H:%M:%S') [$i/60] $STATUS"
             if echo "$STATUS" | grep -qi "complete"; then echo "✓完成"; exit 0; fi
-            if echo "$STATUS" | grep -qi "error\|cancel\|failed"; then echo "✗失败"; exit 1; fi
-            if echo "$STATUS" | grep -qi "404\|not found"; then echo "  Kernel还在初始化中，继续等待…"; fi
+            if echo "$STATUS" | grep -qiE "error|cancel|fail"; then echo "✗失败"; exit 1; fi
+            if echo "$STATUS" | grep -qiE "404|not found"; then echo "  Kernel还在初始化中，继续等待…"; fi
             sleep 60
           done
-          echo "⚠️超时"; exit 0
+          echo "⚠️超时"; exit 1
