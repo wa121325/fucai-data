@@ -239,9 +239,11 @@ def compute_d3_sample_stats(sampled, extra_bets=None, pair_top=D3_STAT_PAIR_TOP)
 # 2.5时（分数标准化后）双色球最高分球入选率约为均匀的2倍，快乐8选六约2倍：
 # 既体现模型偏好又保留多样性；调小=更集中，调大=更接近随机。
 BALL_SAMPLE_TEMP = 2.5
-SSQ_SAMPLE_N = 12            # 双色球采样注数（全部展示，与3D一致）
-SSQ_SAMPLE_DISPLAY_N = 12
-KL8_SAMPLE_N = 12            # 快乐8每个玩法采样注数（用于统计）
+SSQ_SAMPLE_N = 30            # 双色球采样注数（统计用；样本多一些，球号次数才有参考意义）
+SSQ_SAMPLE_DISPLAY_N = 6     # 双色球网页展示前几注（与推荐注数对齐），其余只参与统计
+KL8_SAMPLE_DRAWS = 30        # 快乐8：采样多少期"下一期开奖"（每期20个球），用于统计
+KL8_SAMPLE_SHOW = 3          # 快乐8网页展示前几期采样（各玩法的采样注从这几期里分配）
+KL8_STRUCT_WINDOW = 300      # 快乐8重号/斜连个数的分布，取最近多少期的真实情况来估计
 # 快乐8网页展示：每个玩法展示的采样注数 = 该玩法推荐注数；多出来的只参与统计
 KL8_STAT_PAIR_TOP = 12
 KL8_STAT_BALL_TOP = 24
@@ -317,6 +319,108 @@ def compute_ball_sample_stats(sampled, big_from, zones, pair_top=KL8_STAT_PAIR_T
         bc = Counter(int(x) for x in blues)
         st['blue_top'] = [[k_, v] for k_, v in sorted(bc.items(), key=lambda kv: (-kv[1], kv[0]))]
     return st
+
+
+def _kl8_neighbors(prev):
+    """上期号码的±1邻号（上期已开出的球本身除外）——即"斜连"候选球"""
+    nb = set()
+    for x in prev:
+        if x > 1: nb.add(x - 1)
+        if x < 80: nb.add(x + 1)
+    return nb - set(prev)
+
+
+def kl8_struct_dist(records, window=KL8_STRUCT_WINDOW):
+    """
+    最近window期的真实"重号个数"和"斜连个数"分布（每期开20球）：
+      重号个数 = 本期号码里，上期也开出的球有几个
+      斜连个数 = 本期号码里，是上期号码±1邻号（且上期没开出）的球有几个
+    返回 (重号分布[0..20], 斜连分布[0..20], 重号均值, 斜连均值)，分布已做拉普拉斯平滑并归一化。
+    """
+    rc = np.full(21, 0.5); dc = np.full(21, 0.5)
+    lo = max(1, len(records) - window)
+    reps, dgs = [], []
+    for t in range(lo, len(records)):
+        prev = set(records[t-1]['numbers']); cur = set(records[t]['numbers'])
+        r = len(cur & prev); d = len(cur & _kl8_neighbors(prev))
+        rc[r] += 1; dc[d] += 1; reps.append(r); dgs.append(d)
+    return (rc / rc.sum(), dc / dc.sum(),
+            float(np.mean(reps)) if reps else 5.0, float(np.mean(dgs)) if dgs else 6.6)
+
+
+def kl8_sample_draws(scores, records, n_draws, seed_src, temp=BALL_SAMPLE_TEMP):
+    """
+    采样"下一期开奖"：每次采出一期完整的20个球，而不是直接采某个玩法的几个球。
+    三步（重号/斜连是骨架）：
+      1) 按最近真实分布，抽这一期的"重号个数r"和"斜连个数d"
+      2) 从上期的20个球里按RL分数抽r个（重号）；从上期±1邻号里按RL分数抽d个（斜连）；
+         剩下 20-r-d 个从其余球里按RL分数抽
+      3) 三组内都是"RL分数越高越容易被抽中"（分数→softmax，温度见BALL_SAMPLE_TEMP）
+    返回 (各期20球升序列表, 各期重号个数, 各期斜连个数)
+    """
+    prob = ball_sample_probs(scores, temp)
+    prev = list(records[-1]['numbers']); prev_set = set(prev)
+    nb = sorted(_kl8_neighbors(prev_set))
+    rest = [b for b in range(1, 81) if b not in prev_set and b not in set(nb)]
+    pr_dist, dg_dist, _, _ = kl8_struct_dist(records)
+    rng = np.random.default_rng(zlib.crc32(seed_src.encode('utf-8')) & 0xffffffff)
+
+    def pick(pool, k):
+        if k <= 0: return []
+        w = np.array([prob[b-1] for b in pool], dtype=np.float64); w /= w.sum()
+        return [pool[i] for i in rng.choice(len(pool), size=k, replace=False, p=w)]
+
+    draws, reps, dgs, seen, guard = [], [], [], set(), 0
+    while len(draws) < n_draws and guard < n_draws * 50:
+        guard += 1
+        r = int(rng.choice(21, p=pr_dist)); d = int(rng.choice(21, p=dg_dist))
+        r = min(r, len(prev)); d = min(d, len(nb))
+        o = 20 - r - d
+        if o < 0 or o > len(rest): continue
+        draw = sorted(pick(prev, r) + pick(nb, d) + pick(rest, o))
+        key = tuple(draw)
+        if key in seen: continue
+        seen.add(key); draws.append(draw); reps.append(r); dgs.append(d)
+    return draws, reps, dgs
+
+
+def compute_kl8_draw_stats(draws, records, ball_top=24):
+    """对采样出的N期（每期20球）做统计，返回值全是Python原生类型，可直接json序列化。
+      ball_top : 球号在采样里出现的次数，取最多的前ball_top个
+      repeat   : 每期"重号个数"分布（与上期重复的球数）；avg_repeat/hist_repeat 为 采样均值/近期真实均值
+      diag     : 每期"斜连个数"分布；avg_diag/hist_diag 同上
+      oddeven/bigsmall(>=41为大)/zone_dom/sum_stat/consec : 与其它采样统计一致
+    """
+    from collections import Counter
+    n = len(draws)
+    if n == 0: return {}
+    prev = set(records[-1]['numbers']); nb = _kl8_neighbors(prev)
+    ball_c = Counter(); rep_c = Counter(); dg_c = Counter(); odd_c = Counter(); big_c = Counter()
+    zone_c = Counter(); con_c = Counter(); sums = []
+    zones = [(1, 20, '一区(1-20)'), (21, 40, '二区(21-40)'), (41, 60, '三区(41-60)'), (61, 80, '四区(61-80)')]
+    for d in draws:
+        ball_c.update(d)
+        rep_c[len(set(d) & prev)] += 1; dg_c[len(set(d) & nb)] += 1
+        odd_c[sum(1 for x in d if x % 2 == 1)] += 1
+        big_c[sum(1 for x in d if x >= 41)] += 1
+        zc = [sum(1 for x in d if lo <= x <= hi) for lo, hi, _ in zones]
+        zone_c[zones[int(max(range(4), key=lambda i: zc[i]))][2]] += 1
+        con_c[sum(1 for i in range(len(d) - 1) if d[i + 1] - d[i] == 1)] += 1
+        sums.append(sum(d))
+    _, _, hr, hd = kl8_struct_dist(records)
+    return {
+        'n': n, 'k': 20,
+        'ball_top': [[k_, v] for k_, v in sorted(ball_c.items(), key=lambda kv: (-kv[1], kv[0]))][:ball_top],
+        'repeat': [[k_, rep_c[k_]] for k_ in sorted(rep_c)],
+        'diag': [[k_, dg_c[k_]] for k_ in sorted(dg_c)],
+        'avg_repeat': round(sum(k_ * v for k_, v in rep_c.items()) / n, 2), 'hist_repeat': round(hr, 2),
+        'avg_diag': round(sum(k_ * v for k_, v in dg_c.items()) / n, 2), 'hist_diag': round(hd, 2),
+        'oddeven': [[k_, odd_c[k_]] for k_ in sorted(odd_c)],
+        'bigsmall': [[k_, big_c[k_]] for k_ in sorted(big_c)],
+        'zone_dom': [[z[2], zone_c.get(z[2], 0)] for z in zones],
+        'sum_stat': {'min': int(min(sums)), 'avg': round(sum(sums) / n, 1), 'max': int(max(sums))},
+        'consec': [[k_, con_c[k_]] for k_ in sorted(con_c)],
+    }
 
 
 # 3D回测用的期数。想改期数，改这一个数字就行——
@@ -1940,28 +2044,30 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             print(f"  [诊断·仅参考] RL自选的选六3注，平均符合{_cavg:.1f}/{len(_kl8_conds)}条ML预测条件"
                   f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
 
-    # ── 按概率采样（与3D采样同一思路，纯展示，不影响上面的确定性推荐）──
-    # 每个玩法：RL的80个球分数 → softmax → 不放回抽n球为一注，抽KL8_SAMPLE_N注；
-    # 网页上每个玩法展示与"推荐"同样多的注数，多出来的只参与统计。
-    kl8_sampled, kl8_sample_stats = {}, {}
+    # ── 按概率采样（纯展示，不影响上面的确定性推荐）──
+    # 快乐8每期开20个球，所以先采样"下一期开奖的20个球"，再把这20个球分配给各玩法：
+    #   某玩法选n个 = 这期采样的20个球里，RL分数最高的n个。
+    # 采样的骨架是"重号个数/斜连个数"（按最近真实分布抽），球的取舍再按RL分数倾斜。
+    # 共采样KL8_SAMPLE_DRAWS期用于统计；网页展示前KL8_SAMPLE_SHOW期，
+    # 各玩法的第i注采样 = 第i期采样的20球里取分数最高的n个。
+    kl8_draws, kl8_sample_stats = [], {}
+    kl8_sampled = {}
     _kl8_samp_cnt = {4: 3, 5: 3, 6: 3, 8: 1, 9: 2, 10: 1}
     if rl_order:
         try:
             _seed_base = f"kl8-{len(records)}-{json.dumps(records[-1], sort_keys=True, ensure_ascii=False)}"
+            kl8_draws, _kd_rep, _kd_dg = kl8_sample_draws(base_action, records, KL8_SAMPLE_DRAWS, _seed_base)
+            kl8_sample_stats = compute_kl8_draw_stats(kl8_draws, records)
             for _n in (4, 5, 6, 8, 9, 10):
-                _sets, _sp = sample_ball_sets(base_action, _n, KL8_SAMPLE_N, f"{_seed_base}-{_n}")
-                kl8_sampled[_n] = _sets
-                if _n != 8:   # 复式不做统计
-                    kl8_sample_stats[_n] = compute_ball_sample_stats(
-                        _sets, 41, [(1, 20, '一区(1-20)'), (21, 40, '二区(21-40)'),
-                                    (41, 60, '三区(41-60)'), (61, 80, '四区(61-80)')])
-            _o6 = len(set(map(tuple, _play_bets[6])) & set(map(tuple, kl8_sampled[6])))
-            print(f"  [观测·采样对比]（不参与推荐，仅观察）种子来自最新开奖")
-            print(f"    选六采样{len(kl8_sampled[6])}注: {kl8_sampled[6]}")
-            print(f"    与确定性推荐选六整注重合 {_o6} 注；单球最高抽中权重{_sp.max()*100:.1f}%（均匀={100/80:.2f}%）")
-            print(f"  [采样统计] 已基于每玩法{KL8_SAMPLE_N}注采样计算频率统计，随结果写入网页")
+                kl8_sampled[_n] = [sorted(sorted(d, key=lambda b: -float(base_action[b-1]))[:_n])
+                                   for d in kl8_draws[:max(_kl8_samp_cnt.values())]]
+            print(f"  [采样] 已采样{len(kl8_draws)}期（每期20球），重号个数均值{kl8_sample_stats['avg_repeat']}"
+                  f"（近{KL8_STRUCT_WINDOW}期真实{kl8_sample_stats['hist_repeat']}），斜连个数均值"
+                  f"{kl8_sample_stats['avg_diag']}（真实{kl8_sample_stats['hist_diag']}）")
+            print(f"    第1期采样20球: {kl8_draws[0]}")
+            print(f"    各玩法第1注采样: " + "  ".join(f"选{_n}={kl8_sampled[_n][0]}" for _n in (4, 5, 6, 9, 10)))
         except Exception as _e:
-            kl8_sampled, kl8_sample_stats = {}, {}
+            kl8_draws, kl8_sample_stats, kl8_sampled = [], {}, {}
             print(f"  [观测·采样对比] 计算失败: {_e}")
 
     def group(n, rank=0):
@@ -1995,10 +2101,11 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             'ppo_selected':picks_by_n[6],   # 兼容旧字段
             'picks_by_n':picks_by_n,        # 兼容旧字段
             'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
+            'sampled_draws':kl8_draws[:KL8_SAMPLE_SHOW],   # 采样出的下一期20球（展示前几期）
             'sampled_plays':{pk: kl8_sampled.get(n, [])[:_kl8_samp_cnt[n]]
-                             for pk, n in [('xuan4',4),('xuan5',5),('xuan5_fu',8),('xuan6',6),('xuan9',9),('xuan10',10)]},   # 每玩法展示的采样注
-            'sampled_n_per_play':KL8_SAMPLE_N,
-            'sampled_stats':{str(n): v for n, v in kl8_sample_stats.items()},   # 每玩法的采样统计
+                             for pk, n in [('xuan4',4),('xuan5',5),('xuan5_fu',8),('xuan6',6),('xuan9',9),('xuan10',10)]},   # 各玩法的采样注=采样20球里RL分数最高的n个
+            'sampled_n_draws':len(kl8_draws),
+            'sampled_stats':kl8_sample_stats,   # N期采样的统计（球号次数/重号/斜连/奇偶/大小/区间/和值/连号）
             'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
             'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
             'ref_info':ref_info,            # 参考信息：遗漏/频率/ML预测，仅供理解RL判断依据，不影响排序
