@@ -2812,7 +2812,7 @@ function renderDLResult(dlResult){
       if(kl8Rl.ref_info){
         const ri = kl8Rl.ref_info;
         html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:6px 10px;margin-bottom:8px;">
-          📎 参考信息（不参与RL决策，仅帮助理解）：主推荐平均遗漏${ri.avg_omission_top6??'—'}期，平均近期频率${ri.avg_freq_top6??'—'}次；
+          📎 参考信息（不参与RL决策，仅帮助理解）：主推荐平均遗漏${ri.avg_omission_top6??'—'}期，${ri.top6_repeat!=null?`含上期重号${ri.top6_repeat}个、斜连邻号${ri.top6_diag}个`:(ri.avg_freq_top6!=null?`平均近期频率${ri.avg_freq_top6}次`:'')}；
           ML预测主力区间=${ri.ml_zone_pred||'—'}，主力五行段=${ri.ml_five_pred||'—'}
         </div>`;
       }
