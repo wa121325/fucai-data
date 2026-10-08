@@ -124,6 +124,10 @@ DATASET_ID   = f'megskfdbbskeb/{DATASET_SLUG}'
 LOCAL_DIR    = '/kaggle/working/dl_cache'
 MOUNTED_DIR  = f'/kaggle/input/{DATASET_SLUG}'
 WINDOW = 50; SEQ_LEN = 20
+# 深度学习回测开关：False=不训练回测模型、不算holdout准确率（省一半以上时间）；True=恢复原来的回测
+DL_BACKTEST = False
+# 热启动开关：False=每次都从头全量训练（不加载上次权重微调）；True=恢复滑动窗口热启动微调
+DL_WARM_START = False
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -592,33 +596,39 @@ def train_encoder(model_ctor, X, y, epochs=60, lr=5e-4, batch_size=32, holdout_n
                 print(f"      [{tag}] 早停于第{stopped}/{ep}轮，内部验证集最佳准确率 {best_acc*100:.1f}%")
         return m
 
-    # ── 1) 回测模型：必须从头训练，不能加载旧权重（避免评估时偷看未来数据）──
-    # 早停用的验证集必须从【训练集内部】再切一块，不能用 X[split:]（那是留着报告准确率的holdout）——
-    # 否则holdout参与了模型选择，报出来的准确率就不再干净，会虚高。
-    _inner = max(1, int(split * 0.15))
-    _bt_tr_end = max(1, split - _inner)
-    bt_model = _train_one(model_ctor(), X[:_bt_tr_end], y[:_bt_tr_end], epochs,
-                          Xval=X[_bt_tr_end:split], yval=y[_bt_tr_end:split], tag='回测模型')
-    bt_model.eval()
-    with torch.no_grad():
-        Xte = torch.FloatTensor(X[split:]).to(DEVICE)
-        preds = bt_model(Xte).argmax(dim=1).cpu().numpy()
-    y_holdout = y[split:]
-    acc = round(float((preds==y_holdout).mean())*100,1) if len(y_holdout)>0 else 0.0
+    # ── 1) 回测模型（开关 DL_BACKTEST，默认关闭）──
+    # 回测要额外从头训练一个模型，耗时翻倍，而且只是为了在页面上显示一个准确率数字，
+    # 对RL用到的权重/隐层/预测概率没有任何影响，所以默认关闭。
+    acc, baseline_acc = None, None
+    if DL_BACKTEST:
+        # 回测模型：必须从头训练，不能加载旧权重（避免评估时偷看未来数据）──
+        # 早停用的验证集必须从【训练集内部】再切一块，不能用 X[split:]（那是留着报告准确率的holdout）——
+        # 否则holdout参与了模型选择，报出来的准确率就不再干净，会虚高。
+        _inner = max(1, int(split * 0.15))
+        _bt_tr_end = max(1, split - _inner)
+        bt_model = _train_one(model_ctor(), X[:_bt_tr_end], y[:_bt_tr_end], epochs,
+                              Xval=X[_bt_tr_end:split], yval=y[_bt_tr_end:split], tag='回测模型')
+        bt_model.eval()
+        with torch.no_grad():
+            Xte = torch.FloatTensor(X[split:]).to(DEVICE)
+            preds = bt_model(Xte).argmax(dim=1).cpu().numpy()
+        y_holdout = y[split:]
+        acc = round(float((preds==y_holdout).mean())*100,1) if len(y_holdout)>0 else 0.0
 
-    # 基线：训练集里出现最多的那一类，用来判断准确率是不是只是"蒙对"
-    from collections import Counter as Ctr
-    y_train = y[:split]
-    if len(y_train)>0 and len(y_holdout)>0:
-        majority = Ctr(y_train.tolist()).most_common(1)[0][0]
-        baseline_acc = round(float((y_holdout==majority).mean())*100,1)
-    else:
-        baseline_acc = 0.0
+        # 基线：训练集里出现最多的那一类，用来判断准确率是不是只是"蒙对"
+        from collections import Counter as Ctr
+        y_train = y[:split]
+        if len(y_train)>0 and len(y_holdout)>0:
+            majority = Ctr(y_train.tolist()).most_common(1)[0][0]
+            baseline_acc = round(float((y_holdout==majority).mean())*100,1)
+        else:
+            baseline_acc = 0.0
+
 
     # ── 2) 生产模型：优先"滑动窗口热启动微调"，找不到旧权重才全量训练 ──
     is_warm_start = False
     prod_new = model_ctor()
-    if warm_start_path and os.path.exists(warm_start_path):
+    if DL_WARM_START and warm_start_path and os.path.exists(warm_start_path):
         try:
             prod_new.load_state_dict(torch.load(warm_start_path, map_location='cpu'))
             is_warm_start = True
@@ -773,7 +783,7 @@ for game, (feat_fn, targets) in configs.items():
         # 其余目标模型不做持久化，本来就每次训练一次，无需微调逻辑
         is_primary_target = (lstm_hidden_all is None)
         lstm_warm_path = tfm_warm_path = None
-        if is_primary_target:
+        if is_primary_target and DL_WARM_START:
             prev_meta_path = f'{MOUNTED_DIR}/{game}_meta.json'
             if os.path.exists(prev_meta_path):
                 try:
@@ -789,12 +799,14 @@ for game, (feat_fn, targets) in configs.items():
         lstm_m, lstm_h, _, lstm_p, lstm_acc, lstm_baseline, lstm_warm = train_encoder(
             lambda: LSTMEncoder(fd, hidden_dim=64, output_dim=nc), X, y, epochs=20,
             warm_start_path=lstm_warm_path, predict_X=predict_X)
-        print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
+        if lstm_acc is None: print(f"    LSTM 训练完成（回测已关闭）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
+        else: print(f"    LSTM 准确率: {lstm_acc}%（基线{lstm_baseline}%，提升{round(lstm_acc-lstm_baseline,1)}%）{'[热启动微调]' if lstm_warm else '[全量训练]'}")
 
         tfm_m, tfm_h, _, tfm_p, tfm_acc, tfm_baseline, tfm_warm = train_encoder(
             lambda: TransformerEncoder(fd, d_model=32, nhead=4, output_dim=nc), X, y, epochs=20,
             warm_start_path=tfm_warm_path, predict_X=predict_X)
-        print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
+        if tfm_acc is None: print(f"    TFM  训练完成（回测已关闭）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
+        else: print(f"    TFM  准确率: {tfm_acc}%（基线{tfm_baseline}%，提升{round(tfm_acc-tfm_baseline,1)}%）{'[热启动微调]' if tfm_warm else '[全量训练]'}")
 
         if lstm_hidden_all is None:
             lstm_hidden_all = lstm_h; tfm_hidden_all = tfm_h
