@@ -2660,6 +2660,38 @@ function renderD3SampleStats(st, shownCount){
   return h;
 }
 
+/* 快乐8/双色球 采样统计卡片（数据来自RL脚本 sampled_stats）。样式与3D采样统计一致 */
+function renderBallSampleStats(st, opt){
+  if(!st || !st.n) return '';
+  opt = opt || {};
+  const cnt = v => `<span style="color:#2dd4bf;font-weight:600;">×${v}</span>`;
+  const chip = (k, v, dim) => `<span style="display:inline-block;white-space:nowrap;margin:0 7px 0 0;${dim?'opacity:.35;':''}">${k}${cnt(v)}</span>`;
+  const row = (label, inner) => `<div style="display:flex;gap:6px;margin:2px 0;align-items:baseline;"><div style="flex:0 0 48px;color:#888;font-size:10px;white-space:nowrap;">${label}</div><div style="flex:1;min-width:0;line-height:1.7;">${inner}</div></div>`;
+  const note = t => `<span style="color:#666;font-size:9px;white-space:nowrap;">${t}</span>`;
+  const p2 = x => String(x).padStart(2,'0');
+  const emptyNote = note('无（各球均只出现1次）');
+  let h = `<div style="font-size:11px;color:#666;margin:6px 0 3px;">${opt.title||'采样统计'}（共${st.n}注${opt.shown!=null&&st.n>opt.shown?`，上方仅展示${opt.shown}注`:''}）：</div>`;
+  h += `<div style="background:#1a1a2e;border-radius:6px;padding:3px 8px;color:#ccc;font-size:10px;">`;
+  h += row('球号次数', (st.ball_top||[]).length ? st.ball_top.map(p=>chip(p2(p[0]),p[1],false)).join('') + note('仅列出现≥2次') : emptyNote);
+  h += row('两球共现', (st.pair_top||[]).length ? st.pair_top.map(p=>chip(p[0],p[1],false)).join('') + note('仅列出现≥2次') : note('无（各对均只出现1次）'));
+  if(st.blue_top && st.blue_top.length) h += row('蓝球次数', st.blue_top.map(p=>chip(p2(p[0]),p[1],false)).join(''));
+  h += row('奇数个数', (st.oddeven||[]).map(p=>chip(p[0]+'个',p[1],false)).join(''));
+  h += row('大号个数', (st.bigsmall||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note(opt.bigNote||''));
+  h += row('主力区', (st.zone_dom||[]).map(p=>chip(p[0],p[1],p[1]===0)).join(''));
+  h += row('连号对数', (st.consec||[]).map(p=>chip(p[0]+'对',p[1],false)).join(''));
+  const sm = st.sum_stat||{};
+  h += row('和值', note(`最小${sm.min??'—'} · 平均${sm.avg??'—'} · 最大${sm.max??'—'}`));
+  h += `</div>`;
+  return h;
+}
+/* 快乐8：各玩法的采样统计用按钮切换 */
+function kl8StatSelect(n){
+  const box = document.getElementById('kl8StatBox'); if(!box || !window.__kl8Stats) return;
+  const st = window.__kl8Stats[n]; const names={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+  box.innerHTML = renderBallSampleStats(st, {title:names[n]+' 采样统计', bigNote:'(41~80算大)'});
+  document.querySelectorAll('.kl8StatBtn').forEach(b=>{ b.style.background = (+b.dataset.n===n)?'#0d9488':'#333'; });
+}
+
 function renderDLResult(dlResult){
   const panel = document.getElementById('dlResultPanel');
   const meta  = document.getElementById('dlResultMeta');
@@ -2812,8 +2844,25 @@ function renderDLResult(dlResult){
             html += g.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
             html += `</div>`;
           });
+          // 采样（按概率不放回抽，与3D采样同一思路）：与推荐同样多的注数，青绿色球区分
+          const sg = kl8Rl.sampled_plays && kl8Rl.sampled_plays[pk];
+          if(sg && sg.length){
+            sg.forEach((g,i)=>{
+              const label = play.name.includes('复式') ? `采样复式${g.length}个球` : `采样${i+1}`;
+              html += `<div style="margin:2px 0;font-size:11px;color:#0d9488;">${label}：`;
+              html += g.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#0d9488;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+              html += `</div>`;
+            });
+          }
         }
         html += `</div>`;
+        if(kl8Rl.sampled_stats && Object.keys(kl8Rl.sampled_stats).length){
+          window.__kl8Stats = kl8Rl.sampled_stats;
+          html += `<div style="font-size:11px;color:#666;margin:8px 0 3px;">采样统计（每个玩法各${kl8Rl.sampled_n_per_play||12}注，选玩法查看）：</div><div style="margin-bottom:4px;">`;
+          [4,5,6,9,10].forEach(n=>{ if(kl8Rl.sampled_stats[n]||kl8Rl.sampled_stats[String(n)]) html += `<span class="kl8StatBtn" data-n="${n}" onclick="kl8StatSelect(${n})" style="display:inline-block;cursor:pointer;padding:3px 10px;margin:0 6px 4px 0;border-radius:999px;font-size:11px;color:#fff;background:#333;">选${{4:'四',5:'五',6:'六',9:'九',10:'十'}[n]}</span>`; });
+          html += `</div><div id="kl8StatBox"></div>`;
+          setTimeout(()=>kl8StatSelect(6),0);
+        }
       } else if(kl8Rl.picks_by_n){
         // 兼容旧结构
         const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
@@ -2892,6 +2941,17 @@ function renderDLResult(dlResult){
           blues.forEach(b=>{ html += `<span class="ball-b">${String(b).padStart(2,'0')}</span>`; });
           html += `</div>`;
         });
+        // 采样（按概率不放回抽红球、按蓝球概率抽蓝球，与3D采样同一思路），青绿色球区分
+        if(ssqRl.sampled_groups?.length){
+          html += `<div class="ball-label" style="margin:8px 0 4px;"><span style="font-size:12px;color:#666;">采样（${ssqRl.sampled_groups.length}注）：</span></div>`;
+          ssqRl.sampled_groups.forEach((g,i)=>{
+            html += `<div class="rec-group">采${i+1}：`;
+            (g.red||[]).forEach(n=>{ html += `<span class="ball-r" style="background:#0d9488;">${String(n).padStart(2,'0')}</span>`; });
+            if(g.blue!=null) html += `<span class="ball-b">${String(g.blue).padStart(2,'0')}</span>`;
+            html += `</div>`;
+          });
+          html += renderBallSampleStats(ssqRl.sampled_stats, {title:'采样统计', shown:ssqRl.sampled_groups.length, bigNote:'(17~33算大)'});
+        }
       } else if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
         html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐整注：</span></div>`;
         html += `<div class="rec-group" style="display:block;">`;
