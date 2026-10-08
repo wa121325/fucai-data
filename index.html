@@ -1882,7 +1882,7 @@ function getMlContext(type){
       lines.push(`更新：${pred.dl_result.lstm_tfm.updated_at||'—'}`);
       for(const [tname, tm] of Object.entries(lstmTfmGame)){
         const lbl = tLabels[tname]||tname;
-        lines.push(`  ${lbl}：LSTM准确率${tm.lstm_acc??'—'}%  TFM准确率${tm.tfm_acc??'—'}%  集成预测→${tm.ensemble_pred??'—'}（置信${tm.confidence??'—'}%）`);
+        lines.push(`  ${lbl}：${tm.lstm_acc!=null?`LSTM准确率${tm.lstm_acc}%  TFM准确率${tm.tfm_acc??'—'}%  `:''}集成预测→${tm.ensemble_pred??'—'}（置信${tm.confidence??'—'}%）`);
       }
     }
 
@@ -2684,12 +2684,26 @@ function renderBallSampleStats(st, opt){
   h += `</div>`;
   return h;
 }
-/* 快乐8：各玩法的采样统计用按钮切换 */
-function kl8StatSelect(n){
-  const box = document.getElementById('kl8StatBox'); if(!box || !window.__kl8Stats) return;
-  const st = window.__kl8Stats[n]; const names={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
-  box.innerHTML = renderBallSampleStats(st, {title:names[n]+' 采样统计', bigNote:'(41~80算大)'});
-  document.querySelectorAll('.kl8StatBtn').forEach(b=>{ b.style.background = (+b.dataset.n===n)?'#0d9488':'#333'; });
+/* 快乐8：N期采样（每期20球）的统计，重号/斜连是核心指标，放最前面 */
+function renderKl8DrawStats(st){
+  if(!st || !st.n) return '';
+  const cnt = v => `<span style="color:#2dd4bf;font-weight:600;">×${v}</span>`;
+  const chip = (k, v, dim) => `<span style="display:inline-block;white-space:nowrap;margin:0 7px 0 0;${dim?'opacity:.35;':''}">${k}${cnt(v)}</span>`;
+  const row = (label, inner) => `<div style="display:flex;gap:6px;margin:2px 0;align-items:baseline;"><div style="flex:0 0 48px;color:#888;font-size:10px;white-space:nowrap;">${label}</div><div style="flex:1;min-width:0;line-height:1.7;">${inner}</div></div>`;
+  const note = t => `<span style="color:#666;font-size:9px;white-space:nowrap;">${t}</span>`;
+  let h = `<div style="font-size:11px;color:#666;margin:8px 0 3px;">采样统计（共采样${st.n}期，每期20球）：</div>`;
+  h += `<div style="background:#1a1a2e;border-radius:6px;padding:3px 8px;color:#ccc;font-size:10px;">`;
+  h += row('重号个数', (st.repeat||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note(`采样均值${st.avg_repeat} · 近期真实${st.hist_repeat}`));
+  h += row('斜连个数', (st.diag||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note(`采样均值${st.avg_diag} · 近期真实${st.hist_diag}`));
+  h += row('球号次数', (st.ball_top||[]).map(p=>chip(String(p[0]).padStart(2,'0'),p[1],false)).join('') + note('次数最多的前'+(st.ball_top||[]).length+'个'));
+  h += row('奇数个数', (st.oddeven||[]).map(p=>chip(p[0]+'个',p[1],false)).join(''));
+  h += row('大号个数', (st.bigsmall||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note('(41~80算大)'));
+  h += row('主力区', (st.zone_dom||[]).map(p=>chip(p[0],p[1],p[1]===0)).join(''));
+  h += row('连号对数', (st.consec||[]).map(p=>chip(p[0]+'对',p[1],false)).join(''));
+  const sm = st.sum_stat||{};
+  h += row('和值', note(`最小${sm.min??'—'} · 平均${sm.avg??'—'} · 最大${sm.max??'—'}`));
+  h += `</div>`;
+  return h;
 }
 
 function renderDLResult(dlResult){
@@ -2728,7 +2742,7 @@ function renderDLResult(dlResult){
         const lstmLift = tm.lstm_baseline!=null ? (tm.lstm_acc - tm.lstm_baseline) : null;
         const baselineNote = lstmLift!=null ? `（基线${tm.lstm_baseline}%${lstmLift>0?' +'+lstmLift.toFixed(1)+'%':''}）` : '';
         html += `<span class="pred-acc-badge" style="background:#6b3a9b;font-size:11px;">
-          ${la} LSTM${tm.lstm_acc??'—'}% TFM${tm.tfm_acc??'—'}%${baselineNote}
+          ${la}${tm.lstm_acc!=null?` LSTM${tm.lstm_acc}% TFM${tm.tfm_acc??'—'}%${baselineNote}`:''}
           → <b>${tm.ensemble_pred??'—'}</b>(${tm.confidence??'—'}%)
         </span>`;
       }
@@ -2856,12 +2870,16 @@ function renderDLResult(dlResult){
           }
         }
         html += `</div>`;
-        if(kl8Rl.sampled_stats && Object.keys(kl8Rl.sampled_stats).length){
-          window.__kl8Stats = kl8Rl.sampled_stats;
-          html += `<div style="font-size:11px;color:#666;margin:8px 0 3px;">采样统计（每个玩法各${kl8Rl.sampled_n_per_play||12}注，选玩法查看）：</div><div style="margin-bottom:4px;">`;
-          [4,5,6,9,10].forEach(n=>{ if(kl8Rl.sampled_stats[n]||kl8Rl.sampled_stats[String(n)]) html += `<span class="kl8StatBtn" data-n="${n}" onclick="kl8StatSelect(${n})" style="display:inline-block;cursor:pointer;padding:3px 10px;margin:0 6px 4px 0;border-radius:999px;font-size:11px;color:#fff;background:#333;">选${{4:'四',5:'五',6:'六',9:'九',10:'十'}[n]}</span>`; });
-          html += `</div><div id="kl8StatBox"></div>`;
-          setTimeout(()=>kl8StatSelect(6),0);
+        if(kl8Rl.sampled_draws?.length){
+          html += `<div class="ball-label" style="font-size:11px;color:#666;margin:8px 0 3px;">采样出的下一期开奖（每期20球，上面各玩法的“采样”就是从这几期里按RL分数取最高的几个）：</div>`;
+          kl8Rl.sampled_draws.forEach((d,i)=>{
+            html += `<div class="rec-group" style="display:block;font-size:11px;color:#0d9488;">采样第${i+1}期：`;
+            html += d.map(x=>`<span style="display:inline-block;width:20px;height:20px;line-height:20px;border-radius:50%;background:#0d9488;color:#fff;font-size:9px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+            html += `</div>`;
+          });
+        }
+        if(kl8Rl.sampled_stats && kl8Rl.sampled_stats.n){
+          html += renderKl8DrawStats(kl8Rl.sampled_stats);
         }
       } else if(kl8Rl.picks_by_n){
         // 兼容旧结构
