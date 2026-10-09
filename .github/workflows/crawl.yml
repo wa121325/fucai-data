@@ -1,3 +1,8 @@
+# ══ 自动触发开关：改 ci/switch.env 里的 NIGHTLY_ENABLED ══
+#   true  → 每晚 21:30 由 nightly.yml 串行跑 ML→DL→RL；本文件的定时/自动接力让路
+#   false → 恢复原来的方式（本文件照旧自动运行）；nightly.yml 的定时不再运行
+# 手动点 "Run workflow"（workflow_dispatch）永远可用，不受开关影响。
+
 name: 触发 Kaggle 运行
 
 on:
@@ -10,7 +15,21 @@ env:
   DATA_REPO: wa121325/fucai-data     # ML 脚本把 prediction.json 推送到的数据仓库
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      nightly: ${{ steps.g.outputs.nightly }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: g
+        run: |
+          NIGHTLY_ENABLED=true
+          [ -f ci/switch.env ] && source ci/switch.env
+          echo "nightly=$NIGHTLY_ENABLED" >> "$GITHUB_OUTPUT"
+
   trigger-kaggle:
+    needs: gate
+    if: ${{ github.event_name != 'schedule' || needs.gate.outputs.nightly != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
