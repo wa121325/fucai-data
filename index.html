@@ -2706,6 +2706,99 @@ function renderKl8DrawStats(st){
   return h;
 }
 
+/* 共识投票（ML·DL·RL）：数据来自RL脚本返回的 consensus 字段 */
+function renderConsensus(game, c){
+  if(!c) return '';
+  const p2 = x => String(x).padStart(2,'0');
+  const srcName = {ml:'ML', dl:'DL', rl:'RL'};
+  const PUR = '#7c3aed';
+  const ball = (n, bg, sz) => `<span style="display:inline-block;width:${sz||22}px;height:${sz||22}px;line-height:${sz||22}px;border-radius:50%;background:${bg};color:#fff;font-size:${(sz||22)>=22?10:9}px;font-weight:700;text-align:center;margin:1px">${n}</span>`;
+  const note = t => `<span style="color:#888;font-size:10px;">${t}</span>`;
+  const sources = c.sources || {};
+  // 三方状态：参与投票 / 无明显倾向（不投票） / 未获取
+  let h = `<div style="margin-top:10px;padding:8px 10px;border:1px solid ${PUR}55;border-radius:8px;">`;
+  h += `<div style="font-size:12px;font-weight:700;color:${PUR};margin-bottom:4px;">🗳️ 共识投票（ML · DL · RL 三方各自表态）</div>`;
+  h += `<div style="font-size:10.5px;margin-bottom:6px;">` + ['ml','dl','rl'].map(k=>{
+    const s = sources[k]||{};
+    const st = !s.available ? '未获取' : (s.flat ? '无明显倾向，不投票' : `参与投票（倾向强度${s.strength}）`);
+    const col = !s.available ? '#aaa' : (s.flat ? '#c58a00' : '#16a34a');
+    return `<span style="margin-right:10px;color:${col};">● ${srcName[k]}：${st}</span>`;
+  }).join('') + `</div>`;
+  if(game==='3d'){
+    // 各位候选：Top3 数字及得票
+    (c.pos||[]).forEach(ps=>{
+      h += `<div style="margin:3px 0;font-size:11px;color:#666;">${ps.name}：` + ps.cands.map(x=>
+        ball(x.digit, x.votes>=2?PUR:'#9ca3af', 20) + `<span style="color:#888;font-size:10px;margin-right:8px;">${x.votes}票·${x.prob}%</span>`).join('') + `</div>`;
+    });
+    if(c.bets?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">共识直选（${c.bets.length}注）：</span></div>`;
+      c.bets.forEach((b,i)=>{
+        h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;"><span style="margin-right:4px;">${i+1}.</span>${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}</div>`;
+      });
+    }
+    const gc = c.group_cover;
+    if(gc?.bets?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">组选覆盖（${gc.n_bets}注，覆盖${gc.perms}个直选排列）：</span></div>`;
+      gc.bets.forEach((b,i)=>{
+        h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;"><span style="margin-right:4px;">${b.type}</span>${b.digits.map(n=>ball(n,b.type==='组六'?'#0d9488':'#d97706',18)).join('')} ${note(`覆盖${b.perms}注 · 概率${b.prob}%（随机${b.base}%，${b.lift}倍）`)}</div>`;
+      });
+      h += `<div style="font-size:10.5px;color:#888;margin:2px 0;">${gc.n_bets}注组选合计覆盖概率 <b>${gc.prob}%</b>（随机基准${gc.base}%）；对比上面直选${gc.direct_n}注合计 ${gc.direct_prob}%。组选一注覆盖组六6个/组三3个排列，所以同样的票数覆盖面更大（奖金也相应是直选的1/6、1/3）。</div>`;
+    }
+    const st = c.stratified;
+    if(st?.cells?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（按格取概率最大的${st.cells.length}格，每格选${st.cells[0].bets.length}注，避免全挤在同一和值/跨度）：</span></div>`;
+      // 概率矩阵：行=和值段，列=跨度段，高亮被选中的格
+      const chosen = new Set((st.chosen||[]).map(x=>x.join(',')));
+      h += `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:3px 0;"><tr><td style="padding:2px 6px;color:#888;">和值＼跨度</td>${st.span_bands.map(b=>`<td style="padding:2px 6px;color:#888;text-align:center;">${b}</td>`).join('')}</tr>`;
+      st.matrix.forEach((row,r)=>{
+        h += `<tr><td style="padding:2px 6px;color:#888;">${st.sum_bands[r]}</td>` + row.map((v,cc)=>{
+          const base = st.base_matrix[r][cc]; const sel = chosen.has(r+','+cc);
+          return `<td style="padding:2px 6px;text-align:center;border:1px solid #333;${sel?`background:${PUR}55;color:#fff;font-weight:700;`:''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span></td>`;
+        }).join('') + `</tr>`;
+      });
+      h += `</table></div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%；紫色为选中的格</div>`;
+      st.cells.forEach(cell=>{
+        h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`概率${cell.prob}%（随机${cell.base}%）`)}</div>`;
+        cell.bets.forEach(b=>{
+          h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;">${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}</div>`;
+        });
+      });
+    }
+  } else {
+    // ssq / kl8：共识球号榜（得票 + 平均提升倍数），再给共识推荐
+    const tb = c.table||[];
+    h += `<div style="font-size:11px;color:#666;margin:2px 0 3px;">共识球号榜（得票/${c.n_active}方，倍数=相对随机的提升）：</div><div style="line-height:1.9;">`;
+    tb.slice(0, game==='kl8'?20:12).forEach(t=>{
+      h += `<span style="display:inline-block;white-space:nowrap;margin:0 8px 2px 0;">${ball(p2(t.ball), t.votes>=Math.max(2,c.n_active)?PUR:(t.votes>=2?'#a78bfa':'#9ca3af'), 20)}<span style="color:#888;font-size:10px;">${t.votes}票·${t.lift}×</span></span>`;
+    });
+    h += `</div>`;
+    ['ml','dl','rl'].forEach(k=>{
+      const s = sources[k]; if(!s?.available) return;
+      h += `<div style="font-size:10.5px;color:#888;margin:2px 0;">${srcName[k]}看好：` + (s.top||[]).slice(0, game==='kl8'?20:10).map(n=>p2(n)).join(' ') + (s.flat?'（无明显倾向，仅供参考）':'') + `</div>`;
+    });
+    if(game==='ssq' && c.bets?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">共识推荐（${c.bets.length}注，按共识分选号，蓝球沿用RL）：</span></div>`;
+      c.bets.forEach((g,i)=>{
+        h += `<div class="rec-group">共${i+1}：` + g.red.map(n=>`<span class="ball-r" style="background:${PUR};">${p2(n)}</span>`).join('') + (g.blues||[]).map(b=>`<span class="ball-b">${p2(b)}</span>`).join('') + `</div>`;
+      });
+    }
+    if(game==='kl8' && c.plays){
+      h += `<div class="ball-unit">`;
+      for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
+        const pl = c.plays[pk]; if(!pl?.groups?.length) continue;
+        h += `<div style="margin:6px 0 2px;"><span style="font-size:11px;font-weight:700;color:${PUR};">共识·${pl.name}：</span></div>`;
+        pl.groups.forEach((g,i)=>{
+          h += `<div style="margin:2px 0;font-size:11px;color:#666;">${pl.name.includes('复式')?'复式':'第'+(i+1)+'注'}：${g.map(x=>ball(p2(x),PUR,22)).join('')}</div>`;
+        });
+      }
+      h += `</div>`;
+    }
+  }
+  h += `<div style="font-size:9.5px;color:#999;margin-top:4px;">说明：ML/DL给的是和值区、奇偶个数等特征目标的概率，已合成为号码级概率；某一方几乎没有倾向时不投票，避免把噪声当共识。各方信号都接近随机时，共识也只是结构上的参考，不代表更容易中。</div>`;
+  h += `</div>`;
+  return h;
+}
+
 function renderDLResult(dlResult){
   const panel = document.getElementById('dlResultPanel');
   const meta  = document.getElementById('dlResultMeta');
@@ -2810,6 +2903,7 @@ function renderDLResult(dlResult){
         html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐组合：</span></div>`;
         html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
       }
+      html += renderConsensus('3d', d3Rl.consensus);
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${d3Rl.note||''}</div>`;
       html += `</div>`;
     }
@@ -2894,6 +2988,7 @@ function renderDLResult(dlResult){
       } else if(kl8Rl.ppo_selected?.length){
         html += `<div class="rec-group" style="display:block;">${kl8Rl.ppo_selected.map(n=>`<span class="ball-r" style="background:#e87d00;">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
       }
+      html += renderConsensus('kl8', kl8Rl.consensus);
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${kl8Rl.note||''}</div>`;
       html += `</div>`;
     }
@@ -2981,6 +3076,7 @@ function renderDLResult(dlResult){
         }
         html += `</div>`;
       }
+      html += renderConsensus('ssq', ssqRl.consensus);
       html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${ssqRl.note||''}</div>`;
       html += `</div>`;
     }
