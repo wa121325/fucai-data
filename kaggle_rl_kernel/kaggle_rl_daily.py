@@ -1792,7 +1792,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 200000, lambda: _eval_holdout(model), '快乐8首训',
-            n_chunks=5, patience=6, reset_timesteps=True, warmup_chunks=5,
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（2万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2105,6 +2105,7 @@ def run_kl8_daily(records, ml_pred, prev_result=None):
             'sampled_plays':{pk: kl8_sampled.get(n, [])[:_kl8_samp_cnt[n]]
                              for pk, n in [('xuan4',4),('xuan5',5),('xuan5_fu',8),('xuan6',6),('xuan9',9),('xuan10',10)]},   # 各玩法的采样注=采样20球里RL分数最高的n个
             'sampled_n_draws':len(kl8_draws),
+            'rl_scores':[round(float(x),4) for x in base_action] if rl_order else None,   # RL对80个球的原始分数（共识投票用）
             'sampled_stats':kl8_sample_stats,   # N期采样的统计（球号次数/重号/斜连/奇偶/大小/区间/和值/连号）
             'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
             'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
@@ -2182,7 +2183,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
             model, 150000, lambda: _eval_holdout(model), '双色球首训',
-            n_chunks=5, patience=6, reset_timesteps=True, warmup_chunks=5,
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
             baseline_is_real=False)
     else:
         print("  增量微调（1.5万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2401,6 +2402,7 @@ def run_ssq_daily(records, ml_pred, prev_result=None):
             'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
             'ppo_groups':groups,'ref_info':ref_info,
             'red_core':red_core_info,'red_pool':red_pool_info,
+            'rl_scores':[round(float(x),4) for x in red_scores] if groups else None,   # RL对33个红球的原始分数（共识投票用）
             'sampled_groups':ssq_sampled[:SSQ_SAMPLE_DISPLAY_N],   # 网页展示的采样注 [{red,blue}]
             'sampled_extra':ssq_sampled[SSQ_SAMPLE_DISPLAY_N:],
             'sampled_stats':ssq_sample_stats,
@@ -2471,8 +2473,8 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=5, patience=6, reset_timesteps=True, warmup_chunks=10,
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=10,
             baseline_is_real=False)
     else:
         print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
@@ -2750,12 +2752,335 @@ def run_3d_daily(records, ml_pred, prev_result=None):
             'ppo_pred':pred,'ppo_groups':groups,
             'sampled_groups':_sampled[:D3_SAMPLE_DISPLAY_N],   # 网页主展示区：前N注
             'sampled_extra':_sampled[D3_SAMPLE_DISPLAY_N:],    # 超出展示数量的部分
+            'rl_pos_probs':[[round(float(x),5) for x in pp] for pp in locals().get('pos_probs', [])] or None,   # RL逐位10个数字的概率（共识投票用）
             'sampled_stats':_sample_stats,   # 采样注的频率统计，网页在两栏推荐下方展示
             'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
             'is_first_train':is_new,
             'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
                    f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'
                    f'{_sample_note}'}
+
+# ══════════════════════════════════════════════════════
+#  共识投票：ML、DL、RL 三方各自对"下一期"表态，投票得出共识推荐
+#
+#  三个投票者：
+#    ML：prediction.json 里各目标（和值区、奇偶个数、组型…）的概率
+#    DL：dl_lstm_tfm.json 里各目标的概率（每周更新）
+#    RL：本脚本 PPO 给出的球分数（3D 为逐位数字概率）
+#  ML/DL 给的是"特征目标"的概率，不是逐球概率，所以先用乘积专家把它们合成号码级概率：
+#    对每个号码组合，看它落在各目标的哪一类，用「模型给该类的概率 ÷ 该类在随机组合里的占比」
+#    当似然比，各目标连乘 → 该组合的权重 → 得到每个号码的入选概率（3D 是1000注的联合概率）。
+#  然后每一方的入选概率 ÷ 随机基准 = "提升倍数"(lift)，1.0 表示没有倾向。
+#
+#  投票规则：每一方把自己提升倍数最高的 K 个球投一票；某一方的倾向几乎为平（所有球提升倍数
+#  差异<VOTE_FLAT_EPS）就视为"无明显倾向"，不参与投票（否则平局会被名次排序放大成噪声）。
+#  共识分 = 得票数×10 + 各方平均提升倍数；按共识分选号。
+# ══════════════════════════════════════════════════════
+VOTE_LAYOUT = {
+    '3d':  [('sum_grp', 3), ('odd', 4), ('group_type', 3), ('big', 4), ('span_grp', 3), ('road_dom', 3), ('arith', 2)],
+    'ssq': [('odd', 7), ('sum_grp', 3), ('ac_grp', 3), ('red_zone_dom', 3), ('gap_grp', 3), ('big', 7), ('consec', 6)],
+    'kl8': [('odd_grp', 3), ('zone_dom', 4), ('tot_grp', 3), ('big_grp', 3), ('five_dom', 5), ('consec_grp', 3), ('range_grp', 3)],
+}
+VOTE_NSAMP = {'ssq': 300000, 'kl8': 200000}   # 蒙特卡洛样本数
+VOTE_K = {'ssq': 10, 'kl8': 30}               # 每一方投票的球数（3D每位固定投3个数字）
+VOTE_FLAT_EPS = 0.03                          # 提升倍数最大最小差小于它 → 无明显倾向
+VOTE_MIN_TARGETS = 4                          # 一方至少给出几个目标的概率才算有效
+VOTE_ALPHA = 1.0                              # 似然比指数（<1 表示对 ML/DL 判断打折）
+VOTE_LAYOUT_CUR = VOTE_LAYOUT['3d']            # 当前正在计算的游戏的目标布局（vote_ball_lifts/vote_3d_joints 会设置）
+
+_D3_ALL = np.array([[b, s, g] for b in range(10) for s in range(10) for g in range(10)], dtype=np.int64)
+_PRIME_ARR_80 = np.zeros(81, dtype=bool)
+for _p in [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79]:
+    _PRIME_ARR_80[_p] = True
+
+
+def _grp3(x, lo, hi):
+    return np.where(x <= lo, 0, np.where(x <= hi, 1, 2))
+
+
+def _count_unique_diffs(S):
+    n, k = S.shape
+    iu, ju = np.triu_indices(k, 1)
+    d = np.sort(S[:, ju] - S[:, iu], axis=1)
+    return 1 + (d[:, 1:] != d[:, :-1]).sum(axis=1)
+
+
+def vote_feats_3d(C):
+    """3D的7个目标分类（定义与ML/DL的标签函数一致），C:(N,3)"""
+    sm = C.sum(axis=1)
+    tri = (C[:, 0] == C[:, 1]) & (C[:, 1] == C[:, 2])
+    eq = (C[:, 0] == C[:, 1]) | (C[:, 1] == C[:, 2]) | (C[:, 0] == C[:, 2])
+    s3 = np.sort(C, axis=1)
+    span = C.max(axis=1) - C.min(axis=1)
+    rd = C % 3
+    rc = np.stack([(rd == r).sum(axis=1) for r in range(3)], axis=1)
+    return {'sum_grp': _grp3(sm, 9, 17), 'odd': (C % 2 != 0).sum(axis=1),
+            'group_type': np.where(tri, 0, np.where(eq, 1, 2)), 'big': (C >= 5).sum(axis=1),
+            'span_grp': _grp3(span, 3, 6), 'road_dom': rc.argmax(axis=1),
+            'arith': (((s3[:, 1] - s3[:, 0]) == (s3[:, 2] - s3[:, 1])) & ((s3[:, 2] - s3[:, 0]) > 0)).astype(np.int64)}
+
+
+def vote_feats_ssq(S):
+    """双色球红球(已排序 N×6，值1..33)的7个目标分类"""
+    sm = S.sum(axis=1)
+    gaps = np.diff(S, axis=1)
+    z = np.stack([(S <= 11).sum(axis=1), ((S >= 12) & (S <= 22)).sum(axis=1), (S >= 23).sum(axis=1)], axis=1)
+    ac = _count_unique_diffs(S) - (S.shape[1] - 1)
+    return {'odd': (S % 2 != 0).sum(axis=1), 'sum_grp': np.where(sm < 70, 0, np.where(sm < 100, 1, 2)),
+            'ac_grp': _grp3(ac, 2, 5), 'red_zone_dom': z.argmax(axis=1),
+            'gap_grp': _grp3(gaps.max(axis=1), 5, 10), 'big': (S > 16).sum(axis=1),
+            'consec': (gaps == 1).sum(axis=1)}
+
+
+def vote_feats_kl8(S):
+    """快乐8开奖20球(已排序 N×20，值1..80)的7个目标分类"""
+    sm = S.sum(axis=1)
+    odd = (S % 2 != 0).sum(axis=1)
+    big = (S > 40).sum(axis=1)
+    zone = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 20), (21, 40), (41, 60), (61, 80)]], axis=1)
+    five = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 16), (17, 32), (33, 48), (49, 64), (65, 80)]], axis=1)
+    adj = (np.diff(S, axis=1) == 1)
+    runs = adj[:, 0].astype(np.int64) + (adj[:, 1:] & ~adj[:, :-1]).sum(axis=1)
+    rng = S[:, -1] - S[:, 0]
+    return {'odd_grp': np.where(odd < 9, 0, np.where(odd <= 11, 1, 2)), 'zone_dom': zone.argmax(axis=1),
+            'tot_grp': np.where(sm < 640, 0, np.where(sm < 820, 1, 2)),
+            'big_grp': np.where(big < 9, 0, np.where(big <= 11, 1, 2)), 'five_dom': five.argmax(axis=1),
+            'consec_grp': np.where(runs == 0, 0, np.where(runs <= 2, 1, 2)),
+            'range_grp': np.where(rng < 60, 0, np.where(rng < 70, 1, 2))}
+
+
+def _vote_subsets(rng, n, pool, k):
+    r = rng.random((n, pool))
+    idx = np.argpartition(r, k, axis=1)[:, :k] + 1
+    idx.sort(axis=1)
+    return idx.astype(np.int64)
+
+
+def _vote_probs(dct, n):
+    """{'0':12.3,'1':...}(百分数，键是类别号) → 长度n的概率向量；全空返回None"""
+    if not isinstance(dct, dict) or not dct:
+        return None
+    v = np.array([float(dct.get(str(i), 0.0)) for i in range(n)], dtype=np.float64) / 100.0
+    return v / v.sum() if v.sum() > 0 else None
+
+
+def vote_source_targets(game, ml_pred, dl_game):
+    """取ML/DL各目标的概率向量。返回 {'ml': {目标:向量}, 'dl': {...}}，不足VOTE_MIN_TARGETS个目标的来源置None"""
+    out = {'ml': {}, 'dl': {}}
+    mm = (ml_pred or {}).get('models', {}) or {}
+    for name, n in VOTE_LAYOUT[game]:
+        pv = _vote_probs(((mm.get(name) or {}).get('prediction') or {}).get('probs'), n)
+        if pv is not None: out['ml'][name] = pv
+        pv = _vote_probs(((dl_game or {}).get(name) or {}).get('probs'), n)
+        if pv is not None: out['dl'][name] = pv
+    return {k: (v if len(v) >= VOTE_MIN_TARGETS else None) for k, v in out.items()}
+
+
+def _vote_logw(feats, tgt):
+    """乘积专家：对每个有概率的目标累加 log(模型概率/随机占比)"""
+    n = len(next(iter(feats.values())))
+    logw = np.zeros(n)
+    ncs = dict(VOTE_LAYOUT_CUR)
+    for name, p in tgt.items():
+        nc = ncs[name]; f = feats[name]
+        q = np.bincount(f, minlength=nc)[:nc] / n
+        p = np.clip(np.asarray(p, dtype=np.float64)[:nc], 1e-3, 1.0); p = p / p.sum()
+        ratio = np.where(q > 0, p / np.maximum(q, 1e-12), 1.0)
+        logw += VOTE_ALPHA * np.log(ratio[np.minimum(f, nc - 1)])
+    return logw
+
+
+def vote_ball_lifts(game, sources, rl_scores, seed):
+    """ssq/kl8：返回 {'ml':lift数组或None,'dl':..., 'rl':...}；lift=入选概率/随机基准(K/N)"""
+    global VOTE_LAYOUT_CUR
+    VOTE_LAYOUT_CUR = VOTE_LAYOUT[game]
+    pool, k = (33, 6) if game == 'ssq' else (80, 20)
+    rng = np.random.default_rng(seed)
+    S = _vote_subsets(rng, VOTE_NSAMP[game], pool, k)
+    feats = vote_feats_ssq(S) if game == 'ssq' else vote_feats_kl8(S)
+    lifts = {}
+    for key in ('ml', 'dl'):
+        tgt = sources.get(key)
+        if not tgt:
+            lifts[key] = None; continue
+        logw = _vote_logw(feats, tgt)
+        w = np.exp(logw - logw.max()); w /= w.sum()
+        inc = np.zeros(pool)
+        for c in range(k):
+            inc += np.bincount(S[:, c] - 1, weights=w, minlength=pool)
+        lifts[key] = inc / (k / pool)
+    if rl_scores is not None:
+        lifts['rl'] = ball_sample_probs(rl_scores) * pool   # RL分数→softmax概率→相对均匀的倍数
+    else:
+        lifts['rl'] = None
+    return lifts
+
+
+def vote_balls(game, lifts):
+    """对ssq/kl8的逐球lift投票。返回 (共识分数组, 汇总dict)"""
+    K = VOTE_K[game]; pool = 33 if game == 'ssq' else 80
+    names = {'ml': 'ML', 'dl': 'DL', 'rl': 'RL'}
+    votes = np.zeros(pool); active = []; info = {}
+    for key in ('ml', 'dl', 'rl'):
+        lf = lifts.get(key)
+        if lf is None:
+            info[key] = {'available': False}; continue
+        strength = float(lf.max() - lf.min())
+        flat = strength < VOTE_FLAT_EPS
+        order = sorted(range(pool), key=lambda i: (-lf[i], i))
+        top = [i + 1 for i in order[:K]]
+        info[key] = {'available': True, 'flat': bool(flat), 'strength': round(strength, 3),
+                     'max_lift': round(float(lf.max()), 3), 'top': top}
+        if not flat:
+            active.append(key)
+            for b in top: votes[b - 1] += 1
+    mean_lift = np.mean([lifts[k] for k in active], axis=0) if active else np.ones(pool)
+    score = votes * 10 + mean_lift
+    order = sorted(range(pool), key=lambda i: (-score[i], i))
+    table = [{'ball': i + 1, 'votes': int(votes[i]), 'lift': round(float(mean_lift[i]), 3)} for i in order[:24]]
+    return score, {'sources': info, 'k_vote': K, 'n_active': len(active), 'active': active, 'table': table}
+
+
+# ── 3D ──
+def vote_3d_joints(sources, rl_pos_probs):
+    """返回 {'ml':1000维联合概率或None, 'dl':..., 'rl':...}"""
+    global VOTE_LAYOUT_CUR
+    VOTE_LAYOUT_CUR = VOTE_LAYOUT['3d']
+    feats = vote_feats_3d(_D3_ALL)
+    J = {}
+    for key in ('ml', 'dl'):
+        tgt = sources.get(key)
+        if not tgt:
+            J[key] = None; continue
+        logw = _vote_logw(feats, tgt)
+        w = np.exp(logw - logw.max()); J[key] = w / w.sum()
+    if rl_pos_probs is not None:
+        pp = [np.asarray(p, dtype=np.float64) / np.sum(p) for p in rl_pos_probs]
+        J['rl'] = np.array([pp[0][b] * pp[1][s] * pp[2][g] for b, s, g in _D3_ALL])
+    else:
+        J['rl'] = None
+    return J
+
+
+SUM_BANDS = [(0, 5), (6, 9), (10, 13), (14, 17), (18, 21), (22, 27)]
+SPAN_BANDS = [(0, 2), (3, 4), (5, 6), (7, 9)]
+GROUP_N6, GROUP_N3 = 6, 2      # 组选覆盖：推荐几注组六、几注组三
+STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
+
+
+def vote_3d(sources, rl_pos_probs, n_bets=12):
+    J = vote_3d_joints(sources, rl_pos_probs)
+    names = ['百位', '十位', '个位']
+    info = {}; active = []
+    marg = {}
+    for key in ('ml', 'dl', 'rl'):
+        j = J.get(key)
+        if j is None:
+            info[key] = {'available': False}; continue
+        mp = [np.bincount(_D3_ALL[:, c], weights=j, minlength=10) for c in range(3)]
+        marg[key] = mp
+        strength = max(float(m.max() - m.min()) for m in mp)
+        flat = strength < 0.01
+        info[key] = {'available': True, 'flat': bool(flat), 'strength': round(strength, 4),
+                     'top': [[int(d) for d in np.argsort(-m, kind='stable')[:3]] for m in mp]}
+        if not flat: active.append(key)
+    use = active if active else [k for k in marg]
+    if not use:
+        return {}
+    # 各位共识：每一方给自己Top3数字各投1票；按 (得票, 平均概率) 排序
+    pos = []
+    for c in range(3):
+        mean_p = np.mean([marg[k][c] for k in use], axis=0)
+        votes = np.zeros(10)
+        for k in active:
+            for d in np.argsort(-marg[k][c], kind='stable')[:3]: votes[d] += 1
+        order = sorted(range(10), key=lambda d: (-votes[d], -mean_p[d], d))
+        pos.append({'name': names[c], 'cands': [
+            {'digit': d, 'votes': int(votes[d]), 'prob': round(float(mean_p[d]) * 100, 1),
+             'by': {k: round(float(marg[k][c][d]) * 100, 1) for k in marg}} for d in order[:3]]})
+    Jc = np.mean([J[k] for k in use], axis=0); Jc = Jc / Jc.sum()
+    order = np.argsort(-Jc, kind='stable')
+    bets = [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in order[:n_bets]]
+
+    # ── 组选覆盖：一注组选覆盖它的全部直选排列（组六6个、组三3个），按组概率选 ──
+    groups = {}
+    for i in range(1000):
+        key = tuple(sorted(int(x) for x in _D3_ALL[i]))
+        groups[key] = groups.get(key, 0.0) + float(Jc[i])
+    def _kind(k): return {3: 'zu6', 2: 'zu3', 1: 'baozi'}[len(set(k))]
+    zu6 = sorted([(k, p) for k, p in groups.items() if _kind(k) == 'zu6'], key=lambda x: (-x[1], x[0]))[:GROUP_N6]
+    zu3 = sorted([(k, p) for k, p in groups.items() if _kind(k) == 'zu3'], key=lambda x: (-x[1], x[0]))[:GROUP_N3]
+    gl = []
+    for k, p in zu6 + zu3:
+        n_perm = 6 if _kind(k) == 'zu6' else 3
+        gl.append({'digits': list(k), 'type': '组六' if n_perm == 6 else '组三', 'perms': n_perm,
+                   'prob': round(p * 100, 2), 'base': round(n_perm / 10.0, 2), 'lift': round(p / (n_perm / 1000.0), 2)})
+    cov_p = sum(g['prob'] for g in gl); cov_n = sum(g['perms'] for g in gl)
+    group_cover = {'bets': gl, 'n_bets': len(gl), 'perms': cov_n, 'prob': round(cov_p, 2),
+                   'base': round(cov_n / 10.0, 2),
+                   'direct_prob': round(sum(b['prob'] for b in bets), 2), 'direct_n': len(bets)}
+
+    # ── 和值/跨度分层：把1000注按(和值段×跨度段)分格，按概率质量选格，每格选最优的几注 ──
+    sm = _D3_ALL.sum(axis=1); sp = _D3_ALL.max(axis=1) - _D3_ALL.min(axis=1)
+    def _bi(v, bands):
+        for i, (lo, hi) in enumerate(bands):
+            if lo <= v <= hi: return i
+        return len(bands) - 1
+    sb = np.array([_bi(v, SUM_BANDS) for v in sm]); pb = np.array([_bi(v, SPAN_BANDS) for v in sp])
+    mass = np.zeros((len(SUM_BANDS), len(SPAN_BANDS))); cnt = np.zeros_like(mass)
+    for i in range(1000):
+        mass[sb[i], pb[i]] += Jc[i]; cnt[sb[i], pb[i]] += 1
+    cells = sorted([(r, c) for r in range(len(SUM_BANDS)) for c in range(len(SPAN_BANDS)) if cnt[r, c] > 0],
+                   key=lambda rc: -mass[rc])
+    chosen, per_sb = [], {}
+    for r, c in cells:
+        if per_sb.get(r, 0) >= STRAT_MAX_PER_SUMBAND: continue
+        chosen.append((r, c)); per_sb[r] = per_sb.get(r, 0) + 1
+        if len(chosen) >= STRAT_CELLS: break
+    sl = []
+    for r, c in chosen:
+        idxs = [i for i in order if sb[i] == r and pb[i] == c][:STRAT_PER_CELL]
+        sl.append({'sum': f'{SUM_BANDS[r][0]}~{SUM_BANDS[r][1]}', 'span': f'{SPAN_BANDS[c][0]}~{SPAN_BANDS[c][1]}',
+                   'prob': round(float(mass[r, c]) * 100, 1), 'base': round(float(cnt[r, c]) / 10.0, 1),
+                   'bets': [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in idxs]})
+    strat = {'cells': sl,
+             'sum_bands': [f'{a}~{b}' for a, b in SUM_BANDS], 'span_bands': [f'{a}~{b}' for a, b in SPAN_BANDS],
+             'matrix': [[round(float(mass[r, c]) * 100, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
+             'base_matrix': [[round(float(cnt[r, c]) / 10.0, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
+             'chosen': [[int(r), int(c)] for r, c in chosen]}
+    return {'sources': info, 'active': active, 'n_active': len(active), 'pos': pos, 'bets': bets,
+            'group_cover': group_cover, 'stratified': strat}
+
+
+def build_consensus(game, records, ml_pred, dl_game, result):
+    """给一个游戏的RL结果挂上共识投票。result 里需要有 rl_scores(ssq/kl8) 或 rl_pos_probs(3d)。失败不影响主结果。"""
+    src = vote_source_targets(game, ml_pred, dl_game)
+    seed = zlib.crc32(f"{game}-{len(records)}".encode()) & 0xffffffff
+    if game == '3d':
+        rp = result.get('rl_pos_probs')
+        c = vote_3d(src, rp)
+        if c: c['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
+        return c
+    scores = result.get('rl_scores')
+    lifts = vote_ball_lifts(game, src, np.array(scores, dtype=np.float64) if scores else None, seed)
+    score, summary = vote_balls(game, lifts)
+    summary['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
+    if game == 'ssq':
+        bets, core, pool = diverse_picks(score, 6, 6)
+        blues = (result.get('ppo_groups') or [{}])[0]
+        summary['bets'] = [{'red': b, 'blue': blues.get('blue'), 'blues': blues.get('blues', []),
+                            'blue_probs': blues.get('blue_probs', [])} for b in bets]
+        summary['core'] = core; summary['pool'] = pool
+    else:
+        cnts = [('xuan4', '选四', 4, 3), ('xuan5', '选五', 5, 3), ('xuan5_fu', '选五复式', 8, 1),
+                ('xuan6', '选六', 6, 3), ('xuan9', '选九', 9, 2), ('xuan10', '选十', 10, 1)]
+        plays = {}
+        for pk, nm, n, c in cnts:
+            b, _, _ = diverse_picks(score, n, c)
+            plays[pk] = {'name': nm, 'balls': n, 'groups': b}
+        summary['plays'] = plays
+    return summary
+
 
 # ══════════════════════════════════════════════════════
 #  主流程
@@ -2775,6 +3100,15 @@ if raw_ml:
 
 # 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
 # （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
+# 读取DL（LSTM/TFM）各目标的最新预测概率，共识投票用（每周更新；读不到就只用ML+RL投票）
+raw_dl = gh_raw('dl_lstm_tfm.json')
+dl_results_json = {}
+if raw_dl:
+    try: dl_results_json = json.loads(raw_dl).get('results', {})
+    except Exception as e: print(f"! 解析dl_lstm_tfm.json失败: {e}，共识投票将缺少DL")
+else:
+    print("! 未读到dl_lstm_tfm.json，共识投票将缺少DL")
+
 raw_prev_rl = gh_raw('dl_rl.json')
 prev_rl_results = {}
 if raw_prev_rl:
@@ -2795,6 +3129,20 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
     except Exception as e:
         import traceback; traceback.print_exc()
         print(f"{game} 失败: {e}")
+    # ── 共识投票（ML+DL+RL）：失败不影响RL本身的结果。无新数据沿用上次结果时，也用最新的ML/DL概率重算 ──
+    _r = rl_results.get(game)
+    if _r and (_r.get('rl_scores') or _r.get('rl_pos_probs')):
+        try:
+            _t0 = time.time()
+            _cons = build_consensus(game, records, ml_pred, dl_results_json.get(game), _r)
+            if _cons:
+                _r['consensus'] = _cons
+                _st = {k: v.get('flat') if v.get('available') else None for k, v in _cons['sources'].items()}
+                print(f"  [共识投票] {game}: 参与投票{_cons.get('active', _cons.get('n_active'))}；"
+                      f"各方是否无明显倾向(flat) {_st}；耗时{time.time()-_t0:.1f}s")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"  [共识投票] {game} 计算失败（不影响RL结果）: {e}")
 
 # 推送RL模型到Kaggle Dataset
 print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
