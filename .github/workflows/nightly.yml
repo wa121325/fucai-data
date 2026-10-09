@@ -1,0 +1,95 @@
+# 开关见 ci/switch.env（NIGHTLY_ENABLED=false 时本文件的定时不运行；手动触发不受影响，可勾选只跑 ML/DL/RL）
+name: 每晚 ML→DL→RL
+
+# 一个工作流里按顺序跑三个 job（用 needs 串起来，比 workflow_run 一环扣一环更可靠）：
+#   ml  : 每晚北京时间 21:30 开始
+#   dl  : ML 成功跑完后才开始
+#   rl  : ML、DL 都结束后才开始（DL 失败时 RL 仍会跑，只是共识投票里 DL 会标"已过期"不投票；ML 失败则 RL 不跑）
+# 每一步都用 ci/run_kernel.sh：状态 complete 且结果文件是"本轮产出"才算成功，失败/超时 exit 1。
+on:
+  schedule:
+    - cron: '30 13 * * *'   # UTC 13:30 = 北京时间 21:30
+  workflow_dispatch:
+    inputs:
+      run_ml: {description: '跑 ML', type: boolean, default: true}
+      run_dl: {description: '跑 DL', type: boolean, default: true}
+      run_rl: {description: '跑 RL', type: boolean, default: true}
+
+concurrency:
+  group: nightly-fucai
+  cancel-in-progress: false   # 上一轮没跑完时，新一轮排队等待，不互相打断
+
+env:
+  DATA_REPO: wa121325/fucai-data
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.g.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: g
+        run: |
+          NIGHTLY_ENABLED=true
+          [ -f ci/switch.env ] && source ci/switch.env
+          if [ "${{ github.event_name }}" != "schedule" ]; then NIGHTLY_ENABLED=true; fi
+          echo "enabled=$NIGHTLY_ENABLED" >> "$GITHUB_OUTPUT"
+
+  ml:
+    needs: gate
+    if: ${{ needs.gate.outputs.enabled == 'true' && github.event.inputs.run_ml != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install kaggle
+      - name: 配置 Kaggle Token
+        run: |
+          mkdir -p ~/.kaggle
+          echo "${{ secrets.KAGGLE_TOKEN }}" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
+      - name: 运行 ML 并等待完成
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-ml-daily ./kaggle_kernel/ prediction.json 60
+
+  dl:
+    needs: [gate, ml]
+    if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && github.event.inputs.run_dl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install kaggle
+      - name: 配置 Kaggle Token
+        run: |
+          mkdir -p ~/.kaggle
+          echo "${{ secrets.KAGGLE_TOKEN }}" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
+      - name: 运行 DL 并等待完成
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-lstm-tfm ./kaggle_lstm_kernel/ dl_lstm_tfm.json 90
+      # DL 把权重存成 Kaggle Dataset 新版本，Kaggle 处理版本需要一小会儿，留点余量再启动 RL
+      - name: 等 Dataset 新版本就绪
+        run: sleep 60
+
+  rl:
+    needs: [gate, ml, dl]
+    # ML 成功就跑 RL；DL 失败不拦截（共识投票会自动把过期的 DL 排除）
+    if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && github.event.inputs.run_rl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install kaggle
+      - name: 配置 Kaggle Token
+        run: |
+          mkdir -p ~/.kaggle
+          echo "${{ secrets.KAGGLE_TOKEN }}" > ~/.kaggle/access_token
+          chmod 600 ~/.kaggle/access_token
+      - name: 运行 RL 并等待完成
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
+        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-rl-daily ./kaggle_rl_kernel/ dl_rl.json 60
