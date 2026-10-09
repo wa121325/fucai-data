@@ -1,3178 +1,5238 @@
-"""
-福彩 PPO 强化学习 — 每天增量微调
-kaggle_rl_daily.py
-
-功能：
-  1. 加载上次训练好的 PPO 模型（从 Kaggle Dataset "fucai-rl-cache"）
-     若没有则首次全量训练
-  2. 加载本周训练好的 LSTM/Transformer 权重（从 "fucai-dl-cache"）
-     计算最新一期的隐层状态，构建 RL 状态
-  3. 用最近新增的数据做增量微调（几千步，而非从头训练）
-  4. 保存更新后的 PPO 模型回 Kaggle Dataset
-  5. 更新 prediction.json 的 dl_result.rl 字段（每天更新）
-
-Kaggle Secrets: GH_TOKEN, GH_REPO, KAGGLE_TOKEN
-Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
-"""
-import zlib, os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy, math
-from datetime import datetime, date
-from collections import Counter, defaultdict
-from itertools import combinations
-warnings.filterwarnings('ignore')
-
-_secrets_client = None
-_secrets_client_ready = False
-
-def _get_secrets_client(retries=5, delay=4):
-    global _secrets_client, _secrets_client_ready
-    if _secrets_client_ready:
-        return _secrets_client
-    for attempt in range(retries):
-        try:
-            from kaggle_secrets import UserSecretsClient
-            _secrets_client = UserSecretsClient()
-            _secrets_client_ready = True
-            print(f"  [Secrets] Client 连接成功（第{attempt+1}次尝试）")
-            return _secrets_client
-        except Exception as e:
-            if attempt < retries - 1:
-                print(f"  [Secrets] Client 连接失败（第{attempt+1}次）: {e}，{delay}秒后重试…")
-                time.sleep(delay)
-            else:
-                print(f"  [Secrets] Client 连接彻底失败（{retries}次均失败）: {e}")
-    return None
-
-SECRETS_DATASET_MOUNT = '/kaggle/input/fucai-secrets/secrets.json'
-_dataset_secrets = None
-
-def _load_secrets_from_dataset():
-    try:
-        with open(SECRETS_DATASET_MOUNT) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def get_secret(name, retries=3, delay=3):
-    global _dataset_secrets
-    client = _get_secrets_client()
-    if client is not None:
-        for attempt in range(retries):
-            try:
-                v = client.get_secret(name)
-                if v:
-                    return v
-                else:
-                    break
-            except Exception as e:
-                if attempt < retries - 1:
-                    print(f"  [Secret] {name} 第{attempt+1}次读取失败: {e}，{delay}秒后重试…")
-                    time.sleep(delay)
-                else:
-                    print(f"  [Secret] {name} kaggle_secrets重试{retries}次仍失败: {e}")
-
-    if _dataset_secrets is None:
-        _dataset_secrets = _load_secrets_from_dataset()
-    if name in _dataset_secrets and _dataset_secrets[name]:
-        print(f"  [Secret] {name} 从 fucai-secrets Dataset 读取成功")
-        return _dataset_secrets[name]
-
-    return os.environ.get(name, '')
-
-_HARDCODED_GH_TOKEN = ''  # 不要在这里写Token！写了会被GitHub自动吊销，必须用Kaggle Secrets      # ← 新的 GitHub Token
-_HARDCODED_GH_REPO  = 'wa121325/fucai-data'
-_HARDCODED_KAGGLE_TOKEN = 'KGAT_0847d8a3c8619a4db2ff2c7c3e9e824f'
-
-GH_TOKEN = get_secret('GH_TOKEN') or get_secret('gh_token') or _HARDCODED_GH_TOKEN
-GH_REPO  = get_secret('GH_REPO')  or get_secret('gh_repo')  or _HARDCODED_GH_REPO
-KAGGLE_TOKEN = get_secret('KAGGLE_TOKEN') or get_secret('kaggle_token') or _HARDCODED_KAGGLE_TOKEN
-print(f"GitHub: {GH_REPO}  GH_TOKEN: {'✓('+str(len(GH_TOKEN))+')' if GH_TOKEN else '✗'}")
-
-try:
-    import torch, torch.nn as nn
-    DEVICE = torch.device('cpu')   # PPO在CPU更稳定
-    print("PyTorch ✓")
-except ImportError:
-    print("PyTorch ✗"); sys.exit(1)
-
-try:
-    subprocess.run(['pip','install','stable-baselines3','gymnasium','-q'], capture_output=True, timeout=180)
-    import gymnasium as gym
-    from gymnasium import spaces
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.env_util import make_vec_env
-    print("SB3 ✓")
-except Exception as e:
-    print(f"SB3 ✗: {e}"); sys.exit(1)
-
-import numpy as np
-
-DL_DATASET_SLUG = 'fucai-dl-cache'
-DL_MOUNTED      = f'/kaggle/input/{DL_DATASET_SLUG}'
-RL_DATASET_SLUG = 'fucai-rl-cache'
-RL_DATASET_ID   = f'megskfdbbskeb/{RL_DATASET_SLUG}'
-RL_LOCAL_DIR    = '/kaggle/working/rl_cache'
-RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
-WINDOW = 50; SEQ_LEN = 20
-
-# 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
-# 前3注用于保证每位的3个候选都出场，其余按联合概率从高到低补足。
-D3_N_BETS = 12
-
-# 生成12注时，实际参与"联合概率最优"搜索的候选池大小。
-# 之前只在每位Top3里选(3×3×3=27种组合)，现在扩大到Top5(5×5×5=125种)，
-# 搜索空间更大，更有机会找到真正联合概率最高的组合——
-# 只是【显示】给人看的候选仍然维持Top3，不受这个影响。
-D3_POOL_N = 5
-
-# 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
-# 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
-# 改这里就行，不用碰 D3_N_BETS。
-D3_SAMPLE_N = 12
-# 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
-# D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
-D3_SAMPLE_DISPLAY_N = 12
-
-# 采样统计里"两号共现"最多列出多少对（只列同一注内出现≥2次的对，1次的太多没有意义）
-D3_STAT_PAIR_TOP = 12
-_D3_POS_NAMES = ["百位", "十位", "个位"]
-
-
-def compute_d3_sample_stats(sampled, extra_bets=None, pair_top=D3_STAT_PAIR_TOP):
-    """
-    对3D【采样注】做频率统计（只统计传入的采样注，不含确定性推荐那12注）。
-    统计的是传入的全部采样注(D3_SAMPLE_N注)，网页只展示其中前D3_SAMPLE_DISPLAY_N注，
-    所以调大D3_SAMPLE_N样本更多、统计更有参考价值。
-
-    返回值全部是Python原生类型(int/str/list)，可直接json序列化。
-      digit_count : 0~9每个数字在全部采样注里出现的总次数（三位合计）
-      pair_top    : 同一注内两个数字共现的次数，如"3-7"；按位置两两配对、不去重，
-                    每注固定贡献3对：797 算 7-9×2 + 7-7×1，888 算 8-8×3；
-                    全部采样注的配对总数恒等于 3×注数；只列出现≥2次的，按次数降序
-      pos_pair_top: 位置共现——"十位4-个位7"专指这两个位置分别是4和7，跟数字对(pair_top)
-                    不是一回事(数字对不认位置，这个认)。够不够格(≥2次)只由【采样注】决定，
-                    推荐12注(extra_bets)不参与计数；但每条信号的related_a/related_b钻取
-                    (把其中一半条件比如"十位=4"单独拿出来找相符的注)会在【采样+推荐】
-                    合并池子里找，让推荐注在这一步起验证/印证作用
-      sum_count   : 和值(三位之和)出现次数，只列出现过的，按和值升序
-      span_count  : 跨度(最大-最小)出现次数，只列出现过的，按跨度升序
-      group       : 组六(三位互不相同)/组三(恰有两位相同)/豹子(三位全同)的注数
-      bigsmall    : 每注的大小比(大:小，5~9为大)分布 + 全部号码里大/小的个数
-      oddeven     : 每注的奇偶比(奇:偶)分布 + 全部号码里奇/偶的个数
-    """
-    from itertools import combinations
-    from collections import Counter
-    n = len(sampled)
-    if n == 0:
-        return {}
-    digit_cnt, pair_cnt = Counter(), Counter()
-    sum_cnt, span_cnt = Counter(), Counter()
-    grp = Counter(); bs_ratio = Counter(); oe_ratio = Counter()
-    big_d = odd_d = 0
-    for bet in sampled:
-        b = [int(x) for x in bet]
-        digit_cnt.update(b)
-        # 同一注内按位置两两配对(百十、百个、十个，每注固定3对)，映射成"小-大"的数字对，
-        # 不去重：797 的 百十=7-9、十个=9-7 是两对，所以 7-9 算2次，百个=7-7 算1次
-        pair_cnt.update([f"{min(x, y)}-{max(x, y)}" for x, y in combinations(b, 2)])
-        sum_cnt[sum(b)] += 1
-        span_cnt[max(b) - min(b)] += 1
-        grp[{1: 'baozi', 2: 'zu3', 3: 'zu6'}[len(set(b))]] += 1
-        big = sum(1 for x in b if x >= 5)
-        odd = sum(1 for x in b if x % 2 == 1)
-        bs_ratio[f"{big}:{3 - big}"] += 1
-        oe_ratio[f"{odd}:{3 - odd}"] += 1
-        big_d += big; odd_d += odd
-    ratios = ['3:0', '2:1', '1:2', '0:3']
-
-    # 位置共现：找信号(计数、判断够不够≥2次强度)只用【采样注】，推荐12注不参与计数——
-    # 强度是不是够格，得由采样这批真正反映概率分布的数据说了算，推荐注不能掺进来影响判断。
-    # "十位4-个位7"专指这两个位置分别是4和7，跟不认位置的数字对(pair_cnt)也不是一回事。
-    sampled_int = [[int(x) for x in bet] for bet in sampled]
-    pos_pair_cnt = Counter()
-    for b in sampled_int:
-        for i, j in combinations(range(3), 2):
-            pos_pair_cnt[f"{_D3_POS_NAMES[i]}{b[i]}-{_D3_POS_NAMES[j]}{b[j]}"] += 1
-    # 验证/钻取则把【采样注 + 推荐12注】合并起来找：信号已经由采样注确认够格了，
-    # 这一步只是看这个信号在推荐注里有没有得到印证，推荐注在这里只当验证材料，不影响计数。
-    verify_pool = sampled_int + [[int(x) for x in bet] for bet in (extra_bets or [])]
-    pos_pair_top = []
-    for key, cnt_v in sorted(pos_pair_cnt.items(), key=lambda kv: (-kv[1], kv[0])):
-        if cnt_v < 2:
-            continue
-        half_a, half_b = key.split('-')
-        pos_a, val_a = half_a[:2], int(half_a[2:])
-        pos_b, val_b = half_b[:2], int(half_b[2:])
-        idx_a = _D3_POS_NAMES.index(pos_a); idx_b = _D3_POS_NAMES.index(pos_b)
-        pos_pair_top.append({
-            'label': key, 'count': cnt_v,
-            'pos_a': pos_a, 'val_a': val_a, 'related_a': [b for b in verify_pool if b[idx_a] == val_a],
-            'pos_b': pos_b, 'val_b': val_b, 'related_b': [b for b in verify_pool if b[idx_b] == val_b],
-        })
-        if len(pos_pair_top) >= pair_top:
-            break
-
-    return {
-        'n': n,
-        'n_pos_pool': len(verify_pool),  # 验证池子大小(采样+推荐)，不是计数用的采样数——计数只用sampled
-        'pos_pair_top': pos_pair_top,
-        'digit_count': [digit_cnt.get(d, 0) for d in range(10)],
-        'pair_top': [[k, v] for k, v in sorted(pair_cnt.items(), key=lambda kv: (-kv[1], kv[0]))
-                     if v >= 2][:pair_top],
-        'sum_count': [[k, sum_cnt[k]] for k in sorted(sum_cnt)],
-        'span_count': [[k, span_cnt[k]] for k in sorted(span_cnt)],
-        'group': {'zu6': grp['zu6'], 'zu3': grp['zu3'], 'baozi': grp['baozi']},
-        'bigsmall': {'ratio': [[r, bs_ratio.get(r, 0)] for r in ratios],
-                     'big_digits': big_d, 'small_digits': 3 * n - big_d},
-        'oddeven': {'ratio': [[r, oe_ratio.get(r, 0)] for r in ratios],
-                    'odd_digits': odd_d, 'even_digits': 3 * n - odd_d},
-    }
-
-# ══════════════════════════════════════════════════════
-#  快乐8 / 双色球 的"按概率采样"（与3D采样同一思路）
-#  3D：每位有10个数字的概率分布 → 按分布抽签。
-#  快乐8/双色球：RL给的是每个球一个分数 → 分数标准化后softmax成"抽中概率"，
-#  再按概率【不放回】抽出一注，重复抽N注（整注不重复）。
-#  种子由"游戏+期数+最新一期开奖内容"决定：同样数据必然采出同样结果，换一期数据种子就变。
-#  纯展示/参考，不影响上面的确定性推荐。
-# ══════════════════════════════════════════════════════
-# 分数→概率的温度。越小越集中于高分球，越大越接近均匀。
-# 2.5时（分数标准化后）双色球最高分球入选率约为均匀的2倍，快乐8选六约2倍：
-# 既体现模型偏好又保留多样性；调小=更集中，调大=更接近随机。
-BALL_SAMPLE_TEMP = 2.5
-SSQ_SAMPLE_N = 30            # 双色球采样注数（统计用；样本多一些，球号次数才有参考意义）
-SSQ_SAMPLE_DISPLAY_N = 6     # 双色球网页展示前几注（与推荐注数对齐），其余只参与统计
-KL8_SAMPLE_DRAWS = 30        # 快乐8：采样多少期"下一期开奖"（每期20个球），用于统计
-KL8_SAMPLE_SHOW = 3          # 快乐8网页展示前几期采样（各玩法的采样注从这几期里分配）
-KL8_STRUCT_WINDOW = 300      # 快乐8重号/斜连个数的分布，取最近多少期的真实情况来估计
-# 快乐8网页展示：每个玩法展示的采样注数 = 该玩法推荐注数；多出来的只参与统计
-KL8_STAT_PAIR_TOP = 12
-KL8_STAT_BALL_TOP = 24
-
-
-def ball_sample_probs(scores, temp=BALL_SAMPLE_TEMP):
-    """每个球一个分数 → 标准化 → softmax，得到各球的抽中权重(和为1)"""
-    sc = np.asarray(scores, dtype=np.float64)
-    sd = float(sc.std())
-    z = (sc - sc.mean()) / (sd if sd > 1e-9 else 1.0)
-    e = np.exp((z - z.max()) / max(temp, 1e-6))
-    return e / e.sum()
-
-
-def sample_ball_sets(scores, k, n_sets, seed_src, temp=BALL_SAMPLE_TEMP):
-    """按概率不放回抽k个球为一注，抽n_sets注(整注不重复)。返回 (各注升序号码列表, 各球抽中权重)"""
-    probs = ball_sample_probs(scores, temp)
-    rng = np.random.default_rng(zlib.crc32(seed_src.encode('utf-8')) & 0xffffffff)
-    out, seen, guard = [], set(), 0
-    while len(out) < n_sets and guard < n_sets * 200:
-        guard += 1
-        sel = rng.choice(len(probs), size=k, replace=False, p=probs)
-        key = tuple(sorted(int(i) + 1 for i in sel))
-        if key not in seen:
-            seen.add(key); out.append(list(key))
-    return out, probs
-
-
-def compute_ball_sample_stats(sampled, big_from, zones, pair_top=KL8_STAT_PAIR_TOP,
-                              ball_top=KL8_STAT_BALL_TOP, blues=None):
-    """
-    对快乐8/双色球的【采样注】做频率统计，返回值全是Python原生类型，可直接json序列化。
-      ball_top : 球号出现次数（只列出现≥2次，按次数降序，最多ball_top个）
-      pair_top : 同一注内两球共现次数（只列≥2次，最多pair_top对）
-      oddeven  : 每注奇数个数的分布 [[奇数个数, 注数]]
-      bigsmall : 每注"大号"个数分布（号码>=big_from算大）
-      zone_dom : 每注号码最多的区间的分布 [[区间标签, 注数]]（并列取靠前的区）
-      sum_stat : 每注和值 最小/平均/最大
-      consec   : 每注相邻连号对数的分布 [[对数, 注数]]
-      blue_top : (双色球) 蓝球出现次数
-    """
-    from itertools import combinations
-    from collections import Counter
-    n = len(sampled)
-    if n == 0:
-        return {}
-    ball_c, pair_c = Counter(), Counter()
-    odd_c, big_c, zone_c, con_c = Counter(), Counter(), Counter(), Counter()
-    sums = []
-    for bet in sampled:
-        b = sorted(int(x) for x in bet)
-        ball_c.update(b)
-        pair_c.update(f"{x:02d}-{y:02d}" for x, y in combinations(b, 2))
-        odd_c[sum(1 for x in b if x % 2 == 1)] += 1
-        big_c[sum(1 for x in b if x >= big_from)] += 1
-        zc = [sum(1 for x in b if lo <= x <= hi) for lo, hi, _ in zones]
-        zone_c[zones[int(max(range(len(zc)), key=lambda i: zc[i]))][2]] += 1
-        con_c[sum(1 for i in range(len(b) - 1) if b[i + 1] - b[i] == 1)] += 1
-        sums.append(sum(b))
-    st = {
-        'n': n, 'k': len(sampled[0]),
-        'ball_top': [[k_, v] for k_, v in sorted(ball_c.items(), key=lambda kv: (-kv[1], kv[0]))
-                     if v >= 2][:ball_top],
-        'pair_top': [[k_, v] for k_, v in sorted(pair_c.items(), key=lambda kv: (-kv[1], kv[0]))
-                     if v >= 2][:pair_top],
-        'oddeven': [[k_, odd_c[k_]] for k_ in sorted(odd_c)],
-        'bigsmall': [[k_, big_c[k_]] for k_ in sorted(big_c)],
-        'zone_dom': [[z[2], zone_c.get(z[2], 0)] for z in zones],
-        'sum_stat': {'min': int(min(sums)), 'avg': round(sum(sums) / n, 1), 'max': int(max(sums))},
-        'consec': [[k_, con_c[k_]] for k_ in sorted(con_c)],
-    }
-    if blues:
-        bc = Counter(int(x) for x in blues)
-        st['blue_top'] = [[k_, v] for k_, v in sorted(bc.items(), key=lambda kv: (-kv[1], kv[0]))]
-    return st
-
-
-def _kl8_neighbors(prev):
-    """上期号码的±1邻号（上期已开出的球本身除外）——即"斜连"候选球"""
-    nb = set()
-    for x in prev:
-        if x > 1: nb.add(x - 1)
-        if x < 80: nb.add(x + 1)
-    return nb - set(prev)
-
-
-def kl8_struct_dist(records, window=KL8_STRUCT_WINDOW):
-    """
-    最近window期的真实"重号个数"和"斜连个数"分布（每期开20球）：
-      重号个数 = 本期号码里，上期也开出的球有几个
-      斜连个数 = 本期号码里，是上期号码±1邻号（且上期没开出）的球有几个
-    返回 (重号分布[0..20], 斜连分布[0..20], 重号均值, 斜连均值)，分布已做拉普拉斯平滑并归一化。
-    """
-    rc = np.full(21, 0.5); dc = np.full(21, 0.5)
-    lo = max(1, len(records) - window)
-    reps, dgs = [], []
-    for t in range(lo, len(records)):
-        prev = set(records[t-1]['numbers']); cur = set(records[t]['numbers'])
-        r = len(cur & prev); d = len(cur & _kl8_neighbors(prev))
-        rc[r] += 1; dc[d] += 1; reps.append(r); dgs.append(d)
-    return (rc / rc.sum(), dc / dc.sum(),
-            float(np.mean(reps)) if reps else 5.0, float(np.mean(dgs)) if dgs else 6.6)
-
-
-def kl8_sample_draws(scores, records, n_draws, seed_src, temp=BALL_SAMPLE_TEMP):
-    """
-    采样"下一期开奖"：每次采出一期完整的20个球，而不是直接采某个玩法的几个球。
-    三步（重号/斜连是骨架）：
-      1) 按最近真实分布，抽这一期的"重号个数r"和"斜连个数d"
-      2) 从上期的20个球里按RL分数抽r个（重号）；从上期±1邻号里按RL分数抽d个（斜连）；
-         剩下 20-r-d 个从其余球里按RL分数抽
-      3) 三组内都是"RL分数越高越容易被抽中"（分数→softmax，温度见BALL_SAMPLE_TEMP）
-    返回 (各期20球升序列表, 各期重号个数, 各期斜连个数)
-    """
-    prob = ball_sample_probs(scores, temp)
-    prev = list(records[-1]['numbers']); prev_set = set(prev)
-    nb = sorted(_kl8_neighbors(prev_set))
-    rest = [b for b in range(1, 81) if b not in prev_set and b not in set(nb)]
-    pr_dist, dg_dist, _, _ = kl8_struct_dist(records)
-    rng = np.random.default_rng(zlib.crc32(seed_src.encode('utf-8')) & 0xffffffff)
-
-    def pick(pool, k):
-        if k <= 0: return []
-        w = np.array([prob[b-1] for b in pool], dtype=np.float64); w /= w.sum()
-        return [pool[i] for i in rng.choice(len(pool), size=k, replace=False, p=w)]
-
-    draws, reps, dgs, seen, guard = [], [], [], set(), 0
-    while len(draws) < n_draws and guard < n_draws * 50:
-        guard += 1
-        r = int(rng.choice(21, p=pr_dist)); d = int(rng.choice(21, p=dg_dist))
-        r = min(r, len(prev)); d = min(d, len(nb))
-        o = 20 - r - d
-        if o < 0 or o > len(rest): continue
-        draw = sorted(pick(prev, r) + pick(nb, d) + pick(rest, o))
-        key = tuple(draw)
-        if key in seen: continue
-        seen.add(key); draws.append(draw); reps.append(r); dgs.append(d)
-    return draws, reps, dgs
-
-
-def compute_kl8_draw_stats(draws, records, ball_top=24):
-    """对采样出的N期（每期20球）做统计，返回值全是Python原生类型，可直接json序列化。
-      ball_top : 球号在采样里出现的次数，取最多的前ball_top个
-      repeat   : 每期"重号个数"分布（与上期重复的球数）；avg_repeat/hist_repeat 为 采样均值/近期真实均值
-      diag     : 每期"斜连个数"分布；avg_diag/hist_diag 同上
-      oddeven/bigsmall(>=41为大)/zone_dom/sum_stat/consec : 与其它采样统计一致
-    """
-    from collections import Counter
-    n = len(draws)
-    if n == 0: return {}
-    prev = set(records[-1]['numbers']); nb = _kl8_neighbors(prev)
-    ball_c = Counter(); rep_c = Counter(); dg_c = Counter(); odd_c = Counter(); big_c = Counter()
-    zone_c = Counter(); con_c = Counter(); sums = []
-    zones = [(1, 20, '一区(1-20)'), (21, 40, '二区(21-40)'), (41, 60, '三区(41-60)'), (61, 80, '四区(61-80)')]
-    for d in draws:
-        ball_c.update(d)
-        rep_c[len(set(d) & prev)] += 1; dg_c[len(set(d) & nb)] += 1
-        odd_c[sum(1 for x in d if x % 2 == 1)] += 1
-        big_c[sum(1 for x in d if x >= 41)] += 1
-        zc = [sum(1 for x in d if lo <= x <= hi) for lo, hi, _ in zones]
-        zone_c[zones[int(max(range(4), key=lambda i: zc[i]))][2]] += 1
-        con_c[sum(1 for i in range(len(d) - 1) if d[i + 1] - d[i] == 1)] += 1
-        sums.append(sum(d))
-    _, _, hr, hd = kl8_struct_dist(records)
-    return {
-        'n': n, 'k': 20,
-        'ball_top': [[k_, v] for k_, v in sorted(ball_c.items(), key=lambda kv: (-kv[1], kv[0]))][:ball_top],
-        'repeat': [[k_, rep_c[k_]] for k_ in sorted(rep_c)],
-        'diag': [[k_, dg_c[k_]] for k_ in sorted(dg_c)],
-        'avg_repeat': round(sum(k_ * v for k_, v in rep_c.items()) / n, 2), 'hist_repeat': round(hr, 2),
-        'avg_diag': round(sum(k_ * v for k_, v in dg_c.items()) / n, 2), 'hist_diag': round(hd, 2),
-        'oddeven': [[k_, odd_c[k_]] for k_ in sorted(odd_c)],
-        'bigsmall': [[k_, big_c[k_]] for k_ in sorted(big_c)],
-        'zone_dom': [[z[2], zone_c.get(z[2], 0)] for z in zones],
-        'sum_stat': {'min': int(min(sums)), 'avg': round(sum(sums) / n, 1), 'max': int(max(sums))},
-        'consec': [[k_, con_c[k_]] for k_ in sorted(con_c)],
-    }
-
-
-# 3D回测用的期数。想改期数，改这一个数字就行——
-# 不管改成多少，代码里会自动取 min(这个数, 当前holdout大小)，
-# 永远不可能超出holdout边界，不会引入数据泄漏。
-# 推荐值80：这正是holdout_size()的下限，不管数据量大小都始终安全，
-# 比原来的30期样本量更大，统计误差明显更小（标准误从0.095降到0.058）。
-D3_BACKTEST_N = 80
-
-# ══════════════════════════════════════════════════════
-#  新增特征辅助函数（三个脚本共用，务必保持完全一致）
-#  补齐之前的空缺：遗漏统计、质合比、012路、和值尾数、重号/邻号、上期号码编码
-# ══════════════════════════════════════════════════════
-_PRIMES = set([2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79])
-
-def _omission_stats(w, pool_max, get_nums, prefix):
-    """
-    遗漏统计：之前遗漏信息只有强化学习在用，ML/DL的特征函数里一个都没有，
-    这是最明显的空缺。这里把它提炼成聚合统计量补进来。
-    - max/mean/std：整体遗漏分布的形态
-    - overdue_cnt：遗漏值超过"该号码理论平均间隔"的号码个数（即所谓"超期"号码有多少）
-    - last_draw_omit_mean：上期开出的那批号码，在开出之前平均冷了多久
-      （衡量"这期开的是热号还是冷号"，这个序列本身可能比单纯遗漏值更有结构）
-    """
-    f = {}
-    if not w:
-        for k in ['omit_max','omit_mean','omit_std','overdue_cnt','last_draw_omit_mean']:
-            f[f'{prefix}{k}'] = 0.0
-        return f
-    last_seen = {}
-    for i, rec in enumerate(w):
-        for n in get_nums(rec):
-            last_seen[n] = i
-    total = len(w)
-    omits = []
-    for n in range(1, pool_max+1):
-        omits.append(total - 1 - last_seen[n] if n in last_seen else total)
-    omits = np.array(omits, dtype=np.float32)
-    # 理论平均间隔 = 号池大小 / 每期开出个数
-    per_draw = len(get_nums(w[-1])) if w else 1
-    theoretical_gap = pool_max / max(per_draw, 1)
-    f[f'{prefix}omit_max']  = float(omits.max())
-    f[f'{prefix}omit_mean'] = float(omits.mean())
-    f[f'{prefix}omit_std']  = float(omits.std())
-    f[f'{prefix}overdue_cnt'] = float((omits > theoretical_gap).sum())
-    # 上期号码在开出前的遗漏（需要看倒数第二期为止的状态）
-    if len(w) >= 2:
-        prev_seen = {}
-        for i, rec in enumerate(w[:-1]):
-            for n in get_nums(rec):
-                prev_seen[n] = i
-        base = len(w) - 1
-        vals = [base - 1 - prev_seen[n] if n in prev_seen else base for n in get_nums(w[-1])]
-        f[f'{prefix}last_draw_omit_mean'] = float(np.mean(vals)) if vals else 0.0
-    else:
-        f[f'{prefix}last_draw_omit_mean'] = 0.0
-    return f
-
-def _prime_ratio(nums):
-    """质合比：彩票分析里的经典维度，号池内质数分布不均匀，这个比例的波动是真实统计量"""
-    return sum(1 for n in nums if n in _PRIMES) / max(len(nums), 1)
-
-def _road012_counts(nums):
-    """012路：按除3余数分三组。之前只有3D做了，双色球/快乐8同样适用"""
-    c = [0,0,0]
-    for n in nums: c[n % 3] += 1
-    return c
-
-def _repeat_neighbor(cur, prev):
-    """
-    重号：本期与上期重复的号码个数
-    邻号：本期号码中，是上期某号码±1的个数
-    这是走势图里很常见的跨期观察角度，之前只有3D零星涉及
-    """
-    if not prev: return 0, 0
-    ps = set(prev)
-    rep = len(set(cur) & ps)
-    nb = sum(1 for n in cur if (n-1 in ps or n+1 in ps) and n not in ps)
-    return rep, nb
-
-
-# ══════════════════════════════════════════════════════
-#  GitHub 工具
-# ══════════════════════════════════════════════════════
-def gh_raw(path):
-    url = f'https://raw.githubusercontent.com/{GH_REPO}/main/{path}?t={int(time.time())}'
-    req = urllib.request.Request(url, headers={'Cache-Control':'no-cache','User-Agent':'rl-bot'})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r: return r.read().decode('utf-8')
-    except Exception as e: print(f"  gh_raw({path}) 失败: {e}"); return None
-
-def gh_put(path, content_str, message):
-    url = f'https://api.github.com/repos/{GH_REPO}/contents/{path}'
-    sha = None
-    try:
-        req = urllib.request.Request(url, headers={'Authorization':f'token {GH_TOKEN}',
-            'Accept':'application/vnd.github.v3+json','User-Agent':'rl-bot'})
-        with urllib.request.urlopen(req, timeout=15) as r: sha = json.loads(r.read()).get('sha')
-    except Exception: pass
-    data = {'message':message,'branch':'main','content':base64.b64encode(content_str.encode()).decode()}
-    if sha: data['sha'] = sha
-    req = urllib.request.Request(url, data=json.dumps(data).encode(), method='PUT', headers={
-        'Authorization':f'token {GH_TOKEN}','Content-Type':'application/json',
-        'Accept':'application/vnd.github.v3+json','User-Agent':'rl-bot'})
-    with urllib.request.urlopen(req, timeout=30) as r: return json.loads(r.read())
-
-# ══════════════════════════════════════════════════════
-#  特征工程（与LSTM训练脚本一致）
-# ══════════════════════════════════════════════════════
-def f3d(records, idx):
-    w=records[max(0,idx-WINDOW):idx]
-    if len(w)<5: return None
-    f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]
-        sms=[sum(x['digits']) for x in chunk]
-        sps=[max(x['digits'])-min(x['digits']) for x in chunk]
-        odds=[sum(1 for d in x['digits'] if d%2!=0) for x in chunk]
-        bigs=[sum(1 for d in x['digits'] if d>=5) for x in chunk]
-        tails=[sum(x['digits'])%10 for x in chunk]
-        gbs=[abs(x['digits'][0]-x['digits'][1]) for x in chunk]
-        gsg=[abs(x['digits'][1]-x['digits'][2]) for x in chunk]
-        f[f'sm{sfx}']=float(np.mean(sms)); f[f'ss{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
-        f[f'sp{sfx}']=float(np.mean(sps))
-        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
-        f[f'tail{sfx}']=float(np.mean(tails))
-        f[f'gbs{sfx}']=float(np.mean(gbs)); f[f'gsg{sfx}']=float(np.mean(gsg))
-        for ci,cn in enumerate(['b','s','g']):
-            vals=[x['digits'][ci] for x in chunk]
-            f[f'{cn}m{sfx}']=float(np.mean(vals))
-            f[f'{cn}s{sfx}']=float(np.std(vals)) if len(vals)>1 else 0.0
-    if len(w)>=3:
-        s3=[sum(x['digits']) for x in w[-3:]]
-        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
-    else: f['sm_trend']=0
-    w20 = w[-20:]; n20 = len(w20) or 1
-    r0=r1=r2=0
-    for x in w20:
-        for d in x['digits']:
-            if d%3==0: r0+=1
-            elif d%3==1: r1+=1
-            else: r2+=1
-    total=r0+r1+r2 or 1
-    f['road0']=r0/total; f['road1']=r1/total; f['road2']=r2/total
-    g3=g6=gt=0
-    for x in w20:
-        b2,s2,g2=x['digits']
-        if b2==s2==g2: gt+=1
-        elif b2==s2 or s2==g2 or b2==g2: g3+=1
-        else: g6+=1
-    f['grp3']=g3/n20; f['grp6']=g6/n20; f['grpt']=gt/n20
-    # 重号比例（与各自前一期比较，近20期）
-    rep_cnt=0; rep_n=0
-    for i in range(max(1,len(w)-20), len(w)):
-        prev=w[i-1]['digits']; cur=w[i]['digits']
-        rep_cnt += sum(1 for k in range(3) if prev[k]==cur[k])
-        rep_n += 1
-    f['repeat_ratio'] = rep_cnt/rep_n if rep_n else 0.0
-    # 斜连（三位等差数列）比例，近20期
-    arith_cnt=0
-    for x in w20:
-        s3d=sorted(x['digits'])
-        if (s3d[1]-s3d[0])==(s3d[2]-s3d[1]) and s3d[2]-s3d[0]>0: arith_cnt+=1
-    f['arith_ratio'] = arith_cnt/n20
-    # ── 新增特征：遗漏统计 / 质合比 / 和值尾数 / 重号邻号 ──
-    # 3D按位处理：把每期三位数字当作号码集合（0-9映射到1-10避免0号问题）
-    f.update(_omission_stats(w, 10, lambda r: [d+1 for d in r['digits']], 'g_'))
-    primes = [_prime_ratio([d for d in x['digits'] if d>1]) for x in w[-20:]]
-    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
-    tails = [sum(x['digits']) % 10 for x in w[-20:]]
-    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
-    f['sumtail_std20']  = float(np.std(tails)) if len(tails)>1 else 0.0
-    reps, nbs = [], []
-    for i in range(1, len(w[-20:])):
-        chunk = w[-20:]
-        r, n = _repeat_neighbor(chunk[i]['digits'], chunk[i-1]['digits'])
-        reps.append(r); nbs.append(n)
-    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
-    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
-    # 上期号码原始编码：让模型能自己学出跨期关系，而不必全靠手工设计的聚合量
-    last = w[-1]['digits'] if w else [0,0,0]
-    for pi in range(3):
-        f[f'prev_pos{pi}'] = float(last[pi]) if pi < len(last) else 0.0
-
-    return f
-
-
-def fssq(records, idx):
-    w=records[max(0,idx-WINDOW):idx]
-    if len(w)<5: return None
-    f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]
-        sms=[sum(x['red']) for x in chunk]
-        bls=[x['blue'] for x in chunk]
-        odds=[sum(1 for n in x['red'] if n%2!=0) for x in chunk]
-        bigs=[sum(1 for n in x['red'] if n>16) for x in chunk]
-        z1s=[sum(1 for n in x['red'] if n<=11) for x in chunk]
-        z2s=[sum(1 for n in x['red'] if 12<=n<=22) for x in chunk]
-        z3s=[sum(1 for n in x['red'] if n>=23) for x in chunk]
-        consecs=[sum(1 for i in range(len(sorted(x['red']))-1) if sorted(x['red'])[i+1]-sorted(x['red'])[i]==1) for x in chunk]
-        ac_vals=[]; max_gaps=[]
-        for x in chunk:
-            sred=sorted(x['red'])
-            diffs=set()
-            for i in range(len(sred)):
-                for j in range(i+1,len(sred)):
-                    diffs.add(sred[j]-sred[i])
-            ac_vals.append(len(diffs)-(len(sred)-1))
-            max_gaps.append(max(sred[k+1]-sred[k] for k in range(len(sred)-1)) if len(sred)>1 else 0)
-        blue_odds=[x['blue']%2 for x in chunk]
-        blue_bigs=[1 if x['blue']>=9 else 0 for x in chunk]
-        f[f'sm_mean{sfx}']=float(np.mean(sms)); f[f'sm_std{sfx}']=float(np.std(sms)) if len(sms)>1 else 0.0
-        f[f'bl_mean{sfx}']=float(np.mean(bls)); f[f'bl_std{sfx}']=float(np.std(bls)) if len(bls)>1 else 0.0
-        f[f'odd_mean{sfx}']=float(np.mean(odds))
-        f[f'big_mean{sfx}']=float(np.mean(bigs))
-        f[f'z1_mean{sfx}']=float(np.mean(z1s))
-        f[f'z2_mean{sfx}']=float(np.mean(z2s))
-        f[f'z3_mean{sfx}']=float(np.mean(z3s))
-        f[f'consec_mean{sfx}']=float(np.mean(consecs))
-        f[f'ac_mean{sfx}']=float(np.mean(ac_vals)); f[f'ac_std{sfx}']=float(np.std(ac_vals)) if len(ac_vals)>1 else 0.0
-        f[f'gap_mean{sfx}']=float(np.mean(max_gaps))
-        f[f'blodd_mean{sfx}']=float(np.mean(blue_odds))
-        f[f'blbig_mean{sfx}']=float(np.mean(blue_bigs))
-    if len(w)>=3:
-        s3=[sum(x['red']) for x in w[-3:]]
-        f['sm_trend']=1 if s3[-1]>s3[-2] else(-1 if s3[-1]<s3[-2] else 0)
-        b3=[x['blue'] for x in w[-3:]]
-        f['bl_trend']=1 if b3[-1]>b3[-2] else(-1 if b3[-1]<b3[-2] else 0)
-    else:
-        f['sm_trend']=0; f['bl_trend']=0
-    cnt=Counter(n for x in w[-20:] for n in x['red'])
-    f['hot_z1']=sum(cnt.get(n,0) for n in range(1,12))
-    f['hot_z2']=sum(cnt.get(n,0) for n in range(12,23))
-    f['hot_z3']=sum(cnt.get(n,0) for n in range(23,34))
-    bcnt=Counter(x['blue'] for x in w[-20:])
-    f['hot_bl_lo']=sum(bcnt.get(n,0) for n in range(1,9))
-    f['hot_bl_hi']=sum(bcnt.get(n,0) for n in range(9,17))
-    # ── 新增特征：遗漏统计 / 质合比 / 012路 / 和值尾数 / 重号邻号 / 上期编码 ──
-    f.update(_omission_stats(w, 33, lambda r: r['red'], 'r_'))
-    f.update(_omission_stats(w, 16, lambda r: [r['blue']], 'b_'))
-    primes = [_prime_ratio(x['red']) for x in w[-20:]]
-    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
-    r0s, r1s, r2s = [], [], []
-    for x in w[-20:]:
-        c = _road012_counts(x['red']); r0s.append(c[0]); r1s.append(c[1]); r2s.append(c[2])
-    f['road0_mean20'] = float(np.mean(r0s)) if r0s else 0.0
-    f['road1_mean20'] = float(np.mean(r1s)) if r1s else 0.0
-    f['road2_mean20'] = float(np.mean(r2s)) if r2s else 0.0
-    tails = [sum(x['red']) % 10 for x in w[-20:]]
-    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
-    reps, nbs = [], []
-    chunk = w[-20:]
-    for i in range(1, len(chunk)):
-        r, n = _repeat_neighbor(chunk[i]['red'], chunk[i-1]['red'])
-        reps.append(r); nbs.append(n)
-    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
-    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
-    # 上期红球二值编码(33维)+上期蓝球，让模型自行学习跨期规律
-    prev_red = set(w[-1]['red']) if w else set()
-    for n in range(1, 34):
-        f[f'prev_r{n}'] = 1.0 if n in prev_red else 0.0
-    f['prev_blue'] = float(w[-1]['blue']) if w else 0.0
-
-    return f
-
-
-def fkl8(records, idx):
-    w=records[max(0,idx-WINDOW):idx]
-    if len(w)<5: return None
-    f={}
-    for ws,sfx in [(3,'3'),(5,'5'),(10,'10'),(20,'20'),(WINDOW,'W')]:
-        chunk=w[-ws:]
-        tots=[sum(x['numbers']) for x in chunk]
-        odds=[sum(1 for n in x['numbers'] if n%2!=0) for x in chunk]
-        bigs=[sum(1 for n in x['numbers'] if n>40) for x in chunk]
-        mins=[min(x['numbers']) for x in chunk]
-        maxs=[max(x['numbers']) for x in chunk]
-        cgs=[]
-        for x in chunk:
-            sn=sorted(x['numbers']); cg=0; inc=False
-            for i in range(len(sn)-1):
-                if sn[i+1]-sn[i]==1:
-                    if not inc: cg+=1; inc=True
-                else: inc=False
-            cgs.append(cg)
-        f[f'tm{sfx}']=float(np.mean(tots)); f[f'ts{sfx}']=float(np.std(tots)) if len(tots)>1 else 0.0
-        f[f'odd{sfx}']=float(np.mean(odds)); f[f'big{sfx}']=float(np.mean(bigs))
-        f[f'mn{sfx}']=float(np.mean(mins)); f[f'mx{sfx}']=float(np.mean(maxs))
-        f[f'cg{sfx}']=float(np.mean(cgs))
-        for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
-            zv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
-            f[f'z{zi+1}m{sfx}']=float(np.mean(zv))
-        for fi2,(lo,hi) in enumerate([(1,16),(17,32),(33,48),(49,64),(65,80)]):
-            fv=[sum(1 for n in x['numbers'] if lo<=n<=hi) for x in chunk]
-            f[f'f{fi2+1}m{sfx}']=float(np.mean(fv))
-    if len(w)>=3:
-        t3=[sum(x['numbers']) for x in w[-3:]]
-        f['tot_trend']=1 if t3[-1]>t3[-2] else(-1 if t3[-1]<t3[-2] else 0)
-    else: f['tot_trend']=0
-    cnt=Counter(n for x in w[-20:] for n in x['numbers'])
-    for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
-        f[f'hz{zi+1}']=sum(cnt.get(n,0) for n in range(lo,hi+1))
-    # ── 新增特征：遗漏统计 / 质合比 / 012路 / 和值尾数 / 重号邻号 / 上期编码 ──
-    f.update(_omission_stats(w, 80, lambda r: r['numbers'], 'n_'))
-    primes = [_prime_ratio(x['numbers']) for x in w[-20:]]
-    f['prime_ratio20'] = float(np.mean(primes)) if primes else 0.0
-    r0s, r1s, r2s = [], [], []
-    for x in w[-20:]:
-        c = _road012_counts(x['numbers']); r0s.append(c[0]); r1s.append(c[1]); r2s.append(c[2])
-    f['road0_mean20'] = float(np.mean(r0s)) if r0s else 0.0
-    f['road1_mean20'] = float(np.mean(r1s)) if r1s else 0.0
-    f['road2_mean20'] = float(np.mean(r2s)) if r2s else 0.0
-    tails = [sum(x['numbers']) % 10 for x in w[-20:]]
-    f['sumtail_mean20'] = float(np.mean(tails)) if tails else 0.0
-    reps, nbs = [], []
-    chunk = w[-20:]
-    for i in range(1, len(chunk)):
-        r, n = _repeat_neighbor(chunk[i]['numbers'], chunk[i-1]['numbers'])
-        reps.append(r); nbs.append(n)
-    f['repeat_mean20']   = float(np.mean(reps)) if reps else 0.0
-    f['neighbor_mean20'] = float(np.mean(nbs)) if nbs else 0.0
-    # 快乐8每期开20个球，上期二值编码就是80维，维度偏大且信息稀疏，
-    # 改用"上期号码按四区分布"这种压缩表示，兼顾跨期信息与维度控制
-    prev = w[-1]['numbers'] if w else []
-    for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
-        f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
-
-    return f
-
-
-class LSTMEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dim=10, dropout=0.3):
-        super().__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True,
-                            dropout=dropout if num_layers>1 else 0)
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.head = nn.Sequential(nn.Linear(hidden_dim,64), nn.GELU(), nn.Dropout(dropout), nn.Linear(64,output_dim))
-    def forward(self, x, return_hidden=False):
-        out,_ = self.lstm(x); last = self.norm(out[:,-1,:]); logits = self.head(last)
-        return (logits,last) if return_hidden else logits
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim, d_model=32, nhead=4, num_layers=2, output_dim=10, dropout=0.2):
-        super().__init__()
-        self.proj = nn.Linear(input_dim, d_model)
-        enc = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=128,
-                                         dropout=dropout, batch_first=True, norm_first=True)
-        self.transformer = nn.TransformerEncoder(enc, num_layers)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Sequential(nn.Linear(d_model,32), nn.GELU(), nn.Linear(32,output_dim))
-    def forward(self, x, return_hidden=False):
-        x = self.proj(x); x = self.transformer(x)
-        pooled = self.pool(x.transpose(1,2)).squeeze(-1); logits = self.head(pooled)
-        return (logits,pooled) if return_hidden else logits
-
-
-def load_lstm_tfm(game, current_feat_dim=None):
-    """从挂载的 Dataset 加载本周训练好的LSTM/TFM权重"""
-    meta_path = f'{DL_MOUNTED}/{game}_meta.json'
-    if not os.path.exists(meta_path):
-        print(f"  ! 找不到 {game} 的LSTM/TFM权重（先运行 kaggle_lstm_tfm.py 并挂载 {DL_DATASET_SLUG}）")
-        return None, None, None
-    with open(meta_path) as f: meta = json.load(f)
-    # 特征维度校验：若当前特征函数产出维度与保存时不一致（特征工程改了），
-    # 直接跳过旧权重，避免运行到forward()时矩阵形状不匹配而崩溃
-    if current_feat_dim is not None and meta.get('feat_dim') != current_feat_dim:
-        print(f"  ! {game} 的LSTM/TFM权重特征维度({meta.get('feat_dim')})与当前特征工程({current_feat_dim})不一致")
-        print(f"    请先重新运行 kaggle_lstm_tfm.py 生成新权重，本次跳过LSTM/TFM隐层")
-        return None, None, None
-    lstm = LSTMEncoder(meta['feat_dim'], hidden_dim=meta['hidden_dim'], output_dim=meta['n_classes'])
-    lstm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_lstm.pt', map_location='cpu'))
-    lstm.eval()
-    tfm = TransformerEncoder(meta['feat_dim'], d_model=meta['d_model'], output_dim=meta['n_classes'])
-    tfm.load_state_dict(torch.load(f'{DL_MOUNTED}/{game}_tfm.pt', map_location='cpu'))
-    tfm.eval()
-    return lstm, tfm, meta
-
-def compute_hidden(model, records, feat_fn, idx, seq_len=SEQ_LEN):
-    """计算指定期数idx对应的隐层状态（单次调用，仅用于最后一期推荐）"""
-    seq = []
-    for j in range(idx-seq_len, idx):
-        feat = feat_fn(records, j)
-        if feat is None: return None
-        seq.append(list(feat.values()))
-    x = torch.FloatTensor([seq])
-    with torch.no_grad():
-        _, h = model(x, return_hidden=True)
-    return h.numpy()[0]
-
-
-def precompute_hidden_all(records, feat_fn, model, seq_len=SEQ_LEN, batch_size=256):
-    """
-    批量一次性计算所有期数的LSTM/TFM隐层状态（关键性能优化）
-    返回 (hidden_array, idx_to_row字典)，训练循环里按idx查表O(1)，不再每步重算
-    """
-    if model is None:
-        return None, {}
-    X, idxs = [], []
-    # 注意上界用 len(records)+1：idx=len(records) 对应"用全部已知数据预测下一期"，
-    # 这是生成推荐时要用的那一步。若只算到 len(records)-1，推荐时会查不到隐层、
-    # 被迫回退成零向量，白白丢掉LSTM/TFM的信息。
-    for idx in range(seq_len, len(records)+1):
-        seq = []; valid = True
-        for j in range(idx-seq_len, idx):
-            feat = feat_fn(records, j)
-            if feat is None: valid=False; break
-            seq.append(list(feat.values()))
-        if not valid: continue
-        X.append(seq); idxs.append(idx)
-    if not X:
-        return None, {}
-    X = np.array(X, dtype=np.float32)
-    model.eval()
-    hs = []
-    with torch.no_grad():
-        for i in range(0, len(X), batch_size):
-            xb = torch.FloatTensor(X[i:i+batch_size])
-            _, h = model(xb, return_hidden=True)
-            hs.append(h.numpy())
-    hs = np.vstack(hs)
-    idx_to_row = {idx:i for i,idx in enumerate(idxs)}
-    return hs, idx_to_row
-
-
-def precompute_omission_kl8(records):
-    """
-    批量一次性计算快乐8所有期数的遗漏向量（O(N*80)，而非原来每次调用O(N*80)倒序扫描导致的O(N²*80)）
-    返回数组 omit_arr[idx] = 80维遗漏归一化向量，与 omission_vec_kl8(records, idx) 完全等价
-    """
-    N = len(records)
-    last_seen = {}   # 号码 -> 最后出现的下标
-    omit_arr = np.zeros((N+1, 80), dtype=np.float32)
-    for idx in range(N+1):
-        avg = max(idx*20/80, 1)
-        for n in range(1, 81):
-            if n in last_seen:
-                omit_arr[idx, n-1] = min((idx-1-last_seen[n]) / avg, 3)
-            else:
-                omit_arr[idx, n-1] = 2.0
-        if idx < N:
-            for n in records[idx]['numbers']:
-                last_seen[n] = idx
-    return omit_arr
-
-
-def precompute_freq_kl8(records, window=30):
-    """
-    批量一次性计算快乐8所有期数的"近N期逐球出现频率"（80维，每个球一个独立数值）
-    这是遗漏向量之外，第二个真正能逐球区分号码的信号。
-    ── 为什么需要这个 ──
-    快乐8 PPO 需要给80个球各自打分，但状态向量里绝大部分内容
-    （走势聚合特征、ML分组概率、LSTM/TFM隐层）对80个球来说都是完全相同的共享信息，
-    根本不携带"这是哪个球"的区分度。之前只有遗漏值这一个80维信号能区分个体球，
-    信号太单薄，导致网络最后一层的输出权重很容易在训练中自己走出一个
-    跟真实状态无关、只是训练过程偶然形成的固定偏好（表现为持续偏向某个号码区间）。
-    加入"近期出现频率"作为第二个逐球信号，让网络有更充分的依据去真正学习"选哪个球"，
-    而不是在信息不足的情况下被迫依赖训练过程中的随机偏置。
-    """
-    N = len(records)
-    freq_arr = np.zeros((N+1, 80), dtype=np.float32)
-    from collections import deque
-    recent = deque(maxlen=window)
-    for idx in range(N+1):
-        cnt = Counter(n for r in recent for n in r['numbers'])
-        for n in range(1, 81):
-            freq_arr[idx, n-1] = cnt.get(n, 0)
-        if idx < N:
-            recent.append(records[idx])
-    return freq_arr
-
-
-# ── 快乐8 逐球信号开关 ──
-# 频率向量（近30期逐球出现次数）：按需求关闭（置False后，状态里不再包含这80维，也不再做相关展示）
-KL8_USE_FREQ   = False
-# 近期重号向量：本期号码与上期重复的"重号"相关信号
-KL8_USE_REPEAT = True
-# 斜连向量：上期号码±1的邻号（走势图上的斜连线）相关信号
-KL8_USE_DIAG   = True
-KL8_REPDIAG_WINDOW = 10   # 统计"近期重号/斜连命中"的窗口期数
-
-
-def precompute_repdiag_kl8(records, window=KL8_REPDIAG_WINDOW):
-    """
-    批量计算快乐8每个idx的 重号/斜连 逐球向量，每个向量80维（每个球一个数）。
-    约定与其它预计算一致：arr[idx] 只用 records[:idx]（即idx之前已开出的数据），不含records[idx]。
-
-      rep_cand : 上期开出的球=1（这些球就是"本期可能重号"的候选）
-      rep_hist : 近window期内，该球"重号"（本期开出且上一期也开出）的次数
-      diag_cand: 上期号码±1的邻号=1（上期开出的球本身除外，这些是"本期可能斜连"的候选）
-      diag_hist: 近window期内，该球"斜连"（本期开出且上一期的±1邻号里有它）的次数
-    """
-    N = len(records)
-    rep_cand  = np.zeros((N+1, 80), dtype=np.float32)
-    rep_hist  = np.zeros((N+1, 80), dtype=np.float32)
-    diag_cand = np.zeros((N+1, 80), dtype=np.float32)
-    diag_hist = np.zeros((N+1, 80), dtype=np.float32)
-    sets = [set(r['numbers']) for r in records]
-    # 逐期事件：第t期里哪些球是重号/斜连（t>=1）
-    rep_ev  = np.zeros((N, 80), dtype=np.float32)
-    diag_ev = np.zeros((N, 80), dtype=np.float32)
-    for t in range(1, N):
-        prev = sets[t-1]
-        nb = set()
-        for x in prev:
-            if x > 1: nb.add(x-1)
-            if x < 80: nb.add(x+1)
-        for b in sets[t]:
-            if b in prev: rep_ev[t, b-1] = 1.0
-            if b in nb:   diag_ev[t, b-1] = 1.0
-    for idx in range(N+1):
-        if idx >= 1:
-            prev = sets[idx-1]
-            nb = set()
-            for x in prev:
-                rep_cand[idx, x-1] = 1.0
-                if x > 1: nb.add(x-1)
-                if x < 80: nb.add(x+1)
-            for b in nb - prev:
-                diag_cand[idx, b-1] = 1.0
-        lo = max(1, idx - window)
-        if idx > lo:
-            rep_hist[idx]  = rep_ev[lo:idx].sum(axis=0)
-            diag_hist[idx] = diag_ev[lo:idx].sum(axis=0)
-    return rep_cand, rep_hist, diag_cand, diag_hist
-
-
-def build_kl8_extra_arr(records):
-    """按开关拼出快乐8的"额外逐球信号"矩阵 (N+1, 80*m)；m=启用的向量个数。同时返回各段名称。"""
-    parts, names = [], []
-    if KL8_USE_FREQ:
-        parts.append(precompute_freq_kl8(records, window=30)); names.append('频率')
-    if KL8_USE_REPEAT or KL8_USE_DIAG:
-        rc, rh, dc, dh = precompute_repdiag_kl8(records)
-        if KL8_USE_REPEAT:
-            parts += [rc, rh]; names += ['重号候选(上期球)', '近期重号次数']
-        if KL8_USE_DIAG:
-            parts += [dc, dh]; names += ['斜连候选(上期±1邻号)', '近期斜连次数']
-    if not parts:
-        return np.zeros((len(records)+1, 0), dtype=np.float32), names
-    return np.concatenate(parts, axis=1).astype(np.float32), names
-
-
-def kl8_state_with_extra(raw, ml_vec, lh, th, om, ex_row):
-    """快乐8状态拼接：原有各段 + 遗漏80维 + 若干个80维逐球向量，各段独立归一化。
-    返回 (state, perball_dim)；逐球信号(遗漏+额外向量)整体加权由调用方对 state[-perball_dim:] 处理。"""
-    segs = [raw, ml_vec, lh, th, om]
-    for i in range(ex_row.shape[0] // 80):
-        segs.append(ex_row[i*80:(i+1)*80])
-    return normalize_state_segments(*segs), 80 + ex_row.shape[0]
-
-
-def precompute_omission_ssq(records):
-    """双色球：33红球+16蓝球=49维遗漏向量，批量预计算"""
-    N = len(records)
-    last_seen_r = {}; last_seen_b = {}
-    omit_arr = np.zeros((N+1, 49), dtype=np.float32)
-    for idx in range(N+1):
-        avg_r = max(idx*6/33, 1); avg_b = max(idx/16, 1)
-        for n in range(1,34):
-            if n in last_seen_r:
-                omit_arr[idx, n-1] = min((idx-1-last_seen_r[n])/avg_r, 3)
-            else:
-                omit_arr[idx, n-1] = 2.0
-        for n in range(1,17):
-            if n in last_seen_b:
-                omit_arr[idx, 33+n-1] = min((idx-1-last_seen_b[n])/avg_b, 3)
-            else:
-                omit_arr[idx, 33+n-1] = 2.0
-        if idx < N:
-            for n in records[idx]['red']: last_seen_r[n]=idx
-            last_seen_b[records[idx]['blue']] = idx
-    return omit_arr
-
-
-def precompute_omission_3d(records):
-    """福彩3D：百十个位各10个数字，共30维遗漏向量"""
-    N = len(records)
-    last_seen = [{}, {}, {}]  # 每位一个字典：数字 -> 最后出现下标
-    omit_arr = np.zeros((N+1, 30), dtype=np.float32)
-    for idx in range(N+1):
-        avg = max(idx/10, 1)
-        for pos in range(3):
-            for d in range(10):
-                if d in last_seen[pos]:
-                    omit_arr[idx, pos*10+d] = min((idx-1-last_seen[pos][d])/avg, 3)
-                else:
-                    omit_arr[idx, pos*10+d] = 2.0
-        if idx < N:
-            for pos in range(3):
-                last_seen[pos][records[idx]['digits'][pos]] = idx
-    return omit_arr
-
-# ══════════════════════════════════════════════════════
-#  ML概率向量 + 遗漏向量
-# ══════════════════════════════════════════════════════
-def extract_ml_prob_vec(ml_pred, game, verbose=True):
-    vec = []
-    models_data = ml_pred.get('models', {})
-    # blue 目标在传统ML里标签范围是1-16（未做偏移），其余目标都是0起始的分组标签
-    if game=='3d': tk=['sum_grp','odd','group_type','big','span_grp','road_dom','arith']; nc=[3,4,3,4,3,3,2]; offsets=[0,0,0,0,0,0,0]
-    elif game=='ssq': tk=['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']; nc=[7,3,3,3,3,7,6]; offsets=[0,0,0,0,0,0,0]
-    else: tk=['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']; nc=[3,4,3,3,5,3,3]; offsets=[0,0,0,0,0,0,0]
-    found, missing = [], []
-    for tkey,n,off in zip(tk,nc,offsets):
-        m = models_data.get(tkey,{}); probs = m.get('prediction',{}).get('probs',{})
-        seg = [float(probs.get(str(i+off),0.0))/100.0 for i in range(n)]
-        vec.extend(seg)
-        (found if any(v>0 for v in seg) else missing).append(tkey)
-    if verbose:
-        print(f"    [传统ML状态注入验证] {game}: 成功读到概率的目标={found}")
-        if missing:
-            print(f"    ⚠️ [传统ML状态注入验证] 以下目标概率全为0，未生效={missing}（请确认 kaggle_fucai.py 已用最新目标重新跑过）")
-    return np.array(vec, dtype=np.float32)
-
-# （omission_vec_kl8/omission_vec_ssq 已被上方 precompute_omission_* 批量预计算版本取代）
-
-# ══════════════════════════════════════════════════════
-#  快乐8真实赔率
-# ══════════════════════════════════════════════════════
-KL8_PAYOUT = {(1,1):2,(2,2):10,(3,3):30,(4,4):100,(4,3):3,(4,2):1,(5,5):200,(5,4):8,(5,3):1,
-    (6,6):1000,(6,5):20,(6,4):2,(6,3):1,(7,7):2000,(7,6):50,(7,5):4,(7,4):1,
-    (8,8):5000,(8,7):100,(8,6):8,(8,5):1,(9,9):10000,(9,8):300,(9,7):20,(9,6):2,
-    (10,10):18000,(10,9):600,(10,8):30,(10,7):3,(10,6):1}
-TICKET_PRICE = 2.0
-def calc_payout(n,h): return KL8_PAYOUT.get((n,h),0)*TICKET_PRICE - TICKET_PRICE
-
-
-
-def diverse_picks(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
-    """
-    多样化选号：胆码 + 拖码轮转。
-
-    ── 为什么不用"联合得分Top-N" ──
-    按组合总分排序取前N注，结果必然是N注共享同样的头几个高分球、只有末尾一两个位置在微调
-    （实测双色球6注平均重合4.8/6个球，只用到8个不同号码），
-    这跟只推1注没有本质区别，完全体现不出多元化，实际参考意义很低。
-
-    ── 现在的做法 ──
-    1) 候选池：按模型打分取前 pool_mult 倍于所需球数的号码，超出的说明模型不看好，不予考虑
-    2) 胆码：池中打分最高的那少数几个球，模型最确信，进入每一注
-    3) 拖码：池中其余球轮转填充各注剩余位置，让模型看好的号码都有机会出场
-
-    这样既尊重模型的置信度层次（越看好的球出现越频繁），又保证各注之间有实质差异。
-    返回 (各注号码列表, 胆码, 候选池)
-    """
-    order = np.argsort(scores)[::-1]
-    pool_size = min(len(scores), max(n_pick + 2, int(round(n_pick * pool_mult))))
-    pool = [int(order[i]) + 1 for i in range(pool_size)]
-    core_n = max(1, min(n_pick - 1, int(round(n_pick * core_ratio))))
-    core, rest = pool[:core_n], pool[core_n:]
-    bets, ri = [], 0
-    for _ in range(n_bets):
-        sel = list(core)
-        guard = 0
-        while len(sel) < n_pick and rest and guard < len(rest) * 3:
-            cand = rest[ri % len(rest)]; ri += 1; guard += 1
-            if cand not in sel: sel.append(cand)
-        # 池子不够时（理论上不会），用全局排序补齐
-        oi = 0
-        while len(sel) < n_pick and oi < len(order):
-            c = int(order[oi]) + 1; oi += 1
-            if c not in sel: sel.append(c)
-        bets.append(sorted(sel))
-    return bets, sorted(core), sorted(pool)
-
-
-# ══════════════════════════════════════════════════════
-#  新数据检测：避免拿完全相同的数据反复训练（过拟合防护）
-#  三个游戏共用。记录"上次训练时用了多少期数据"，
-#  下次运行时若期数没增加，说明没有新开奖，跳过训练直接沿用上次结果。
-#  这对手动重复触发尤其重要——否则同一批数据被训练N次，
-#  模型会对这批数据过度拟合，反而降低泛化能力。
-# ══════════════════════════════════════════════════════
-def get_last_trained_n(game):
-    """读取上次训练时的数据期数（优先读挂载的Dataset，那是上次运行持久化的结果）"""
-    for path in (f'{RL_MOUNTED}/{game}_last_trained_n.json',
-                 f'{RL_LOCAL_DIR}/{game}_last_trained_n.json'):
-        if os.path.exists(path):
-            try:
-                with open(path) as f: return json.load(f).get('n', 0)
-            except Exception: pass
-    return 0
-
-def save_last_trained_n(game, n):
-    """记录本次训练用到的数据期数，随RL_LOCAL_DIR一起推送到Dataset持久化"""
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    try:
-        with open(f'{RL_LOCAL_DIR}/{game}_last_trained_n.json', 'w') as f:
-            json.dump({'n': n}, f)
-    except Exception as e:
-        print(f"  ! 记录{game}训练期数失败: {e}")
-
-def carry_over_result(game_key, display_name, prev_result, cur_n, last_n, reason):
-    """
-    无新数据时，沿用上次的完整结果（字段结构保持一致，前端渲染无需感知变化）。
-
-    注意 game_key 与 display_name 必须分开：
-    game_key 用于拼文件名（'3d'/'ssq'/'kl8'），display_name 只用于日志展示（中文）。
-    之前两者混用，把中文名传进 save_last_trained_n，生成了带中文的文件名，
-    挂载后变成乱码（日志里看到的 '_last_trained_n.json'），
-    导致双色球的"已训练期数"永远读不回来，开奖日检测形同虚设。
-    """
-    print(f"  {display_name} 无新开奖数据（当前{cur_n}期，上次训练时已是{last_n}期），"
-          f"跳过训练避免重复数据过拟合")
-    save_last_trained_n(game_key, cur_n)
-    if prev_result:
-        carried = dict(prev_result)
-        carried['skipped'] = True
-        carried['carried_over'] = True
-        carried['note'] = (carried.get('note','') or '') + f'（{reason}，以上为上次训练结果，本次未重新训练）'
-        return carried
-    return {'skipped': True, 'games_tested': 0, 'reason': reason,
-            'note': f'{reason}，且未找到上次训练结果可沿用（可能是首次运行）'}
-
-def normalize_state_segments(*segments):
-    """
-    分段独立归一化，替代"整个向量除以自身最大值"的错误做法。
-    问题根源：raw特征里像"号码总和均值"这类聚合量级在几百到近千，
-    而遗漏值(0-3)、ML概率(0-1)量级很小，如果整个向量共用一个全局最大值做归一化，
-    遗漏和ML概率信号会被压缩到接近0，模型实际上"看不到"这些真正能区分号码好坏的关键信息，
-    只能学到一些跟具体选哪个球无关的全局统计偏向，导致策略跟状态基本脱钩、
-    收敛到一个固定的、看似随意的偏好（这次表现为一直偏向大号）。
-    修复：每一段各自独立按自己的最大值缩放到[-1,1]附近，再拼接，
-    确保任何一段都不会因为量级差异淹没其它段的信号。
-    """
-    normed = []
-    for seg in segments:
-        seg = np.asarray(seg, dtype=np.float32)
-        if seg.size == 0:
-            normed.append(seg)
-            continue
-        m = np.abs(seg).max()
-        normed.append(seg / (m + 1e-8) if m > 0 else seg)
-    state = np.concatenate(normed).astype(np.float32)
-    return np.clip(state, -5, 5)
-
-# ══════════════════════════════════════════════════════
-#  训练/回测隔离 + 增量微调防过拟合机制
-#
-#  ── 问题 ──
-#  之前训练覆盖全部历史数据（第25期~最后一期），而"增量微调"是在这份
-#  已经见过全部数据的模型上，每天用最新几千步继续训练——
-#  这里有两层过拟合风险：
-#    ① 模型训练时本来就见过全部历史，回测/评估用的数据也在训练集里，
-#       没有真正的"没见过的题"来检验它，数字会虚高。
-#    ② 每天的微调只有1期新数据（占总数万分之一），却要跑几千到几万步梯度更新，
-#       极易在这1个新样本上过拟合，甚至让原本练好的权重变差——
-#       而原来的代码不管微调后变好变坏，都无条件覆盖保存，好权重一旦被
-#       一次不走运的微调带偏，永远回不去了。
-#
-#  ── 解决方式 ──
-#  ① 留出末段数据（holdout）训练时完全不碰，回测/评估只在这段上进行，
-#     这段数据训练时全程没见过，是真正的样本外检验。
-#  ② 增量微调改为"分段训练+早停+保留最佳"：把当天的微调步数切成几段，
-#     每段结束都在holdout上评一次分，全程跟踪历史最高分对应的那组权重，
-#     最后只保留那组最佳权重——如果微调全程都没能超过"微调前"的水平，
-#     就直接原样保留微调前的权重，不会因为一次不走运的微调把模型带差。
-#     这是本次要新增的核心防过拟合机制。
-# ══════════════════════════════════════════════════════
-def holdout_size(n_records):
-    """留出期数：至少80期保证评估样本量，最多300期避免过度侵占训练数据"""
-    return max(80, min(300, int(n_records * 0.10)))
-
-
-# EMA混合比例：每天微调的结果按这个比例并入总权重，不管当天效果好坏。
-# α越小，单日影响越弱（更稳，但跟新数据的关联也越弱）；
-# α越大，跟得越紧，但单日噪声的影响也越大。0.15是折中值，可按需调整。
-EMA_ALPHA_FINETUNE = 0.15
-
-
-# 候选α值。每天都会把每个候选实际评一次分并记录下来，
-# 但【当前生效】的α只有攒够多天、且明显优于默认值时才会切换（见下方 choose_alpha）。
-EMA_ALPHA_CANDIDATES = [0.05, 0.10, 0.15, 0.20, 0.30]
-EMA_ALPHA_DEFAULT = 0.15
-
-
-def record_alpha_scores(game, scores_today):
-    """
-    把今天各候选α的holdout评分记录到持久化历史，用于日后判断哪个α更好。
-
-    只记录，不在这里做决策——决策交给 choose_alpha，
-    避免"用今天一天的噪声挑最好的候选"这种典型的过拟合。
-    """
-    path = f'{RL_LOCAL_DIR}/{game}_alpha_history.json'
-    hist = []
-    for p in (f'{RL_MOUNTED}/{game}_alpha_history.json', path):
-        if os.path.exists(p):
-            try:
-                with open(p) as f: hist = json.load(f); break
-            except Exception: pass
-    hist.append({'date': str(date.today()), 'scores': {str(k): v for k, v in scores_today.items()}})
-    hist = hist[-400:]
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    try:
-        with open(path, 'w') as f: json.dump(hist, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"    ! 写入α历史失败: {e}")
-    return hist
-
-
-def choose_alpha(hist, candidates, default_alpha, se_per_day, min_days=15, margin_k=2.0):
-    """
-    根据多天累积证据决定接下来用哪个α，而不是挑"今天表现最好"的那个。
-
-    ── 为什么不能直接挑今天最好的 ──
-    holdout样本有限，今天5个候选里随手就会有一个"恰好"评分最高，
-    这跟之前挑战者机制要解决的问题是同一件事——单日的"更好"大概率是噪声。
-
-    ── 做法 ──
-    每个候选都持续记录，攒够 min_days 天以后，比较各候选的【多天平均分】。
-    只有当某个候选的多天平均明显超过默认值（超过 margin_k 倍标准误），
-    才换成那个候选；否则一直用默认值 EMA_ALPHA_DEFAULT，不做武断切换。
-    """
-    if len(hist) < min_days:
-        return default_alpha, f"仅积累{len(hist)}天(<{min_days}天门槛)，暂用默认α={default_alpha}"
-
-    avgs, ns = {}, {}
-    for a in candidates:
-        vals = [h['scores'].get(str(a)) for h in hist if h['scores'].get(str(a)) is not None]
-        if vals:
-            avgs[a] = sum(vals) / len(vals); ns[a] = len(vals)
-    if not avgs:
-        return default_alpha, "候选评分历史数据不足，暂用默认值"
-
-    best_a = max(avgs, key=avgs.get)
-    best_avg = avgs[best_a]
-    default_avg = avgs.get(default_alpha, best_avg)
-    n_days = ns.get(best_a, len(hist))
-    se_avg = se_per_day / max(n_days, 1) ** 0.5
-    gap = best_avg - default_avg
-
-    _detail = "  ".join(f"α={a}:{avgs[a]:.4f}" for a in candidates if a in avgs)
-    if best_a != default_alpha and gap > margin_k * se_avg:
-        return best_a, (f"候选α={best_a} 累计{n_days}天平均{best_avg:.4f} 显著优于默认"
-                        f"(差距{gap:+.4f} > {margin_k}倍标准误{se_avg:.4f})  [{_detail}]")
-    return default_alpha, (f"候选间差异未达显著水平(需要差距>{margin_k}倍标准误{se_avg:.4f})，"
-                           f"保持默认α={default_alpha}  [{_detail}]")
-
-
-def blend_state_dicts(old_sd, new_sd, alpha):
-    """
-    按 alpha 比例把 new_sd 混入 old_sd，返回混合后的 state_dict（EMA滑动平均）。
-
-    ── 这是替代"门槛式accept/reject"的防过拟合方法 ──
-    之前的做法：微调结果 vs 微调前基准，赢了整个替换、输了整个丢弃。
-    问题：为了不让1天的数据把模型带偏，把学习率压到30%+严格KL裁剪，
-    结果单日移动幅度小到测不出来；而且"赢了就整个接受"的判断没有
-    显著性门槛，约89%的天数会把纯噪声当成"真提升"整个采纳。
-
-    EMA换了一种思路：不做"行/不行"的二元判断，每天都按固定比例α
-    把当天训练结果混入总权重——单日效果再差，也只占α的权重，
-    结构上不可能把模型带崩；但权重每天都在真实移动，不会被
-    保护参数压到几乎不变。旧的更新影响力随天数指数衰减，
-    真正一致的信号会持续累积，纯噪声则会被后续的天数慢慢稀释掉。
-    """
-    blended = {}
-    for k in old_sd:
-        if old_sd[k].dtype.is_floating_point:
-            blended[k] = alpha * new_sd[k] + (1 - alpha) * old_sd[k]
-        else:
-            blended[k] = new_sd[k]
-    return blended
-
-
-def train_with_early_stop(model, total_steps, eval_fn, label,
-                          n_chunks=8, patience=3, reset_timesteps=True, warmup_chunks=0,
-                          baseline_is_real=False):
-    """
-    分段训练 + 早停 + 保留最佳模型，服务两种场景：
-
-    ① 首次训练（baseline_is_real=False）：
-       训练前的评分只是【随机初始化】网络在holdout上的一次评估，纯属噪声
-       （holdout样本量有限，随机网络完全可能"运气好"评出一个不低的分数），
-       不能把这个噪声值当成"要打败的基准"——否则后面刚开始训练的几段
-       只要没有同样的运气，就会被判定"无提升"，练不了几步就被提前叫停，
-       返回的还是那份没训练过的随机权重。这里不把它计入best_score候选，
-       只在真正训练过的几段里选最高分。
-
-    ② 增量微调（baseline_is_real=True）：
-       "微调前"不是随机初始化，是一份真实训练过的权重，拿它当基准完全合理——
-       微调不允许让结果比微调前更差，这正是本次要的防过拟合效果：
-       微调全程没有任何一段超过微调前，就直接保留微调前的权重原样返回。
-
-    warmup_chunks: 前N段不触发早停（仅用于首训，RL训练前期震荡是正常现象）。
-
-    返回 (model, best_score, history)
-    """
-    chunk = max(1, total_steps // n_chunks)
-    _init_score = eval_fn()
-
-    if baseline_is_real:
-        best_score = _init_score
-        best_params = copy.deepcopy(model.get_parameters())
-        print(f"    [{label}] 微调前基准分: {_init_score:.4f}"
-              f"（已训练权重，微调全程没能超过它就保留原权重不变）")
-    else:
-        best_score = None
-        best_params = None
-        print(f"    [{label}] 训练前基准分: {_init_score:.4f}（随机初始化，仅供参考，不参与最佳权重评选）")
-
-    history = [round(_init_score, 4)]
-    no_improve = 0
-
-    for i in range(n_chunks):
-        model.learn(total_timesteps=chunk,
-                    reset_num_timesteps=(reset_timesteps and i == 0),
-                    progress_bar=False)
-        score = eval_fn()
-        history.append(round(score, 4))
-        if best_score is None or score > best_score:
-            best_score = score
-            best_params = copy.deepcopy(model.get_parameters())
-            no_improve = 0
-            flag = "✓ 新最佳"
-        elif i < warmup_chunks:
-            flag = f"（热身期第{i+1}/{warmup_chunks}段，不计入早停）"
-        else:
-            no_improve += 1
-            flag = f"（无提升 {no_improve}/{patience}）"
-        print(f"    [{label}] 第{i+1}/{n_chunks}段({chunk}步) 评分 {score:.4f}  {flag}")
-        if i >= warmup_chunks and no_improve >= patience:
-            print(f"    [{label}] 连续{patience}段无提升，提前停止（省下{(n_chunks-i-1)*chunk}步）")
-            break
-
-    if best_params is None:
-        print(f"    [{label}] ⚠️ 没有任何一段完成评估，使用当前（未训练）权重")
-        return model, _init_score, history
-
-    model.set_parameters(best_params)
-    print(f"    [{label}] 已恢复到最佳权重，最终评分 {best_score:.4f}  评分轨迹: {history}")
-    return model, best_score, history
-
-
-# ══════════════════════════════════════════════════════
-#  集成环境
-# ══════════════════════════════════════════════════════
-KL8_TRAIN_N = 6    # 训练时用"选六"作为奖励标准，推荐时对同一个排序取不同TopN即可覆盖所有玩法
-
-class IntegratedKL8Env(gym.Env):
-    """
-    快乐8环境 v4：全号码打分排序 + 双重逐球差异化信号（遗漏+近期频率）
-    动作空间设计对比：
-    - MultiBinary(80)：2^80种组合，训练几十万步也探索不到万分之一，学不出东西
-    - 候选池Box(30)：只对预筛的30个候选打分，覆盖面受限，真正该选的号码若不在候选池里则永远选不到
-    - 本版 Box(80)：对全部80个球直接打连续分数，取Top6，
-      既保留全覆盖（跟MultiBinary一样能选中任意号码），
-      又是标准的排序学习问题（跟候选池一样好训练，PPO能有效利用梯度）
-
-    ⚠️ 关键修复：网络要输出80个球各自的分数，但状态向量里绝大部分内容
-    （走势聚合特征/ML分组概率/LSTM/TFM隐层）对80个球来说完全相同，不携带"选哪个球"的区分度，
-    之前只有遗漏值这一个80维信号能区分个体球，信号太单薄，网络最后一层容易在训练中
-    自己走出一个跟真实状态无关的固定偏好（表现为持续偏向某个号码区间）。
-    这版加入"近期出现频率"作为第二个逐球信号，并对这两个逐球信号整体加权(×2)，
-    确保网络有足够强的信号去真正学习"选哪个球"，而不是被迫依赖训练偶然性。
-    """
-    metadata={'render_modes':[]}
-    PERBALL_WEIGHT = 2.0   # 逐球信号（遗漏+频率）额外加权，突出其重要性
-
-    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, freq_arr, train_n=KL8_TRAIN_N):
-        super().__init__()
-        self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
-        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr; self.freq_arr=freq_arr
-        self.train_n=train_n
-        self.start=SEQ_LEN+30; self.idx=self.start
-        # 留出末段holdout训练时完全不碰，是真正的样本外评估数据
-        self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
-        sample=feat_fn(records,self.start); feat_dim=len(sample)
-        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
-        omit_dim = 80; freq_dim = freq_arr.shape[1] if freq_arr is not None else 0   # freq_arr现为"额外逐球向量"矩阵(80*m列)
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim+freq_dim
-        self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
-        self.action_space = spaces.Box(low=-1.,high=1.,shape=(80,),dtype=np.float32)
-
-    def _state(self):
-        feat=self.feat_fn(self.records,self.idx)
-        if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
-        raw=np.array(list(feat.values()),dtype=np.float32)
-        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
-            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
-        else:
-            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
-        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
-            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
-        else:
-            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
-        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(80,dtype=np.float32)
-        fr = self.freq_arr[self.idx] if self.freq_arr is not None else np.zeros(0,dtype=np.float32)
-
-        state, _pb = kl8_state_with_extra(raw,self.ml_vec,lh,th,om,fr)
-        # 逐球信号（遗漏+额外逐球向量：重号/斜连等，对应state末尾若干个80维）额外加权，让网络有更强动力真正依赖它们
-        state = state.copy()
-        state[-_pb:] *= self.PERBALL_WEIGHT
-        return np.clip(state, -5, 5)
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed); self.idx=self.start
-        return self._state(), {}
-
-    def step(self, action):
-        # 对全部80个球的打分，取分数最高的 train_n 个作为本期选号
-        top_idx = np.argsort(action)[-self.train_n:]
-        selected = sorted([int(i)+1 for i in top_idx])
-
-        actual=set(self.records[self.idx]['numbers'])
-        hit=len(actual&set(selected)); n_sel=len(selected)
-        net=calc_payout(n_sel,hit)
-        # 快乐8真实赔率表在命中0-2个球时统统赔0（选6时命中期望仅1.5个，绝大多数样本落在这个区间），
-        # 导致奖励大范围完全一样、没有梯度信号，PPO学不到跟状态相关的规律，只会随机收敛到某个固定偏向。
-        # 加一个连续塑形项：命中率越高奖励越好，覆盖赔率表的"平坦区"，让policy始终有梯度可学。
-        shaping = (hit / n_sel) * 0.3
-        reward = net/(TICKET_PRICE*100) + shaping
-        self.idx+=1
-        terminated=(self.idx >= self.train_end)
-        obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
-        return obs, reward, terminated, False, {'hit':hit,'n_sel':n_sel,'net':net}
-
-
-SSQ_RED_PICK_N = 6    # 双色球固定选6个红球
-
-class IntegratedSSQEnv(gym.Env):
-    """
-    双色球环境 v3：红球全号码打分排序（33个全打分，不再预筛候选池）+ 蓝球打分
-    动作向量 = [33个红球分数, 16个蓝球分数]，共49维
-    - 红球：33个球全部打分，取Top6
-    - 蓝球：16个分数argmax
-    理由同快乐8：候选池预筛会限制覆盖面，全量打分既保留完整覆盖又保持可学习的连续参数化。
-    奖励按双色球真实奖级结构分级，同时激励红球和蓝球命中。
-    """
-    metadata={'render_modes':[]}
-    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr, red_pick_n=SSQ_RED_PICK_N):
-        super().__init__()
-        self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
-        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr
-        self.red_pick_n=red_pick_n
-        self.start=SEQ_LEN+30; self.idx=self.start
-        self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
-        sample=feat_fn(records,self.start); feat_dim=len(sample)
-        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
-        omit_dim = 49   # 33红球+16蓝球遗漏值，已含每个号码的差异化信息
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
-        self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
-        self.action_space = spaces.Box(low=-1.,high=1.,shape=(33+16,),dtype=np.float32)
-
-    def _state(self):
-        feat=self.feat_fn(self.records,self.idx)
-        if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
-        raw=np.array(list(feat.values()),dtype=np.float32)
-        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
-            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
-        else:
-            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
-        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
-            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
-        else:
-            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
-        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(49,dtype=np.float32)
-
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed); self.idx=self.start
-        return self._state(), {}
-
-    @staticmethod
-    def _tier_reward(red_hit, blue_hit):
-        """按双色球真实奖级结构给分级奖励，激励红球和蓝球同时命中"""
-        if red_hit==6 and blue_hit: return 50.0   # 一等奖
-        if red_hit==6:               return 20.0   # 二等奖
-        if red_hit==5 and blue_hit:  return 10.0   # 三等奖
-        if red_hit==5 or (red_hit==4 and blue_hit): return 5.0   # 四等奖
-        if red_hit==4 or (red_hit==3 and blue_hit): return 2.0   # 五等奖
-        if blue_hit:                 return 1.0    # 六等奖（仅蓝球）
-        return -1.0   # 未中奖（成本）
-
-    def step(self, action):
-        red_scores  = action[:33]
-        blue_scores = action[33:]
-
-        top_idx = np.argsort(red_scores)[-self.red_pick_n:]
-        red_selected = sorted([int(i)+1 for i in top_idx])
-        blue_pred = int(np.argmax(blue_scores)) + 1
-
-        actual_red = set(self.records[self.idx]['red'])
-        actual_blue = self.records[self.idx]['blue']
-        red_hit = len(actual_red & set(red_selected))
-        blue_hit = int(blue_pred == actual_blue)
-        reward = self._tier_reward(red_hit, blue_hit)
-        # 红球选6个从33个里选，命中期望约1.09个，0-2命中区间同样存在奖励梯度不足问题，加小塑形项
-        reward += (red_hit / 6.0) * 0.5
-
-        self.idx+=1
-        terminated=(self.idx >= self.train_end)
-        obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
-        return obs, reward, terminated, False, {'red_hit':red_hit,'blue_hit':blue_hit,
-                                                  'red_selected':red_selected,'blue_pred':blue_pred}
-
-
-class Integrated3DEnv(gym.Env):
-    """
-    福彩3D环境：动作空间 MultiDiscrete([10,10,10])（百十个位各选一个数字，共1000种组合）
-    比快乐8的2^80小得多，PPO能够正常学习。
-    奖励：按位命中数给分，三位全中给大奖励（对应"直选"），
-    位置命中但顺序不对不加分（3D不看"组选"，只关心百十个精确对应）。
-    """
-    metadata={'render_modes':[]}
-    def __init__(self, records, feat_fn, ml_vec, lstm_hidden, lstm_idx2row,
-                 tfm_hidden, tfm_idx2row, omit_arr):
-        super().__init__()
-        self.records=records; self.feat_fn=feat_fn; self.ml_vec=ml_vec
-        self.lstm_hidden=lstm_hidden; self.lstm_idx2row=lstm_idx2row
-        self.tfm_hidden=tfm_hidden;   self.tfm_idx2row=tfm_idx2row
-        self.omit_arr=omit_arr
-        self.start=SEQ_LEN+5; self.idx=self.start
-        self.train_end = max(self.start + 10, len(records) - holdout_size(len(records)))
-        sample=feat_fn(records,self.start); feat_dim=len(sample)
-        lstm_dim = lstm_hidden.shape[1] if lstm_hidden is not None else 0
-        tfm_dim  = tfm_hidden.shape[1]  if tfm_hidden  is not None else 0
-        omit_dim = 30
-        self.state_dim = feat_dim+len(ml_vec)+lstm_dim+tfm_dim+omit_dim
-        self.observation_space = spaces.Box(low=-5.,high=5.,shape=(self.state_dim,),dtype=np.float32)
-        self.action_space = spaces.MultiDiscrete([10,10,10])
-
-    def _state(self):
-        feat=self.feat_fn(self.records,self.idx)
-        if feat is None: return np.zeros(self.state_dim,dtype=np.float32)
-        raw=np.array(list(feat.values()),dtype=np.float32)
-        if self.lstm_hidden is not None and self.idx in self.lstm_idx2row:
-            lh = self.lstm_hidden[self.lstm_idx2row[self.idx]]
-        else:
-            lh = np.zeros(self.lstm_hidden.shape[1] if self.lstm_hidden is not None else 0, dtype=np.float32)
-        if self.tfm_hidden is not None and self.idx in self.tfm_idx2row:
-            th = self.tfm_hidden[self.tfm_idx2row[self.idx]]
-        else:
-            th = np.zeros(self.tfm_hidden.shape[1] if self.tfm_hidden is not None else 0, dtype=np.float32)
-        om = self.omit_arr[self.idx] if self.omit_arr is not None else np.zeros(30,dtype=np.float32)
-        return normalize_state_segments(raw,self.ml_vec,lh,th,om)
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed); self.idx=self.start
-        return self._state(), {}
-
-    def step(self, action):
-        pred = [int(action[0]), int(action[1]), int(action[2])]
-        actual = self.records[self.idx]['digits']
-        matches = sum(1 for i in range(3) if pred[i]==actual[i])
-        reward = matches * 1.0
-        if matches == 3:
-            reward += 20.0   # 三位全中（直选）额外大奖励
-        self.idx+=1
-        terminated=(self.idx >= self.train_end)
-        obs=self._state() if not terminated else np.zeros(self.state_dim,dtype=np.float32)
-        return obs, reward, terminated, False, {'pred':pred,'actual':actual,'matches':matches}
-
-# ══════════════════════════════════════════════════════
-#  加载/保存 PPO 模型
-# ══════════════════════════════════════════════════════
-def load_ppo(game):
-    path = f'{RL_MOUNTED}/{game}_ppo.zip'
-    if os.path.exists(path):
-        try:
-            model = PPO.load(path, device='cpu')
-            print(f"  ✓ 加载已有PPO模型: {path}")
-            return model
-        except Exception as e:
-            print(f"  ! 加载PPO失败: {e}，将重新训练")
-        return None
-
-    # ── 关键兼容：Kaggle 上传 Dataset 时会自动把 .zip 解压成同名目录 ──
-    # SB3 存的是 3d_ppo.zip，挂载后变成 3d_ppo/ 目录（里面是 policy.pth 等文件），
-    # 于是 os.path.exists('3d_ppo.zip') 永远为 False，模型明明在却读不到，
-    # 每天都静默退回"首次训练"，微调机制形同虚设。
-    # 这里把解压出来的目录重新打包成 zip 再交给 SB3 加载。
-    dir_path = f'{RL_MOUNTED}/{game}_ppo'
-    if os.path.isdir(dir_path):
-        try:
-            tmp_base = f'/kaggle/working/_restore_{game}_ppo'
-            zip_path = shutil.make_archive(tmp_base, 'zip', dir_path)
-            model = PPO.load(zip_path, device='cpu')
-            print(f"  ✓ 加载已有PPO模型（从被Kaggle解压的目录 {dir_path} 重新打包恢复）")
-            return model
-        except Exception as e:
-            print(f"  ! 从解压目录恢复PPO失败: {e}，将重新训练")
-            return None
-
-    print(f"  ! 未找到PPO模型文件: {path}")
-    if os.path.isdir(RL_MOUNTED):
-        try:
-            entries = sorted(os.listdir(RL_MOUNTED))
-            print(f"    挂载目录 {RL_MOUNTED} 实际内容({len(entries)}项): {entries[:20]}")
-            for e in entries:
-                sub = os.path.join(RL_MOUNTED, e)
-                if os.path.isdir(sub):
-                    print(f"    子目录 {e}/ 内容: {sorted(os.listdir(sub))[:20]}")
-        except Exception as e:
-            print(f"    读取挂载目录失败: {e}")
-    else:
-        print(f"    ⚠️ 挂载目录 {RL_MOUNTED} 不存在——"
-              f"说明 kernel-metadata.json 的 dataset_sources 里没挂载 {RL_DATASET_SLUG}，"
-              f"或该Dataset尚未创建")
-    return None
-
-def save_ppo(model, game):
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    model.save(f'{RL_LOCAL_DIR}/{game}_ppo')
-    print(f"  ✓ PPO模型已保存到本地: {RL_LOCAL_DIR}/{game}_ppo.zip")
-
-def sync_local_with_mounted():
-    """
-    推送前，把【挂载目录（上次版本）里有、但本地工作目录没有】的文件全部补齐。
-
-    ── 为什么必须做这一步 ──
-    push_rl_dataset() 会把本地工作目录的全部内容当作新版本推送到Kaggle，
-    Kaggle的Dataset版本更新是【整体替换】，不是合并——本地目录里没有的文件，
-    这次推送后就会从Dataset里彻底消失。
-
-    如果某个游戏这次跳过了训练（比如手动运行时没有新开奖数据、
-    或双色球恰好不是开奖日），carry_over_result 只会写一个
-    {game}_last_trained_n.json，模型文件根本没进本地工作目录——
-    这时如果直接推送，等于用"更瘦"的本地目录覆盖了Kaggle上原来的完整版本，
-    上次好不容易保存的PPO模型就这样被冲掉了，下次运行读不到模型，
-    只能被迫从头首训。这正是"手动运行→没有新数据→跳过训练→推送→
-    再自动运行时发现模型丢了"这个bug的根因。
-
-    这里在推送前统一补齐：挂载目录有、本地没有的文件都复制过来
-    （包括被Kaggle自动解压出的 xxx_ppo 目录，会重新打包成 xxx_ppo.zip），
-    保证不管这次训没训练、训了哪几个游戏，推送出去的始终是完整的一份，
-    不会遗漏任何游戏已经保存过的内容。
-    """
-    if not os.path.isdir(RL_MOUNTED):
-        return
-    os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-    local_files = set(os.listdir(RL_LOCAL_DIR))
-    synced = []
-    for entry in sorted(os.listdir(RL_MOUNTED)):
-        src = os.path.join(RL_MOUNTED, entry)
-        if os.path.isdir(src):
-            # 被Kaggle自动解压的模型目录（如 3d_ppo/），本地若没有对应的.zip就重新打包补上
-            zip_name = entry + '.zip'
-            if zip_name not in local_files:
-                try:
-                    tmp_base = f'/kaggle/working/_sync_{entry}'
-                    zip_path = shutil.make_archive(tmp_base, 'zip', src)
-                    shutil.copy(zip_path, os.path.join(RL_LOCAL_DIR, zip_name))
-                    synced.append(zip_name)
-                except Exception as e:
-                    print(f"    ! 同步{entry}失败: {e}")
-        else:
-            if entry not in local_files and entry != 'dataset-metadata.json':
-                try:
-                    shutil.copy(src, os.path.join(RL_LOCAL_DIR, entry))
-                    synced.append(entry)
-                except Exception as e:
-                    print(f"    ! 同步{entry}失败: {e}")
-    if synced:
-        print(f"  [推送前补齐] 本地缺失、已从挂载目录同步的文件: {synced}")
-    else:
-        print("  [推送前补齐] 本地文件已是完整的，无需从挂载目录同步")
-
-
-def push_rl_dataset():
-    """把RL_LOCAL_DIR整体推送到Kaggle Dataset"""
-    try:
-        meta = {"title":"Fucai RL Cache","id":RL_DATASET_ID,"licenses":[{"name":"CC0-1.0"}]}
-        with open(f'{RL_LOCAL_DIR}/dataset-metadata.json','w') as f: json.dump(meta,f)
-        # 打印本次要上传的文件清单，便于跟下次运行时挂载目录的内容对照排查
-        try:
-            files = sorted(os.listdir(RL_LOCAL_DIR))
-            print(f"  本次上传文件({len(files)}项): {files[:20]}")
-        except Exception: pass
-        env = os.environ.copy(); env['KAGGLE_API_TOKEN']=KAGGLE_TOKEN
-        # 注意：不要加 --dir-mode tar/zip。模型文件本来就直接放在 RL_LOCAL_DIR 下，
-        # 加了归档参数会把内容打包，挂载后看到的是压缩包而非 xxx_ppo.zip 独立文件，
-        # 导致 load_ppo 每次都找不到文件、静默退回"首次训练"，模型永远无法累积。
-        for cmd in [
-            ['kaggle','datasets','version','-p',RL_LOCAL_DIR,'-m',f'daily-{date.today()}'],
-            ['kaggle','datasets','create','-p',RL_LOCAL_DIR],
-        ]:
-            r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
-            if r.returncode==0:
-                print(f"  ✓ RL模型已推送到 {RL_DATASET_ID}"); return True
-            print(f"  [{cmd[1]} {cmd[2]}] rc={r.returncode}  {r.stderr[:150]}")
-        return False
-    except Exception as e:
-        print(f"  ! 推送异常: {e}"); return False
-
-# ══════════════════════════════════════════════════════
-#  主流程：kl8 增量微调
-# ══════════════════════════════════════════════════════
-def run_kl8_daily(records, ml_pred, prev_result=None):
-    print(f"\n{'='*50}\n快乐8 PPO 每日增量微调（全号码打分排序，{len(records)}期）\n{'='*50}")
-
-    # 新数据检测：快乐8虽然每天开奖，但手动重复触发时数据是完全相同的，
-    # 反复训练会让模型对同一批数据过拟合，这里直接跳过
-    last_trained_n = get_last_trained_n('kl8')
-    if len(records) <= last_trained_n:
-        return carry_over_result('kl8', '快乐8', prev_result, len(records), last_trained_n,
-                                 '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
-
-    ml_vec = extract_ml_prob_vec(ml_pred, 'kl8')
-    _cur_feat_dim = len(fkl8(records, len(records)-1) or {})
-    lstm, tfm, meta = load_lstm_tfm('kl8', current_feat_dim=_cur_feat_dim)
-
-    print("  批量预计算 LSTM/TFM 隐层状态…")
-    t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fkl8, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fkl8, tfm)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
-
-    print("  批量预计算遗漏向量…")
-    t0 = time.time()
-    omit_arr = precompute_omission_kl8(records)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（80维，覆盖全部号码）")
-
-    print("  批量预计算逐球向量（重号/斜连等；频率按开关）…")
-    t0 = time.time()
-    freq_arr, _extra_names = build_kl8_extra_arr(records)   # 变量名沿用freq_arr，实际是额外逐球向量矩阵
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [额外逐球向量] {_extra_names if _extra_names else '无'}"
-          f"（每个80维）；频率向量{'开启' if KL8_USE_FREQ else '已关闭'}")
-
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏80维"
-          + "".join(f" + {n}80维" for n in _extra_names) + "（逐球信号×2加权）")
-
-    def make_env():
-        return IntegratedKL8Env(records, fkl8, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
-    vec_env = make_vec_env(make_env, n_envs=4)
-
-    # 探针环境：跟训练环境用同一个 _state() 方法算状态，供早停评估复用，
-    # 不重复实现一遍特征拼接逻辑，避免训练和评估用的状态出现细微不一致
-    _probe_env = IntegratedKL8Env(records, fkl8, ml_vec,
-                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr, freq_arr)
-    _hold_start = _probe_env.train_end
-    def _eval_holdout(m):
-        """在holdout（训练时从未碰过的末段）上评分：选六标准的平均命中球数"""
-        tot, n = 0, 0
-        for idx in range(_hold_start, len(records)):
-            _probe_env.idx = idx
-            st = _probe_env._state()
-            action, _ = m.predict(st, deterministic=True)
-            top_idx = np.argsort(action)[-6:]
-            sel = set(int(i)+1 for i in top_idx)
-            tot += len(set(records[idx]['numbers']) & sel); n += 1
-        return tot/n if n else 0.0
-
-    model = None
-    is_new = True
-    t0 = time.time()
-    if not is_new:
-        try:
-            model.set_env(vec_env)
-        except Exception as e:
-            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
-            model = None; is_new = True
-
-    if is_new:
-        print("  首次训练（20万步，全80球连续打分排序，兼顾全覆盖与可学习性）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05,
-                    target_kl=0.03,   # 限制单次更新的策略偏移幅度，防止在小样本上过度拟合
-                    verbose=0, device='cpu')
-        model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '快乐8首训',
-            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
-            baseline_is_real=False)
-    else:
-        print("  增量微调（2万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
-        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
-        _pre_score = _eval_holdout(model)
-        # 不再刻意压低学习率——EMA混合本身就把单日影响限制在α比例内，
-        # 不需要再靠"调小学习率+严格KL裁剪"把移动量压到几乎测不出来
-        model.target_kl = 0.05
-        # baseline_is_real=False：不把"微调前"当候选基准，只从这次会话
-        # 实际训练出的几段里挑最好的——不管它比昨天好还是差都无所谓，
-        # 因为"要不要接受"这件事已经交给下面的EMA混合处理，
-        # 这里只负责回答"今天训出来的最好版本是什么"
-        model, _session_best, _hist = train_with_early_stop(
-            model, 20000, lambda: _eval_holdout(model), '快乐8微调',
-            n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
-            baseline_is_real=False)
-        _new_sd = model.policy.state_dict()
-        # 每个候选α都实测一次holdout评分，记录到历史（不在这里挑，避免用单日噪声选参数）
-        _alpha_scores = {}
-        for _a in EMA_ALPHA_CANDIDATES:
-            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
-            _alpha_scores[_a] = _eval_holdout(model)
-        _alpha_hist = record_alpha_scores('kl8', _alpha_scores)
-        _se_kl8 = math.sqrt(6*0.25*0.75) / max(len(records)-_hold_start, 1) ** 0.5
-        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
-                                                 EMA_ALPHA_DEFAULT, _se_kl8)
-        print(f"    [α自动选择] {_alpha_why}")
-        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
-        model.policy.load_state_dict(_blended_sd)
-        _best = _eval_holdout(model)
-        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
-              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
-          f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
-
-    save_ppo(model, 'kl8')
-
-    def build_state(idx):
-        feat = fkl8(records, idx)
-        if feat is None: return None
-        raw = np.array(list(feat.values()),dtype=np.float32)
-        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
-        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
-        om = omit_arr[idx]
-        fr = freq_arr[idx]
-        state, _pb = kl8_state_with_extra(raw,ml_vec,lh,th,om,fr)
-        state = state.copy()
-        state[-_pb:] *= IntegratedKL8Env.PERBALL_WEIGHT   # 跟训练环境保持一致的逐球信号加权
-        return np.clip(state, -5, 5)
-
-    # 回测：同一次预测，同时评估选四/五/六/九/十全部玩法（几乎零额外开销，只是截取不同长度TopN）
-    start = max(SEQ_LEN+30, len(records)-30)
-    play_sizes = [4,5,6,9,10]
-    net_by_size = {n: 0.0 for n in play_sizes}
-    hit_by_size = {n: 0.0 for n in play_sizes}
-    games=0
-    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
-    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
-    for idx in range(start, len(records)):
-        state = build_state(idx)
-        if state is None: continue
-        action,_ = model.predict(state, deterministic=True)
-        order = np.argsort(action)[::-1]
-        ranked_all = [int(i)+1 for i in order]   # 一次打分，全部玩法复用同一个排序结果
-        actual=set(records[idx]['numbers'])
-        for n in play_sizes:
-            sel = set(ranked_all[:n])
-            hit = len(actual & sel)
-            net_by_size[n] += calc_payout(n, hit)
-            hit_by_size[n] += hit
-        games+=1
-
-    backtest_by_play = {}
-    for n in play_sizes:
-        avg_net = round(net_by_size[n]/games,2) if games else 0
-        avg_hit = round(hit_by_size[n]/games,2) if games else 0
-        backtest_by_play[n] = {'avg_net_per_game':avg_net,'avg_hit':avg_hit}
-
-    # 找出净收益回测表现最好的玩法（仅供参考，彩票本质随机，历史回测不代表未来）
-    best_play_n = max(play_sizes, key=lambda n: backtest_by_play[n]['avg_net_per_game'])
-    avg_net = backtest_by_play[6]['avg_net_per_game']   # 兼容旧字段：保留选六作为默认展示值
-    print(f"  回测（近{games}期，全玩法对比）：" + "  ".join(
-        f"选{['','','','','四','五','六','','','九','十'][n]}净收益{backtest_by_play[n]['avg_net_per_game']}元/期" for n in play_sizes))
-    print(f"  回测表现最好的玩法：选{['','','','','四','五','六','','','九','十'][best_play_n]}")
-
-    # 今日推荐：以RL自己的判断为主——它的状态输入已经融合了ML概率/LSTM/TFM隐层/遗漏/频率/走势特征，
-    # 训练过程中神经网络自己学会了怎么综合这些信息，不再用人工权重公式二次加工跟它的判断"打架"。
-    # 多组推荐用同一份RL排序做滑动窗口切分（保持100%由RL主导，不引入外部信号重新排序）；
-    # 遗漏/频率/ML预测只作为"参考信息"附加展示，帮助理解RL为什么这么选，不参与决策计算。
-    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
-    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
-    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
-    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
-    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
-    idx = len(records)
-    state = build_state(idx)
-    rl_order = []
-    ref_info = {}   # 参考信息：遗漏/频率/ML预测，仅用于展示说明，不影响排序
-    if state is not None:
-        base_action,_ = model.predict(state, deterministic=True)
-        rl_order = [int(i)+1 for i in np.argsort(base_action)[::-1]]
-
-        # 区分度诊断：模型对80个球的打分，Top6跟中位区拉不拉得开？
-        # 如果差距接近0，说明模型其实没在区分号码好坏，选Top6跟随便选6个没实质区别，
-        # 这比"回测净收益"更能直接反映模型到底学到没有。
-        _srt = np.sort(base_action)[::-1]
-        _top6, _mid = float(_srt[:6].mean()), float(_srt[34:40].mean())
-        _spread = float(_srt.max() - _srt.min())
-        _gap_ratio = (_top6 - _mid) / (_spread + 1e-9)
-        print(f"  [区分度] Top6均分{_top6:.4f}  中位区均分{_mid:.4f}  "
-              f"差距占全域{_gap_ratio*100:.1f}%")
-        if _gap_ratio < 0.15:
-            print(f"    ⚠️ 差距很小，说明模型对各号码的偏好不明显，本次推荐参考价值有限")
-        else:
-            print(f"    ✓ 模型对号码有明显区分")
-
-        om_now = omit_arr[idx] if omit_arr is not None else np.zeros(80)
-        models_data = ml_pred.get('models', {})
-        zone_probs_raw = models_data.get('zone_dom', {}).get('prediction', {}).get('probs', {})
-        five_probs_raw = models_data.get('five_dom', {}).get('prediction', {}).get('probs', {})
-        zone_pred = models_data.get('zone_dom', {}).get('prediction', {}).get('value')
-        five_pred = models_data.get('five_dom', {}).get('prediction', {}).get('value')
-        zone_names = ['1-20区','21-40区','41-60区','61-80区']
-        five_names = ['1-16','17-32','33-48','49-64','65-80']
-
-        top6 = rl_order[:6]
-        avg_omission = round(float(np.mean([om_now[b-1] for b in top6])), 2)
-        # 重号/斜连参考：主推荐Top6里有几个是上期开出的球(重号候选)、几个是上期±1邻号(斜连候选)
-        _last = set(records[-1]['numbers'])
-        _nb = set()
-        for _x in _last:
-            if _x > 1: _nb.add(_x-1)
-            if _x < 80: _nb.add(_x+1)
-        _nb -= _last
-        top6_repeat = sum(1 for b in top6 if b in _last)
-        top6_diag = sum(1 for b in top6 if b in _nb)
-        ref_info = {
-            'avg_omission_top6': avg_omission,
-            'top6_repeat': top6_repeat,
-            'top6_diag': top6_diag,
-            'ml_zone_pred': zone_names[zone_pred] if zone_pred is not None and 0<=zone_pred<4 else None,
-            'ml_five_pred': five_names[five_pred] if five_pred is not None and 0<=five_pred<5 else None,
-        }
-        print(f"  [主推荐] RL确定性排序Top6: {sorted(top6)}")
-        print(f"  [参考信息] 该注平均遗漏{avg_omission}期；Top6中含上期重号{top6_repeat}个、斜连邻号{top6_diag}个；"
-              f"ML预测主力区间={ref_info['ml_zone_pred']}，主力五行段={ref_info['ml_five_pred']}")
-
-        # ── 诊断：检验打分是否跟球号系统性绑定（即"是否还存在偏向大号/小号"的机制性bug）──
-        ball_idx = np.arange(1, 81)
-        corr = float(np.corrcoef(ball_idx, base_action)[0, 1])
-        print(f"  [诊断1] RL打分与球号(1-80)的相关系数: {corr:.3f}")
-        if abs(corr) > 0.3:
-            direction = '偏向大号' if corr > 0 else '偏向小号'
-            print(f"  ⚠️ [诊断1警告] 相关系数绝对值>0.3，RL打分可能仍跟球号系统性绑定（{direction}），建议人工复查")
-        else:
-            print(f"  ✓ [诊断1通过] RL打分与球号无明显系统性相关")
-
-        # ── 诊断2（关键）：对比多个不同历史时间点的推荐结果 ──
-        if games >= 4:
-            test_points = sorted(set([
-                max(SEQ_LEN+30, len(records)-200),
-                max(SEQ_LEN+30, len(records)-100),
-                max(SEQ_LEN+30, len(records)-50),
-                len(records)-1,
-            ]))
-            snapshot_top6 = {}
-            for tp in test_points:
-                st = build_state(tp)
-                if st is None: continue
-                act,_ = model.predict(st, deterministic=True)
-                t6 = set(int(i)+1 for i in np.argsort(act)[-6:])
-                snapshot_top6[tp] = t6
-            print(f"  [诊断2] 不同历史时期(共{len(snapshot_top6)}个采样点)的Top6对比：")
-            for tp, t6 in snapshot_top6.items():
-                print(f"    第{tp}期状态 → {sorted(t6)}")
-            if len(snapshot_top6) >= 2:
-                all_sets = list(snapshot_top6.values())
-                pairwise_overlaps = []
-                for i in range(len(all_sets)):
-                    for j in range(i+1, len(all_sets)):
-                        pairwise_overlaps.append(len(all_sets[i] & all_sets[j]))
-                avg_overlap = sum(pairwise_overlaps)/len(pairwise_overlaps)
-                print(f"  [诊断2] 不同时期推荐重合数: {avg_overlap:.1f}/6")
-                if avg_overlap >= 4:
-                    print(f"  ⚠️⚠️ [诊断2警告] 不同状态推荐重合度高(≥4/6)，模型区分度不足，建议人工复查训练情况")
-                elif avg_overlap <= 1:
-                    print(f"  ✓ [诊断2通过] 不同状态推荐差异明显，模型确实在响应状态变化")
-                else:
-                    print(f"  ⚠️ [诊断2中性] 重合度中等")
-
-    # 各玩法预先用"胆码+拖码轮转"算好各注（原因同双色球：
-    # 按联合得分取Top-N会让各注共享同样的高分球、只在末位微调，体现不出多元化）
-    # ── 提取ML的7条预测作为选号条件（这些本来就已注入RL状态，
-    #    但之前只在训练时被"看到"，选号环节完全没检验，这里补上）──
-    def _kl8_cond_feats(c):
-        cs = sorted(c)
-        odd = sum(1 for x in c if x % 2 != 0)
-        big = sum(1 for x in c if x > 40)
-        zn = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,20),(21,40),(41,60),(61,80)]]
-        fv = [sum(1 for x in c if lo <= x <= hi) for lo, hi in [(1,16),(17,32),(33,48),(49,64),(65,80)]]
-        tt = sum(c)
-        cg, inc = 0, False
-        for i in range(len(cs)-1):
-            if cs[i+1]-cs[i] == 1:
-                if not inc: cg += 1; inc = True
-            else: inc = False
-        rng = cs[-1] - cs[0]
-        # 分档阈值按每期20球定义，选4~10球时需按占比折算回20球口径，否则永远匹配不上
-        k = 20.0 / max(len(c), 1)
-        o20, b20, t20 = odd*k, big*k, tt*k
-        return {'odd_grp': 0 if o20 < 9 else (1 if o20 <= 11 else 2),
-                'zone_dom': int(max(range(4), key=lambda i: zn[i])),
-                'tot_grp': 0 if t20 < 640 else (1 if t20 < 820 else 2),
-                'big_grp': 0 if b20 < 9 else (1 if b20 <= 11 else 2),
-                'five_dom': int(max(range(5), key=lambda i: fv[i])),
-                'consec_grp': 0 if cg == 0 else (1 if cg <= 2 else 2),
-                'range_grp': 0 if rng < 60 else (1 if rng < 70 else 2)}
-
-    _kl8_conds = {}
-    _md = ml_pred.get('models', {})
-    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']:
-        _p = (_md.get(_k, {}) or {}).get('prediction', {})
-        if _p.get('value') is not None:
-            _kl8_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
-
-    _play_bets = {}
-    _play_core = {}
-    for _n, _cnt in [(4,3), (5,3), (6,3), (8,1), (9,2), (10,1)]:
-        if rl_order:
-            # 完全按RL自己的球分选号。ML的那些预测已经在状态向量里，
-            # 训练时模型看得见、奖励信号会告诉它有没有用；
-            # 如果在外面再套一层手写规则去筛，等于用"我认为对的"覆盖"模型学到的"，
-            # 而且"符合条件更容易中"这个假设本身从未被验证过。
-            _b, _c, _p = diverse_picks(base_action, _n, _cnt)
-            _play_bets[_n], _play_core[_n] = _b, _c
-        else:
-            _play_bets[_n], _play_core[_n] = [[] for _ in range(_cnt)], []
-    if rl_order:
-        _o6 = [len(set(_play_bets[6][i]) & set(_play_bets[6][j]))
-               for i in range(len(_play_bets[6])) for j in range(i+1, len(_play_bets[6]))]
-        _a6 = set()
-        for c in _play_bets[6]: _a6 |= set(c)
-        print(f"  [选六] 胆码{_play_core[6]}  3注共用到{len(_a6)}个号码"
-              + (f"，两两平均重合{np.mean(_o6):.1f}/6" if _o6 else ""))
-        if _kl8_conds:
-            _cavg = sum(len([1 for k,(v,w) in _kl8_conds.items()
-                             if _kl8_cond_feats(b).get(k)==v]) for b in _play_bets[6]) / max(len(_play_bets[6]),1)
-            print(f"  [诊断·仅参考] RL自选的选六3注，平均符合{_cavg:.1f}/{len(_kl8_conds)}条ML预测条件"
-                  f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
-
-    # ── 按概率采样（纯展示，不影响上面的确定性推荐）──
-    # 快乐8每期开20个球，所以先采样"下一期开奖的20个球"，再把这20个球分配给各玩法：
-    #   某玩法选n个 = 这期采样的20个球里，RL分数最高的n个。
-    # 采样的骨架是"重号个数/斜连个数"（按最近真实分布抽），球的取舍再按RL分数倾斜。
-    # 共采样KL8_SAMPLE_DRAWS期用于统计；网页展示前KL8_SAMPLE_SHOW期，
-    # 各玩法的第i注采样 = 第i期采样的20球里取分数最高的n个。
-    kl8_draws, kl8_sample_stats = [], {}
-    kl8_sampled = {}
-    _kl8_samp_cnt = {4: 3, 5: 3, 6: 3, 8: 1, 9: 2, 10: 1}
-    if rl_order:
-        try:
-            _seed_base = f"kl8-{len(records)}-{json.dumps(records[-1], sort_keys=True, ensure_ascii=False)}"
-            kl8_draws, _kd_rep, _kd_dg = kl8_sample_draws(base_action, records, KL8_SAMPLE_DRAWS, _seed_base)
-            kl8_sample_stats = compute_kl8_draw_stats(kl8_draws, records)
-            for _n in (4, 5, 6, 8, 9, 10):
-                kl8_sampled[_n] = [sorted(sorted(d, key=lambda b: -float(base_action[b-1]))[:_n])
-                                   for d in kl8_draws[:max(_kl8_samp_cnt.values())]]
-            print(f"  [采样] 已采样{len(kl8_draws)}期（每期20球），重号个数均值{kl8_sample_stats['avg_repeat']}"
-                  f"（近{KL8_STRUCT_WINDOW}期真实{kl8_sample_stats['hist_repeat']}），斜连个数均值"
-                  f"{kl8_sample_stats['avg_diag']}（真实{kl8_sample_stats['hist_diag']}）")
-            print(f"    第1期采样20球: {kl8_draws[0]}")
-            print(f"    各玩法第1注采样: " + "  ".join(f"选{_n}={kl8_sampled[_n][0]}" for _n in (4, 5, 6, 9, 10)))
-        except Exception as _e:
-            kl8_draws, kl8_sample_stats, kl8_sampled = [], {}, {}
-            print(f"  [观测·采样对比] 计算失败: {_e}")
-
-    def group(n, rank=0):
-        """取该玩法第 rank+1 注（已由 diverse_picks 保证各注之间有实质差异）"""
-        bets = _play_bets.get(n, [])
-        if rank < len(bets): return bets[rank]
-        return sorted(rl_order[:n]) if rl_order else []
-
-    # 与传统ML的分组结构完全一致：选四3组/选五3组/复式1组8球/选六3组/选九2组/选十1组
-    # 每注由"胆码+拖码轮转"生成：模型最确信的球进每注，其余候选轮转分配，兼顾置信度与多样性
-    plays = {
-        'xuan4':    {'name':'选四','balls':4, 'tip':'胆码+拖码轮转3注',
-                     'groups':[group(4,0), group(4,1), group(4,2)]},
-        'xuan5':    {'name':'选五','balls':5, 'tip':'胆码+拖码轮转3注',
-                     'groups':[group(5,0), group(5,1), group(5,2)]},
-        'xuan5_fu': {'name':'选五复式','balls':5, 'tip':'8球覆盖C(8,5)=56注',
-                     'groups':[group(8,0)]},
-        'xuan6':    {'name':'选六','balls':6, 'tip':'胆码+拖码轮转3注（回测标准）',
-                     'groups':[group(6,0), group(6,1), group(6,2)]},
-        'xuan9':    {'name':'选九','balls':9, 'tip':'胆码+拖码轮转2注',
-                     'groups':[group(9,0), group(9,1)]},
-        'xuan10':   {'name':'选十','balls':10,'tip':'RL打分最高的10球',
-                     'groups':[group(10,0)]},
-    }
-    picks_by_n = {4:group(4,0), 5:group(5,0), 6:group(6,0), 9:group(9,0), 10:group(10,0)}
-
-    # 记录本次训练时的期数，供下次运行判断是否有新数据
-    save_last_trained_n('kl8', len(records))
-
-    return {'avg_net_per_game':avg_net,'games_tested':games,
-            'ppo_selected':picks_by_n[6],   # 兼容旧字段
-            'picks_by_n':picks_by_n,        # 兼容旧字段
-            'plays':plays,                  # 新结构：与传统ML的plays字段完全一致的分组格式
-            'sampled_draws':kl8_draws[:KL8_SAMPLE_SHOW],   # 采样出的下一期20球（展示前几期）
-            'sampled_plays':{pk: kl8_sampled.get(n, [])[:_kl8_samp_cnt[n]]
-                             for pk, n in [('xuan4',4),('xuan5',5),('xuan5_fu',8),('xuan6',6),('xuan9',9),('xuan10',10)]},   # 各玩法的采样注=采样20球里RL分数最高的n个
-            'sampled_n_draws':len(kl8_draws),
-            'rl_scores':[round(float(x),4) for x in base_action] if rl_order else None,   # RL对80个球的原始分数（共识投票用）
-            'sampled_stats':kl8_sample_stats,   # N期采样的统计（球号次数/重号/斜连/奇偶/大小/区间/和值/连号）
-            'backtest_by_play':backtest_by_play,   # 选四/五/六/九/十 各玩法回测对比
-            'best_play_n':best_play_n,             # 回测表现最好的玩法（仅供参考，不代表未来）
-            'ref_info':ref_info,            # 参考信息：遗漏/频率/ML预测，仅供理解RL判断依据，不影响排序
-            'is_first_train':is_new,
-            'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/重号/斜连/走势特征，频率已关闭），选六净收益{avg_net}元/期，遗漏/重号/斜连/ML预测仅作参考展示'}
-
-
-def run_ssq_daily(records, ml_pred, prev_result=None):
-    print(f"\n{'='*50}\n双色球 PPO 每日增量微调（红球33全量打分+蓝球，{len(records)}期）\n{'='*50}")
-
-    # 开奖日感知：双色球只在周二/四/日开奖，其余4天没有新数据；
-    # 手动重复触发时也会命中这个检查，避免同一批数据被反复训练导致过拟合
-    last_trained_n = get_last_trained_n('ssq')
-    if len(records) <= last_trained_n:
-        return carry_over_result('ssq', '双色球', prev_result, len(records), last_trained_n,
-                                 '双色球周二/四/日开奖，本次运行无新开奖数据')
-
-    ml_vec = extract_ml_prob_vec(ml_pred, 'ssq')
-    _cur_feat_dim = len(fssq(records, len(records)-1) or {})
-    lstm, tfm, meta = load_lstm_tfm('ssq', current_feat_dim=_cur_feat_dim)
-
-    print("  批量预计算 LSTM/TFM 隐层状态…")
-    t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, fssq, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, fssq, tfm)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
-
-    print("  批量预计算遗漏向量…")
-    t0 = time.time()
-    omit_arr = precompute_omission_ssq(records)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（49维：33红球+16蓝球）")
-
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏49维")
-
-    def make_env():
-        return IntegratedSSQEnv(records, fssq, ml_vec,
-                                lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
-    vec_env = make_vec_env(make_env, n_envs=4)
-
-    _probe_env = IntegratedSSQEnv(records, fssq, ml_vec,
-                                  lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
-    _hold_start = _probe_env.train_end
-    def _eval_holdout(m):
-        """在holdout上评分：红球平均命中数 + 蓝球命中率加权（蓝球0.5注权重）"""
-        tot, n = 0.0, 0
-        for idx in range(_hold_start, len(records)):
-            _probe_env.idx = idx
-            st = _probe_env._state()
-            action, _ = m.predict(st, deterministic=True)
-            red_scores = action[:33]; blue_scores = action[33:]
-            top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-            red_sel = set(int(i)+1 for i in top_idx)
-            blue_pred = int(np.argmax(blue_scores)) + 1
-            rh = len(set(records[idx]['red']) & red_sel)
-            bh = int(blue_pred == records[idx]['blue'])
-            tot += rh + 0.5*bh; n += 1
-        return tot/n if n else 0.0
-
-    model = None
-    is_new = True
-    t0 = time.time()
-    if not is_new:
-        try:
-            model.set_env(vec_env)
-        except Exception as e:
-            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
-            model = None; is_new = True
-
-    if is_new:
-        print("  首次训练（15万步，红球33全量打分+蓝球联合优化）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=512, batch_size=128,
-                    n_epochs=10, gamma=0.95, gae_lambda=0.95, clip_range=0.2, ent_coef=0.02,
-                    target_kl=0.03,
-                    verbose=0, device='cpu')
-        model, _best, _hist = train_with_early_stop(
-            model, 150000, lambda: _eval_holdout(model), '双色球首训',
-            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=5,
-            baseline_is_real=False)
-    else:
-        print("  增量微调（1.5万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
-        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
-        _pre_score = _eval_holdout(model)
-        model.target_kl = 0.05
-        model, _session_best, _hist = train_with_early_stop(
-            model, 15000, lambda: _eval_holdout(model), '双色球微调',
-            n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
-            baseline_is_real=False)
-        _new_sd = model.policy.state_dict()
-        _alpha_scores = {}
-        for _a in EMA_ALPHA_CANDIDATES:
-            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
-            _alpha_scores[_a] = _eval_holdout(model)
-        _alpha_hist = record_alpha_scores('ssq', _alpha_scores)
-        _se_ssq = math.sqrt(6*(6/33)*(27/33)) / max(len(records)-_hold_start, 1) ** 0.5
-        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
-                                                 EMA_ALPHA_DEFAULT, _se_ssq)
-        print(f"    [α自动选择] {_alpha_why}")
-        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
-        model.policy.load_state_dict(_blended_sd)
-        _best = _eval_holdout(model)
-        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
-              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
-          f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
-
-    save_ppo(model, 'ssq')
-
-    def build_state(idx):
-        feat = fssq(records, idx)
-        if feat is None: return None
-        raw = np.array(list(feat.values()),dtype=np.float32)
-        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
-        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
-        om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
-
-    # 回测最近30期：红球命中数分布 + 蓝球命中率
-    start=max(SEQ_LEN+30, len(records)-30)
-    total=0; blue_correct=0; red_hit_dist={0:0,1:0,2:0,3:0,4:0,5:0,6:0}
-    # 上界用 len(records)：idx 最大取到 len(records)-1，即拿"倒数第二期及之前"的特征
-    # 去预测最后一期。原来写 len(records)-1 会让最后一期永远不参与回测，白白少一个样本。
-    for idx in range(start, len(records)):
-        state = build_state(idx)
-        if state is None: continue
-        action,_ = model.predict(state, deterministic=True)
-        red_scores = action[:33]; blue_scores = action[33:]
-        top_idx = np.argsort(red_scores)[-SSQ_RED_PICK_N:]
-        red_selected = set(int(i)+1 for i in top_idx)
-        blue_pred = int(np.argmax(blue_scores))+1
-
-        actual_red = set(records[idx]['red']); actual_blue = records[idx]['blue']
-        rh = len(actual_red & red_selected); bh = int(blue_pred==actual_blue)
-        red_hit_dist[rh]+=1
-        if bh: blue_correct+=1
-        total+=1
-
-    blue_acc = round(blue_correct/total*100,1) if total else 0
-    avg_red_hit = round(sum(k*v for k,v in red_hit_dist.items())/total,2) if total else 0
-    print(f"  回测（近{total}期）：红球平均命中{avg_red_hit}个  蓝球准确率{blue_acc}%（随机基准6.25%）")
-
-    # 今日推荐：以RL自己的判断为主，红球排序滑动窗口切分成6注，遗漏/ML预测仅作参考展示
-    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
-    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
-    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
-    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
-    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
-    idx = len(records)
-    state = build_state(idx)
-    groups=[]
-    ref_info = {}
-    red_core_info, red_pool_info = [], []
-    ssq_sampled, ssq_sample_stats = [], {}
-    if state is not None:
-        base_action,_ = model.predict(state, deterministic=True)
-        red_scores = base_action[:33]; blue_scores = base_action[33:]
-
-        # 蓝球排序：不再只取argmax(唯一最优解)，而是拿到RL对全部16个蓝球的完整打分排序，
-        # 让不同注轮流用排名靠前的几个候选蓝球，把模型对次优选项的判断也利用起来，
-        # 而不是把"分数第二、第三高"的蓝球完全浪费掉、6注全部锁死在同一个号码上。
-        blue_order = [int(i)+1 for i in np.argsort(blue_scores)[::-1]]
-
-        rl_red_order = [int(i)+1 for i in np.argsort(red_scores)[::-1]]
-
-        # 区分度诊断（红球/蓝球分开看）：模型的打分能不能把好坏号码拉开差距？
-        # 差距接近0说明模型没在真正区分，推荐等同于随机选，比看回测数字更直接。
-        _rs = np.sort(red_scores)[::-1]
-        _r_gap = (float(_rs[:6].mean()) - float(_rs[13:19].mean())) / (float(_rs.max()-_rs.min()) + 1e-9)
-        _bs = np.sort(blue_scores)[::-1]
-        _b_gap = (float(_bs[:3].mean()) - float(_bs[6:9].mean())) / (float(_bs.max()-_bs.min()) + 1e-9)
-        print(f"  [区分度] 红球Top6与中位区差距占全域{_r_gap*100:.1f}%  "
-              f"蓝球Top3与中位区差距占全域{_b_gap*100:.1f}%")
-        if _r_gap < 0.15:
-            print(f"    ⚠️ 红球区分度偏低，模型对各红球偏好不明显，推荐参考价值有限")
-        if _b_gap < 0.15:
-            print(f"    ⚠️ 蓝球区分度偏低，模型对16个蓝球基本无偏好")
-
-        # ── 红球：枚举组合，取模型联合得分最高的6注 ──
-        # 之前是把排序切成梯队(1-6名/7-12名/…)，但第2注开始就是模型认为"第7到12好"的球，
-        # 等于故意给出越来越差的推荐，这不是"最可能出现的6注"。
-        # ── 红球：胆码+拖码轮转 + ML条件校验 ──
-        # ML的7个目标(奇数/和值/AC值/主力区/间距/大数/连号)本就已注入RL状态，
-        # 但之前选号只看每个球的分数，"这一注整体符不符合那些预测"没人检验，这里补上。
-        def _ssq_cond_feats(red):
-            r = sorted(red); sm = sum(r)
-            d = set()
-            for i in range(len(r)):
-                for j in range(i+1, len(r)): d.add(r[j]-r[i])
-            ac = len(d) - (len(r)-1)
-            z = [sum(1 for x in r if x <= 11), sum(1 for x in r if 12 <= x <= 22),
-                 sum(1 for x in r if x >= 23)]
-            mg = max(r[i+1]-r[i] for i in range(len(r)-1)) if len(r) > 1 else 0
-            return {'odd': sum(1 for x in r if x % 2 != 0),
-                    'sum_grp': 0 if sm < 70 else (1 if sm < 100 else 2),
-                    'ac_grp': 0 if ac <= 2 else (1 if ac <= 5 else 2),
-                    'red_zone_dom': int(max(range(3), key=lambda i: z[i])),
-                    'gap_grp': 0 if mg <= 5 else (1 if mg <= 10 else 2),
-                    'big': sum(1 for x in r if x > 16),
-                    'consec': sum(1 for i in range(len(r)-1) if r[i+1]-r[i] == 1)}
-
-        _ssq_conds = {}
-        _md = ml_pred.get('models', {})
-        for _k in ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']:
-            _p = (_md.get(_k, {}) or {}).get('prediction', {})
-            if _p.get('value') is not None:
-                _ssq_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
-
-        # 完全按RL自己的球分选号（理由同快乐8：ML预测已在状态里，不在外面二次干预）
-        red_top6, red_core, red_pool = diverse_picks(red_scores, 6, 6)
-        if _ssq_conds:
-            _cavg = sum(len([1 for k,(v,w) in _ssq_conds.items()
-                             if _ssq_cond_feats(b).get(k)==v]) for b in red_top6) / max(len(red_top6),1)
-            print(f"  [诊断·仅参考] RL自选的6注，平均符合{_cavg:.1f}/{len(_ssq_conds)}条ML预测条件"
-                  f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
-        _ov = [len(set(red_top6[i]) & set(red_top6[j])) for i in range(6) for j in range(i+1,6)]
-        _allb = set()
-        for c in red_top6: _allb |= set(c)
-        print(f"  [红球] 候选池{len(red_pool)}球 胆码{red_core}  "
-              f"6注共用到{len(_allb)}个号码，两两平均重合{np.mean(_ov):.1f}/6")
-
-        # ── 蓝球：模型预测几个算几个，全部展示 ──
-        # 对16个蓝球分数做softmax，把高于均匀分布(1/16=6.25%)的候选都算作模型的预测，最多3个
-        _bexp = np.exp(blue_scores - np.max(blue_scores))
-        _bprob = _bexp / (_bexp.sum() + 1e-12)
-        _border = np.argsort(_bprob)[::-1]
-        blue_cands, blue_probs = [], []
-        for bi in _border[:3]:
-            p = float(_bprob[bi])
-            if p >= (1.0/16) or not blue_cands:   # 至少给1个，其余只需高于均匀分布即可
-                blue_cands.append(int(bi) + 1); blue_probs.append(round(p*100, 1))
-        print(f"  [蓝球预测] 共{len(blue_cands)}个候选: "
-              + "  ".join(f"{b:02d}({p}%)" for b, p in zip(blue_cands, blue_probs)))
-
-        for red_sel in red_top6:
-            groups.append({
-                'red': red_sel,
-                'blue': blue_cands[0] if blue_cands else None,   # 兼容旧字段
-                'blues': blue_cands,          # 模型预测的全部蓝球候选，前端有几个显示几个
-                'blue_probs': blue_probs,
-            })
-        blue_sel = blue_cands[0] if blue_cands else blue_order[0]
-        red_core_info, red_pool_info = red_core, red_pool
-
-        # ── 按概率采样（与3D采样同一思路，纯展示，不影响上面的确定性推荐）──
-        # 红球：RL的33个球分数 → softmax → 不放回抽6球；蓝球：按上面的16个蓝球概率抽1个
-        try:
-            _seed_src = f"ssq-{len(records)}-{json.dumps(records[-1], sort_keys=True, ensure_ascii=False)}"
-            _s_reds, _s_probs = sample_ball_sets(red_scores, 6, SSQ_SAMPLE_N, _seed_src)
-            _s_rng = np.random.default_rng((zlib.crc32(_seed_src.encode('utf-8')) + 1) & 0xffffffff)
-            _s_blues = [int(_s_rng.choice(16, p=_bprob / _bprob.sum())) + 1 for _ in _s_reds]
-            ssq_sampled = [{'red': r_, 'blue': b_} for r_, b_ in zip(_s_reds, _s_blues)]
-            _same = len(set(map(tuple, red_top6)) & set(map(tuple, _s_reds)))
-            _d_det = set(x for g in red_top6 for x in g); _d_smp = set(x for g in _s_reds for x in g)
-            print(f"  [观测·采样对比]（不参与推荐，仅观察）种子来自最新开奖")
-            print(f"    采样{len(ssq_sampled)}注: {[(g['red'], g['blue']) for g in ssq_sampled]}")
-            print(f"    与确定性推荐红球整注重合 {_same}/{len(_s_reds)} 注；用到的红球 确定性法{len(_d_det)}个 vs 采样法{len(_d_smp)}个；"
-                  f"单球最高抽中权重{_s_probs.max()*100:.1f}%（均匀={100/33:.1f}%）")
-            try:
-                ssq_sample_stats = compute_ball_sample_stats(
-                    _s_reds, 17, [(1, 11, '一区(1-11)'), (12, 22, '二区(12-22)'), (23, 33, '三区(23-33)')],
-                    blues=_s_blues)
-                print(f"  [采样统计] 已基于{ssq_sample_stats['n']}注采样计算频率统计，随结果写入网页")
-            except Exception as _e:
-                ssq_sample_stats = {}
-                print(f"  [采样统计] 计算失败: {_e}")
-        except Exception as _e:
-            ssq_sampled, ssq_sample_stats = [], {}
-            print(f"  [观测·采样对比] 计算失败: {_e}")
-
-        # 参考信息：遗漏值+ML主力区预测，仅用于展示说明，不参与排序计算
-        om_now = omit_arr[idx] if omit_arr is not None else np.zeros(49)
-        top6_red = rl_red_order[:6]
-        avg_omission = round(float(np.mean([om_now[b-1] for b in top6_red])), 2)
-        models_data = ml_pred.get('models', {})
-        zone_pred = models_data.get('red_zone_dom', {}).get('prediction', {}).get('value')
-        zone_names = ['一区(1-11)','二区(12-22)','三区(23-33)']
-        ref_info = {
-            'avg_omission_top6': avg_omission,
-            'ml_zone_pred': zone_names[zone_pred] if zone_pred is not None and 0<=zone_pred<3 else None,
-        }
-        print(f"  [主推荐] RL红球排序Top6: {sorted(top6_red)}  蓝球Top3候选: {blue_order[:3]}（6注轮流分配）")
-        print(f"  [参考信息] 该注平均遗漏{avg_omission}期；ML预测红球主力区={ref_info['ml_zone_pred']}")
-
-    # 兼容旧字段：主推荐仍取第一注
-    red_selected = groups[0]['red'] if groups else []
-    blue_pred = groups[0]['blue'] if groups else None
-
-    # 记录本次训练时的期数，供下次运行判断是否有新开奖
-    save_last_trained_n('ssq', len(records))
-
-    return {'blue_acc_pct':blue_acc,'games_tested':total,
-            'avg_red_hit':avg_red_hit,'red_hit_distribution':red_hit_dist,
-            'ppo_red_selected':red_selected,'ppo_blue_pred':blue_pred,
-            'ppo_groups':groups,'ref_info':ref_info,
-            'red_core':red_core_info,'red_pool':red_pool_info,
-            'rl_scores':[round(float(x),4) for x in red_scores] if groups else None,   # RL对33个红球的原始分数（共识投票用）
-            'sampled_groups':ssq_sampled[:SSQ_SAMPLE_DISPLAY_N],   # 网页展示的采样注 [{red,blue}]
-            'sampled_extra':ssq_sampled[SSQ_SAMPLE_DISPLAY_N:],
-            'sampled_stats':ssq_sample_stats,
-            'is_first_train':is_new,
-            'note':f'以RL自身综合判断为主排序（已融合ML/DL/遗漏/走势特征），红球平均命中{avg_red_hit}个，蓝球准确率{blue_acc}%，遗漏/ML预测仅作参考展示'}
-
-
-def run_3d_daily(records, ml_pred, prev_result=None):
-    print(f"\n{'='*50}\n福彩3D PPO 每日增量微调（{len(records)}期）\n{'='*50}")
-
-    # 新数据检测：避免重复手动触发时拿完全相同的数据反复训练导致过拟合
-    last_trained_n = get_last_trained_n('3d')
-    if len(records) <= last_trained_n:
-        return carry_over_result('3d', '福彩3D', prev_result, len(records), last_trained_n,
-                                 '本次运行无新开奖数据（可能是当日已训练过或重复手动触发）')
-
-    ml_vec = extract_ml_prob_vec(ml_pred, '3d')
-    _cur_feat_dim = len(f3d(records, len(records)-1) or {})
-    lstm, tfm, meta = load_lstm_tfm('3d', current_feat_dim=_cur_feat_dim)
-
-    print("  批量预计算 LSTM/TFM 隐层状态…")
-    t0 = time.time()
-    lstm_hidden, lstm_idx2row = precompute_hidden_all(records, f3d, lstm)
-    tfm_hidden,  tfm_idx2row  = precompute_hidden_all(records, f3d, tfm)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [LSTM隐层] {'✓已加载' if lstm_hidden is not None else '✗未加载（回退为0向量）'}  [TFM隐层] {'✓已加载' if tfm_hidden is not None else '✗未加载（回退为0向量）'}")
-
-    print("  批量预计算遗漏向量…")
-    t0 = time.time()
-    omit_arr = precompute_omission_3d(records)
-    print(f"    完成，耗时 {time.time()-t0:.1f}s  [遗漏向量] ✓已加载（30维：百十个位各10个数字）")
-
-    print(f"  [状态向量组成] 原始统计特征{_cur_feat_dim}维 + 传统ML概率{len(ml_vec)}维 + LSTM隐层 + TFM隐层 + 遗漏30维")
-
-    def make_env():
-        return Integrated3DEnv(records, f3d, ml_vec,
-                               lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
-    vec_env = make_vec_env(make_env, n_envs=4)
-
-    _probe_env = Integrated3DEnv(records, f3d, ml_vec,
-                                 lstm_hidden, lstm_idx2row, tfm_hidden, tfm_idx2row, omit_arr)
-    _hold_start = _probe_env.train_end
-    def _eval_holdout(m):
-        """在holdout上评分：平均命中位数"""
-        tot, n = 0, 0
-        for idx in range(_hold_start, len(records)):
-            _probe_env.idx = idx
-            st = _probe_env._state()
-            action, _ = m.predict(st, deterministic=True)
-            pred = [int(action[0]), int(action[1]), int(action[2])]
-            actual = records[idx]['digits']
-            tot += sum(1 for i in range(3) if pred[i]==actual[i]); n += 1
-        return tot/n if n else 0.0
-
-    model = None
-    is_new = True
-    t0 = time.time()
-    if not is_new:
-        try:
-            model.set_env(vec_env)
-        except Exception as e:
-            print(f"  ! 旧PPO模型与当前环境结构不兼容（{e}），改为全新训练")
-            model = None; is_new = True
-
-    if is_new:
-        print("  首次训练（10万步，MultiDiscrete([10,10,10])共1000种组合）…")
-        model = PPO("MlpPolicy", vec_env, learning_rate=3e-4, n_steps=256, batch_size=64,
-                    n_epochs=8, gamma=0.9, gae_lambda=0.9, clip_range=0.2, ent_coef=0.03,
-                    target_kl=0.03,
-                    verbose=0, device='cpu')
-        model, _best, _hist = train_with_early_stop(
-            model, 100000, lambda: _eval_holdout(model), '3D首训',
-            n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=10,
-            baseline_is_real=False)
-    else:
-        print("  增量微调（1万步，EMA滑动平均，替代'门槛式接受/丢弃'）…")
-        _old_sd = {k: v.clone() for k, v in model.policy.state_dict().items()}
-        _pre_score = _eval_holdout(model)
-        model.target_kl = 0.05
-        model, _session_best, _hist = train_with_early_stop(
-            model, 10000, lambda: _eval_holdout(model), '3D微调',
-            n_chunks=8, patience=3, reset_timesteps=False, warmup_chunks=0,
-            baseline_is_real=False)
-        _new_sd = model.policy.state_dict()
-        _alpha_scores = {}
-        for _a in EMA_ALPHA_CANDIDATES:
-            model.policy.load_state_dict(blend_state_dicts(_old_sd, _new_sd, _a))
-            _alpha_scores[_a] = _eval_holdout(model)
-        _alpha_hist = record_alpha_scores('3d', _alpha_scores)
-        _se_3d = math.sqrt(3*0.1*0.9) / max(len(records)-_hold_start, 1) ** 0.5
-        _chosen_alpha, _alpha_why = choose_alpha(_alpha_hist, EMA_ALPHA_CANDIDATES,
-                                                 EMA_ALPHA_DEFAULT, _se_3d)
-        print(f"    [α自动选择] {_alpha_why}")
-        _blended_sd = blend_state_dicts(_old_sd, _new_sd, _chosen_alpha)
-        model.policy.load_state_dict(_blended_sd)
-        _best = _eval_holdout(model)
-        print(f"    [EMA混合] 微调前{_pre_score:.4f} → 今日训练最佳{_session_best:.4f} "
-              f"→ 混合后(α={_chosen_alpha}){_best:.4f}")
-    print(f"    PPO训练完成，耗时 {time.time()-t0:.1f}s")
-    print(f"    [训练/回测隔离] 训练止于第{_hold_start}期，"
-          f"回测第{_hold_start}~{len(records)-1}期（模型训练时从未见过，样本外）")
-
-    save_ppo(model, '3d')
-
-    def build_state(idx):
-        feat = f3d(records, idx)
-        if feat is None: return None
-        raw = np.array(list(feat.values()),dtype=np.float32)
-        lh = lstm_hidden[lstm_idx2row[idx]] if (lstm_hidden is not None and idx in lstm_idx2row) else np.zeros(lstm_hidden.shape[1] if lstm_hidden is not None else 0,dtype=np.float32)
-        th = tfm_hidden[tfm_idx2row[idx]]   if (tfm_hidden  is not None and idx in tfm_idx2row)  else np.zeros(tfm_hidden.shape[1] if tfm_hidden is not None else 0,dtype=np.float32)
-        om = omit_arr[idx]
-        return normalize_state_segments(raw,ml_vec,lh,th,om)
-
-    # 回测窗口直接绑定训练边界 _hold_start，而不是写死一个数字——
-    # 之前用 len(records)-30 能"恰好"不泄漏，只是因为 30 小于 holdout_size 的下限80，
-    # 这是巧合，不是结构保证：以后如果 holdout_size 下限改小，写死的30会悄悄泄漏且不报错。
-    # 直接用 _hold_start（跟训练时留出的holdout是同一个边界）就不存在这个隐患，
-    # 而且这个边界本身有80~300期（取决于数据量），比写死的30期样本多得多，
-    # 命中率的统计误差也会明显变小——这是"数据隔离"和"回测更可靠"两件事一起解决。
-    # D3_BACKTEST_N 决定回测用多少期；min()保证不管这个数设多大，
-    # 都不会超出holdout边界(_hold_start对应的训练止点)，结构上杜绝泄漏。
-    start = max(SEQ_LEN+5, len(records) - min(D3_BACKTEST_N, len(records)-_hold_start))
-    total=0
-    match_dist={0:0,1:0,2:0,3:0}
-    # 之前只统计"逐位是否命中"(单一数字对不对)，看不出该位的排序质量——
-    # 比如百位真正开出的数字，模型是把它排第1、第2、第3，还是压根没排进前几名，
-    # 这才是判断"这一位的候选排序有没有价值"的关键，而不是只看Top1对不对。
-    # 命中X位(比如'2位命中1期')也只是计数，不说明是哪两位，
-    # 逐位Top1/2/3命中率才能看出模型是不是在某一位上确实学到了东西。
-    rank_hit = [[0,0,0,0] for _ in range(3)]   # 每位[Top1命中,Top2命中,Top3命中,前3都没中]次数
-    for idx in range(start, len(records)):
-        state = build_state(idx)
-        if state is None: continue
-        actual=records[idx]['digits']
-        try:
-            _obs, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
-            with torch.no_grad():
-                _dist = model.policy.get_distribution(_obs)
-            _pp = [d.probs.detach().cpu().numpy()[0] for d in _dist.distribution]
-            pred = [int(np.argmax(p)) for p in _pp]   # Top1，跟原来deterministic预测等价
-            for i in range(3):
-                _ranked = np.argsort(_pp[i])[::-1]   # 该位10个数字按概率从高到低排序
-                _rank_of_actual = int(np.where(_ranked == actual[i])[0][0])  # 真实数字排第几
-                if _rank_of_actual < 3:
-                    rank_hit[i][_rank_of_actual] += 1
-                else:
-                    rank_hit[i][3] += 1
-        except Exception:
-            action,_ = model.predict(state, deterministic=True)
-            pred=[int(action[0]),int(action[1]),int(action[2])]
-        m = sum(1 for i in range(3) if pred[i]==actual[i])
-        match_dist[m]+=1; total+=1
-    exact_hit_rate = round(match_dist[3]/total*100,2) if total else 0
-    avg_match = round(sum(k*v for k,v in match_dist.items())/total,2) if total else 0
-    # 逐位Top1/2/3命中率：真实数字被模型排在第1/2/3高概率位置的比例。
-    # Top1命中率≈随机基准10%但Top1+2+3明显超过30%，说明该位候选排序有价值，
-    # 只是没能精确押中第1名；三档都接近对应基准，说明该位大概率是在瞎猜。
-    names3 = ['百位','十位','个位']
-    print(f"  [逐位Top1/2/3命中率]（共{total}期，随机基准: Top1=10% Top1~3合计=30%）")
-    pos_hit_rate = {}
-    for i in range(3):
-        t1, t2, t3, other = rank_hit[i]
-        r1 = round(t1/total*100,1) if total else 0
-        r2 = round(t2/total*100,1) if total else 0
-        r3 = round(t3/total*100,1) if total else 0
-        r123 = round((t1+t2+t3)/total*100,1) if total else 0
-        pos_hit_rate[names3[i]] = {'top1':r1,'top2':r2,'top3':r3,'top1_3_合计':r123}
-        print(f"    {names3[i]}: Top1命中{t1}期({r1}%)  Top2命中{t2}期({r2}%)  "
-              f"Top3命中{t3}期({r3}%)  前3合计{r123}%  （前3之外{other}期）")
-
-    # ⚠️ 这里必须用 len(records) 而不是 len(records)-1。
-    # 训练时的约定是"特征取 records[:idx]、答案取 records[idx]"，
-    # 所以 idx=len(records)-1 输出的是对【最后一期】的预测——而最后一期早就开出来了，
-    # 等于让模型复述已知答案（实测表现为推荐号码与最新开奖高度重合）。
-    # idx=len(records) 才是"用全部已知数据预测下一期（尚未开奖）"。
-    idx=len(records); state=build_state(idx)
-    groups=[]; pos_candidates=[]
-    if state is not None:
-        # 明确提取百/十/个位各自的完整概率分布（而非随机采样撞运气），
-        # 用联合概率排序生成6注真正的次优组合，能说清楚"这是第几优的组合"
-        try:
-            obs_tensor, _ = model.policy.obs_to_tensor(np.array(state).reshape(1, -1))
-            with torch.no_grad():
-                dist = model.policy.get_distribution(obs_tensor)
-            # MultiDiscrete动作空间下，dist.distribution是[百位分布,十位分布,个位分布]三个独立分类分布
-            pos_probs = [d.probs.detach().cpu().numpy()[0] for d in dist.distribution]  # 每个是长度10的概率数组
-
-            # 每位取Top3候选。之前用纯联合概率取Top6有个问题：
-            # 联合概率是相乘的，某一位第1名只要比第2名高出一截，乘法会把优势放大，
-            # 导致6注里那一位全被同一个数字垄断（比如十位0.200 vs 0.129，6注十位全是同一个），
-            # 模型对第2、3候选的判断就被白白浪费了。
-            # 改成"轮转+择优"：前3注让每位的3个候选各当一次主角（保证全部候选都露面），
-            # 后3注再从27种组合里按联合概率择优补足。
-            # 每位取Top3候选用于显示；另外单独取一个更宽的候选池(D3_POOL_N)用于组合枚举，
-            # 两者分开：显示给人看的候选数不变，但生成12注时能从更大的空间里挑联合概率最优的。
-            p_bai, p_shi, p_ge = pos_probs[0], pos_probs[1], pos_probs[2]
-            top3 = []
-            for p in (p_bai, p_shi, p_ge):
-                idx3 = np.argsort(p)[::-1][:3]
-                top3.append([(int(d), float(p[d])) for d in idx3])
-            pool_cands = []
-            for p in (p_bai, p_shi, p_ge):
-                idxN = np.argsort(p)[::-1][:D3_POOL_N]
-                pool_cands.append([(int(d), float(p[d])) for d in idxN])
-
-            # ML的7条预测(和值/奇数/组型/大数/跨度/012路/斜连)已注入RL状态，
-            # 这里在选号环节也做校验，让"这一注整体像不像模型预测的样子"参与排序
-            def _d3_feats(c):
-                b, s, g = c; sm = b+s+g
-                tri = (b == s == g); g3 = (b == s or s == g or b == g) and not tri
-                s3 = sorted(c); rd = [x % 3 for x in c]
-                return {'sum_grp': 0 if sm <= 9 else (1 if sm <= 17 else 2),
-                        'odd': sum(1 for x in c if x % 2 != 0),
-                        'group_type': 0 if tri else (1 if g3 else 2),
-                        'big': sum(1 for x in c if x >= 5),
-                        'span_grp': (lambda sp: 0 if sp <= 3 else (1 if sp <= 6 else 2))(max(c)-min(c)),
-                        'road_dom': max(set(rd), key=rd.count),
-                        'arith': int((s3[1]-s3[0]) == (s3[2]-s3[1]) and s3[2]-s3[0] > 0)}
-            _d3_conds = {}
-            _md3 = ml_pred.get('models', {})
-            for _k in ['sum_grp','odd','group_type','big','span_grp','road_dom','arith']:
-                _p = (_md3.get(_k, {}) or {}).get('prediction', {})
-                if _p.get('value') is not None:
-                    _d3_conds[_k] = (int(_p['value']), float(_p.get('confidence', 50))/100.0)
-
-            picked, seen = [], set()
-            for i in range(D3_POOL_N):   # 保证候选池里每位的候选都至少露面一次
-                c = [pool_cands[0][i][0], pool_cands[1][i][0], pool_cands[2][i][0]]
-                pr = pool_cands[0][i][1] * pool_cands[1][i][1] * pool_cands[2][i][1]
-                picked.append((c, pr)); seen.add(tuple(c))
-            # 其余注数：从候选池组合(D3_POOL_N^3种)里按联合概率从高到低补足
-            all_combos = sorted(
-                (([b, s, g], pb*ps*pg)
-                 for b, pb in pool_cands[0] for s, ps in pool_cands[1] for g, pg in pool_cands[2]),
-                key=lambda x: -x[1])
-            for c, pr in all_combos:
-                if len(picked) >= D3_N_BETS: break
-                if tuple(c) not in seen:
-                    picked.append((c, pr)); seen.add(tuple(c))
-            picked.sort(key=lambda x: -x[1])
-            groups = [c for c, _ in picked]
-
-            # ══════════════════════════════════════════════════════
-            #  【观测区·不参与推荐】按概率分布采样，跟Top3确定性选号做对比
-            #
-            #  Top3逻辑（groups）保持不动，仍然是正式推荐——这里只是并排
-            #  多算一份"如果换成按概率采样会得到什么"，纯展示，不影响任何决策。
-            #
-            #  为什么要对比：Top3是确定性的，只要每位候选和排序不变，
-            #  12注就不变；权重再怎么小幅移动，只要没能把第4名顶到前3，
-            #  外面就看不出变化。采样则是按完整的10个概率值直接抽签，
-            #  哪怕某个数字只有11%对12%的差距，也有机会被抽中，
-            #  更容易反映权重的细微变化。
-            #
-            #  用当天最新一期开奖数字做随机种子：同样的数据必然采出同样的结果
-            #  （可复现），换一期数据种子就变，采样结果也会跟着变。
-            # ══════════════════════════════════════════════════════
-            try:
-                _seed_src = f"{len(records)}-{''.join(map(str, records[-1]['digits']))}"
-                _seed = zlib.crc32(_seed_src.encode()) & 0xffffffff
-                _rng = np.random.default_rng(_seed)
-                _sampled, _seen_s, _guard = [], set(), 0
-                while len(_sampled) < D3_SAMPLE_N and _guard < D3_SAMPLE_N * 200:
-                    _guard += 1
-                    _c = [int(_rng.choice(10, p=pos_probs[i])) for i in range(3)]
-                    if tuple(_c) not in _seen_s:
-                        _seen_s.add(tuple(_c)); _sampled.append(_c)
-                _same = len(set(map(tuple, groups)) & set(map(tuple, _sampled)))
-                _dig_det = set(x for g in groups for x in g)
-                _dig_samp = set(x for g in _sampled for x in g)
-                print(f"  [观测·采样对比]（不参与推荐，仅观察）种子来自最新开奖{records[-1]['digits']}")
-                # 完整采样列表打印在日志里，供自己参考；网页只展示前 D3_SAMPLE_DISPLAY_N 注
-                print(f"    采样{len(_sampled)}注(完整列表，网页只展示前{D3_SAMPLE_DISPLAY_N}注): {_sampled}")
-                print(f"    与确定性推荐(Top{D3_POOL_N}候选池择优)重合 {_same}/{len(_sampled)} 注；"
-                      f"用到的数字 确定性法{len(_dig_det)}个 vs 采样法{len(_dig_samp)}个")
-            except Exception as _e:
-                _sampled = []
-                print(f"  [观测·采样对比] 计算失败: {_e}")
-
-            # 采样注的频率统计（号码次数/两号共现/和值/跨度/组三组六/大小/奇偶），
-            # 只统计采样注；但"位置共现"单独把推荐12注(groups)也并进去一起统计(extra_bets参数)，
-            # 统计失败不能影响推荐本身，所以单独包一层try
-            try:
-                _sample_stats = compute_d3_sample_stats(_sampled, extra_bets=groups)
-                if _sample_stats:
-                    print(f"  [采样统计] 已基于{_sample_stats['n']}注采样计算频率统计，随结果写入网页")
-            except Exception as _e:
-                _sample_stats = {}
-                print(f"  [采样统计] 计算失败: {_e}")
-
-            if _d3_conds:
-                _cavg = sum(len([1 for k,(v,w) in _d3_conds.items()
-                                 if _d3_feats(g).get(k)==v]) for g in groups) / max(len(groups),1)
-                print(f"  [诊断·仅参考] RL自选的{len(groups)}注，平均符合{_cavg:.1f}/{len(_d3_conds)}条ML预测条件"
-                      f"（不参与筛选，仅用于观察RL判断与ML预测的一致程度）")
-            top_probs = [pr for _, pr in picked]
-
-            # 每位候选明细，供前端展示"模型认为这位可能是哪几个数字"
-            pos_candidates = [
-                [{'digit': d, 'prob': round(pv*100, 1)} for d, pv in t] for t in top3
-            ]
-
-            names = ['百位','十位','个位']
-            for ni, t in enumerate(top3):
-                print(f"  [{names[ni]}候选] " + "  ".join(f"{d}({pv*100:.1f}%)" for d, pv in t))
-            print(f"  [推荐{len(groups)}注] {groups}")
-            print(f"    对应联合概率: {[round(x,5) for x in top_probs]}")
-            _cov = [len(set(c[i] for c in groups)) for i in range(3)]
-            print(f"    候选覆盖: 百位{_cov[0]}/{D3_POOL_N}  十位{_cov[1]}/{D3_POOL_N}  个位{_cov[2]}/{D3_POOL_N}"
-                  f"（搜索池大小，显示仍为Top3，见上方[候选]行）")
-            # 熵越接近均匀分布(约2.303)，说明模型对该位越没有明确偏好，推荐参考价值越低
-            ent = [float(-(p*np.log(p+1e-12)).sum()) for p in pos_probs]
-            print(f"    各位分布熵: 百{ent[0]:.3f} 十{ent[1]:.3f} 个{ent[2]:.3f}（均匀分布=2.303，越接近说明该位越没学到偏好）")
-        except Exception as e:
-            print(f"  ! 提取概率分布失败({e})，改用确定性预测兜底")
-            action,_ = model.predict(state, deterministic=True)
-            groups = [[int(action[0]),int(action[1]),int(action[2])]]
-
-        # 不足D3_N_BETS注时（比如候选池不够、或概率分布提取失败），用确定性预测兜底补齐
-        while len(groups)<D3_N_BETS:
-            if not groups:
-                action,_ = model.predict(state, deterministic=True)
-                groups.append([int(action[0]),int(action[1]),int(action[2])])
-            else:
-                groups.append(groups[-1])
-    pred = groups[0] if groups else None  # 兼容旧字段：主推荐仍取第一注（联合概率最高的组合）
-
-    # 记录本次训练时的期数，供下次运行判断是否有新数据
-    save_last_trained_n('3d', len(records))
-
-    # 把逐位Top1/2/3命中率拼进note文字里——网页本来就会把note原样显示在3D卡片下方
-    # (index.html 第2623行 ${d3Rl.note||''})，不用改网页就能让这份数据露出来。
-    _pos_note = "；".join(
-        f"{n}Top1{pos_hit_rate[n]['top1']}%/Top2{pos_hit_rate[n]['top2']}%/"
-        f"Top3{pos_hit_rate[n]['top3']}%(前3合计{pos_hit_rate[n]['top1_3_合计']}%)"
-        for n in ['百位','十位','个位'])
-
-    # 概率分布提取失败走兜底分支时，上面的采样代码没执行，这三个变量可能不存在
-    _sampled = locals().get('_sampled', []); _same = locals().get('_same', 0)
-    _sample_stats = locals().get('_sample_stats', {})
-    _sample_note = (f'；按概率分布采样的另一组{len(_sampled)}注（种子来自最新开奖{records[-1]["digits"]}，'
-                    f'同样数据必然采出同样结果）：{_sampled}，与确定性推荐重合{_same}注'
-                    if _sampled else '；本次概率采样计算失败，无采样对比数据')
-
-    return {'games_tested':total,'match_distribution':match_dist,
-            'avg_match_digits':avg_match,'exact_hit_rate_pct':exact_hit_rate,
-            'pos_hit_rate_pct':pos_hit_rate,   # 每位Top1/Top2/Top3命中率明细
-            'ppo_pred':pred,'ppo_groups':groups,
-            'sampled_groups':_sampled[:D3_SAMPLE_DISPLAY_N],   # 网页主展示区：前N注
-            'sampled_extra':_sampled[D3_SAMPLE_DISPLAY_N:],    # 超出展示数量的部分
-            'rl_pos_probs':[[round(float(x),5) for x in pp] for pp in locals().get('pos_probs', [])] or None,   # RL逐位10个数字的概率（共识投票用）
-            'sampled_stats':_sample_stats,   # 采样注的频率统计，网页在两栏推荐下方展示
-            'pos_candidates':pos_candidates,   # 每位Top3候选及其概率，供前端展示
-            'is_first_train':is_new,
-            'note':f'PPO给出百/十/个位各3个候选，6注采用"轮转+择优"确保每个候选都参与组合（避免联合概率导致某位被单一数字垄断），近{total}期平均命中{avg_match}位，全中率{exact_hit_rate}%（随机基准0.1%）。'
-                   f'逐位Top1/2/3命中率（随机基准Top1=10%，前3合计=30%）：{_pos_note}'
-                   f'{_sample_note}'}
-
-# ══════════════════════════════════════════════════════
-#  共识投票：ML、DL、RL 三方各自对"下一期"表态，投票得出共识推荐
-#
-#  三个投票者：
-#    ML：prediction.json 里各目标（和值区、奇偶个数、组型…）的概率
-#    DL：dl_lstm_tfm.json 里各目标的概率（每周更新）
-#    RL：本脚本 PPO 给出的球分数（3D 为逐位数字概率）
-#  ML/DL 给的是"特征目标"的概率，不是逐球概率，所以先用乘积专家把它们合成号码级概率：
-#    对每个号码组合，看它落在各目标的哪一类，用「模型给该类的概率 ÷ 该类在随机组合里的占比」
-#    当似然比，各目标连乘 → 该组合的权重 → 得到每个号码的入选概率（3D 是1000注的联合概率）。
-#  然后每一方的入选概率 ÷ 随机基准 = "提升倍数"(lift)，1.0 表示没有倾向。
-#
-#  投票规则：每一方把自己提升倍数最高的 K 个球投一票；某一方的倾向几乎为平（所有球提升倍数
-#  差异<VOTE_FLAT_EPS）就视为"无明显倾向"，不参与投票（否则平局会被名次排序放大成噪声）。
-#  共识分 = 得票数×10 + 各方平均提升倍数；按共识分选号。
-# ══════════════════════════════════════════════════════
-VOTE_LAYOUT = {
-    '3d':  [('sum_grp', 3), ('odd', 4), ('group_type', 3), ('big', 4), ('span_grp', 3), ('road_dom', 3), ('arith', 2)],
-    'ssq': [('odd', 7), ('sum_grp', 3), ('ac_grp', 3), ('red_zone_dom', 3), ('gap_grp', 3), ('big', 7), ('consec', 6)],
-    'kl8': [('odd_grp', 3), ('zone_dom', 4), ('tot_grp', 3), ('big_grp', 3), ('five_dom', 5), ('consec_grp', 3), ('range_grp', 3)],
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>福彩开奖海报生成器</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;900&family=Noto+Sans+SC:wght@400;500;700&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --panel-bg:#fff;
+    --panel-border:#e3e0d8;
+    --ink:#2b2520;
+    --muted:#8a8378;
+    --accent:#b31b1b;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:"Noto Sans SC",-apple-system,sans-serif;
+    background:#f2efe8;
+    color:var(--ink);
+    padding:28px 16px 80px;
+    overflow-x:hidden;
+  }
+  .app{
+    max-width:1100px;
+    margin:0 auto;
+    display:grid;
+    grid-template-columns:340px 1fr;
+    gap:28px;
+    align-items:start;
+  }
+  .app > div{ min-width:0; }
+  @media (max-width:900px){
+    .app{grid-template-columns:1fr;}
+  }
+  h1.appTitle{
+    font-size:20px;
+    font-weight:700;
+    margin:0 0 4px;
+  }
+  p.appSub{
+    font-size:13px;
+    color:var(--muted);
+    margin:0 0 22px;
+  }
+  .panel{
+    background:var(--panel-bg);
+    border:1px solid var(--panel-border);
+    border-radius:14px;
+    padding:18px;
+    margin-bottom:16px;
+  }
+  .panel h2{
+    font-size:12px;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin:0 0 12px;
+    font-weight:700;
+  }
+  .pillrow{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .pill{
+    flex:1;
+    min-width:80px;
+    text-align:center;
+    padding:9px 10px;
+    border-radius:9px;
+    border:1px solid var(--panel-border);
+    background:#faf9f6;
+    font-size:13px;
+    font-weight:500;
+    cursor:pointer;
+    user-select:none;
+    transition:all .15s ease;
+  }
+  .pill:hover{border-color:#c7c0b0;}
+  .pill.active{
+    background:var(--ink);
+    color:#fff;
+    border-color:var(--ink);
+  }
+  .field{margin-bottom:12px;}
+  .field label{
+    display:block;
+    font-size:12px;
+    color:var(--muted);
+    margin-bottom:5px;
+  }
+  .field input{
+    width:100%;
+    padding:8px 10px;
+    border:1px solid var(--panel-border);
+    border-radius:8px;
+    font-size:14px;
+    font-family:inherit;
+  }
+  .ballGrid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:8px;
+  }
+  .btn{
+    width:100%;
+    padding:11px;
+    border:none;
+    border-radius:9px;
+    background:var(--accent);
+    color:#fff;
+    font-size:14px;
+    font-weight:700;
+    cursor:pointer;
+    letter-spacing:.02em;
+  }
+  .btn:disabled{opacity:.55;cursor:wait;}
+  .btn.secondary{
+    background:var(--ink);
+  }
+  .btn.ghost{
+    background:transparent;
+    border:1px solid var(--panel-border);
+    color:var(--ink);
+  }
+  .status{
+    font-size:12.5px;
+    margin-top:9px;
+    color:var(--muted);
+    line-height:1.5;
+  }
+  .status.err{color:#b31b1b;}
+  .status.ok{color:#1a7a4c;}
+
+  /* ---------- preview area ---------- */
+  .previewWrap{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:14px;
+  }
+  #stage{
+    width:100%;
+    max-width:520px;
+    display:flex;
+    justify-content:center;
+  }
+
+  /* ===================== POSTER BASE ===================== */
+  .poster{
+    width:800px;
+    height:1120px;
+    position:relative;
+    overflow:hidden;
+    transform-origin:top left;
+    font-family:"Noto Sans SC",sans-serif;
+  }
+  .scaleWrap{
+    overflow:hidden;
+    position:relative;
+    border-radius:6px;
+    box-shadow:0 18px 50px -20px rgba(0,0,0,.35);
+  }
+
+  /* ===================== FESTIVE THEME ===================== */
+  .style-fest{
+    background:
+      radial-gradient(circle at 15% 8%, rgba(212,160,23,.18), transparent 45%),
+      radial-gradient(circle at 85% 92%, rgba(212,160,23,.18), transparent 45%),
+      linear-gradient(180deg,#7a0c0c 0%,#9c1414 35%,#b31b1b 65%,#7a0c0c 100%);
+    color:#fdf6e3;
+  }
+  .style-fest .cloudPattern{
+    position:absolute;inset:0;
+    opacity:.10;
+    background-image:
+      radial-gradient(circle at 20px 20px, transparent 8px, #f1d688 9px, transparent 10px),
+      radial-gradient(circle at 60px 60px, transparent 8px, #f1d688 9px, transparent 10px);
+    background-size:80px 80px;
+  }
+  .style-fest .frame{
+    position:absolute;inset:22px;
+    border:2px solid #d4a017;
+    border-radius:10px;
+  }
+  .style-fest .frame::before,
+  .style-fest .frame::after{
+    content:"";
+    position:absolute;
+    width:34px;height:34px;
+    border:2px solid #f1d688;
+  }
+  .style-fest .frame::before{top:-3px;left:-3px;border-right:none;border-bottom:none;}
+  .style-fest .frame::after{bottom:-3px;right:-3px;border-left:none;border-top:none;}
+  .style-fest .eyebrow{
+    position:relative;z-index:2;
+    text-align:center;
+    font-size:16px;
+    letter-spacing:.35em;
+    color:#f1d688;
+    margin-top:78px;
+    font-weight:500;
+  }
+  .style-fest .gameName{
+    position:relative;z-index:2;
+    text-align:center;
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:76px;
+    margin:14px 0 6px;
+    color:#fdf6e3;
+    text-shadow:0 3px 0 #5c0808, 0 6px 18px rgba(0,0,0,.35);
+    letter-spacing:.06em;
+  }
+  .style-fest .ribbon{
+    position:relative;z-index:2;
+    margin:20px auto 0;
+    width:fit-content;
+    background:linear-gradient(180deg,#e6b93a,#c8940f);
+    color:#5c1a00;
+    padding:9px 34px;
+    border-radius:999px;
+    font-weight:700;
+    font-size:20px;
+    letter-spacing:.08em;
+    box-shadow:0 6px 14px rgba(0,0,0,.25);
+  }
+  .style-fest .metaRow{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:center;
+    gap:26px;
+    margin-top:22px;
+    font-size:18px;
+    color:#f1d688;
+    font-weight:500;
+  }
+  .style-fest .ballsRow{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:16px;
+    margin-top:70px;
+    flex-wrap:wrap;
+    padding:0 40px;
+  }
+  .style-fest .ball{
+    width:88px;height:88px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:38px;
+    color:#fff;
+    box-shadow:inset 0 -8px 14px rgba(0,0,0,.25), inset 0 6px 10px rgba(255,255,255,.35), 0 8px 16px rgba(0,0,0,.3);
+  }
+  .style-fest .ball.red{background:radial-gradient(circle at 35% 30%,#ff6b5a,#c81e1e 60%,#8f0f0f);}
+  .style-fest .ball.blue{background:radial-gradient(circle at 35% 30%,#5aa9ff,#1560c8 60%,#0a3a80);}
+  .style-fest .ball.gold{background:radial-gradient(circle at 35% 30%,#f6dd8f,#d4a017 60%,#8a6408);}
+  /* 快乐8：20个号码固定10列2行排布。用固定宽度的flex布局而不是CSS grid，
+     因为导出图片用的html2canvas对grid的支持不完整，grid在导出时可能计算错误导致超出卡片边界；
+     flex+精确的固定宽度在各种情况下都能稳定保证每行正好10个。 */
+  .kl8Row{
+    display:flex !important;
+    flex-wrap:wrap;
+    justify-content:center;
+    align-content:flex-start;
+    gap:7px;
+    width:583px;
+    max-width:100%;
+    margin:0 auto;
+  }
+  .kl8Row .ball{width:52px;height:52px;font-size:19px;flex:0 0 52px;}
+  .style-fest .sep{
+    font-size:44px;
+    font-weight:900;
+    color:#f1d688;
+    font-family:"Noto Serif SC",serif;
+  }
+  .style-fest .plaque{
+    width:110px;height:130px;
+    border-radius:14px;
+    background:linear-gradient(180deg,#f6dd8f,#d4a017);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    box-shadow:inset 0 3px 6px rgba(255,255,255,.5), inset 0 -6px 10px rgba(0,0,0,.25), 0 10px 18px rgba(0,0,0,.3);
+  }
+  .style-fest .plaque .num{
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:56px;
+    color:#5c1a00;
+    line-height:1;
+  }
+  .style-fest .plaque .lbl{
+    margin-top:6px;
+    font-size:13px;
+    color:#7a3a0a;
+    font-weight:700;
+    letter-spacing:.1em;
+  }
+  .style-fest .footer{
+    position:absolute;
+    bottom:46px;left:0;right:0;
+    z-index:2;
+    text-align:center;
+    font-size:13px;
+    color:#e8c98a;
+    letter-spacing:.04em;
+  }
+  .style-fest .footer .brand{
+    font-size:15px;
+    font-weight:700;
+    color:#f1d688;
+    margin-bottom:6px;
+  }
+
+  /* ===================== MODERN / TERMINAL THEME ===================== */
+  .style-mod{
+    background:
+      linear-gradient(180deg,#0b1220 0%,#0d1526 100%);
+    color:#e8ecf4;
+  }
+  .style-mod .gridLines{
+    position:absolute;inset:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size:40px 40px;
+  }
+  .style-mod .scanGlow{
+    position:absolute;
+    top:-120px;left:50%;
+    transform:translateX(-50%);
+    width:900px;height:500px;
+    background:radial-gradient(circle, var(--acc-glow,rgba(255,77,77,.22)), transparent 65%);
+  }
+  .style-mod .topbar{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:36px 46px 0;
+    font-family:"Rajdhani",sans-serif;
+    font-size:14px;
+    letter-spacing:.18em;
+    color:#6e7b96;
+  }
+  .style-mod .topbar .dot{
+    display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--acc,#ff4d4d);
+    margin-right:8px;
+    box-shadow:0 0 10px var(--acc,#ff4d4d);
+  }
+  .style-mod .eyebrow{
+    position:relative;z-index:2;
+    text-align:center;
+    font-size:13px;
+    letter-spacing:.3em;
+    color:#6e7b96;
+    margin-top:44px;
+  }
+  .style-mod .gameName{
+    position:relative;z-index:2;
+    text-align:center;
+    font-weight:900;
+    font-size:64px;
+    margin:10px 0 0;
+    color:#f4f6fb;
+    letter-spacing:.03em;
+    font-family:"Noto Sans SC",sans-serif;
+  }
+  .style-mod .gameName .accentbar{
+    display:block;
+    width:70px;height:5px;
+    background:var(--acc,#ff4d4d);
+    margin:18px auto 0;
+    border-radius:3px;
+  }
+  .style-mod .metaRow{
+    position:relative;z-index:2;
+    display:flex;
+    justify-content:center;
+    gap:0;
+    margin-top:26px;
+    font-family:"Rajdhani",sans-serif;
+    font-size:20px;
+    color:#a8b3c8;
+  }
+  .style-mod .metaRow span{
+    padding:0 22px;
+    border-right:1px solid #22304a;
+  }
+  .style-mod .metaRow span:last-child{border-right:none;}
+  .style-mod .panelCard{
+    position:relative;z-index:2;
+    margin:64px 60px 0;
+    background:#131b2e;
+    border:1px solid #22304a;
+    border-radius:16px;
+    padding:44px 30px 34px;
+  }
+  .style-mod .panelCard .caption{
+    position:absolute;
+    top:-13px;left:30px;
+    background:#0b1220;
+    padding:0 10px;
+    font-family:"Rajdhani",sans-serif;
+    font-size:13px;
+    letter-spacing:.2em;
+    color:var(--acc,#ff4d4d);
+  }
+  .style-mod .ballsRow{
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    gap:14px;
+    flex-wrap:wrap;
+  }
+  .style-mod .ball{
+    width:78px;height:96px;
+    border-radius:10px;
+    background:#0e1626;
+    border:1px solid #26344f;
+    display:flex;align-items:center;justify-content:center;
+    font-family:"Rajdhani",sans-serif;
+    font-weight:700;
+    font-size:44px;
+    color:#f4f6fb;
+  }
+  .style-mod .ball.special{
+    border-color:var(--acc,#ff4d4d);
+    color:var(--acc,#ff4d4d);
+    box-shadow:0 0 22px -4px var(--acc,#ff4d4d);
+  }
+  .style-mod .sep{
+    font-family:"Rajdhani",sans-serif;
+    font-size:34px;
+    color:#3a4a6b;
+    font-weight:700;
+  }
+  .style-mod .plaque{
+    width:96px;height:118px;
+    border-radius:10px;
+    background:#0e1626;
+    border:1px solid var(--acc,#2fd9c0);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    box-shadow:0 0 22px -6px var(--acc,#2fd9c0);
+  }
+  .style-mod .plaque .num{
+    font-family:"Rajdhani",sans-serif;
+    font-weight:700;
+    font-size:52px;
+    color:var(--acc,#2fd9c0);
+    line-height:1;
+  }
+  .style-mod .plaque .lbl{
+    margin-top:8px;
+    font-size:12px;
+    color:#6e7b96;
+    letter-spacing:.15em;
+  }
+  .style-mod .footer{
+    position:absolute;
+    bottom:44px;left:0;right:0;
+    z-index:2;
+    text-align:center;
+    font-family:"Rajdhani",sans-serif;
+    font-size:13px;
+    letter-spacing:.1em;
+    color:#4d5a75;
+  }
+  .style-mod .footer .brand{
+    font-size:14px;
+    color:#8a97b3;
+    margin-bottom:6px;
+    letter-spacing:.2em;
+  }
+
+  footer.credit{
+    text-align:center;
+    font-size:12px;
+    color:var(--muted);
+    margin-top:10px;
+  }
+
+  /* ── 主Tab ── */
+  .mainTabs{
+    display:flex;gap:6px;margin-bottom:18px;
+  }
+  .mainTab{
+    flex:1;text-align:center;padding:10px;
+    border-radius:10px;border:1px solid var(--panel-border);
+    background:#faf9f6;font-size:14px;font-weight:600;
+    cursor:pointer;user-select:none;transition:all .15s;
+  }
+  .mainTab:hover{border-color:#c7c0b0;}
+  .mainTab.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .tabContent{display:none;}
+  .tabContent.active{display:block;}
+
+  /* ── 走势图表格 ── */
+  /* ── 预测报告 ── */
+  .pred-model-card{background:#faf9f6;border:1px solid #e3e0d8;border-radius:10px;padding:12px;margin-bottom:10px;}
+  .pred-model-title{font-size:13px;font-weight:700;color:var(--ink);margin-bottom:8px;}
+  .pred-acc-row{display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap;}
+  .pred-acc-badge{padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700;background:#1a1a2e;color:#f1d688;}
+  .pred-prob-bar{margin:4px 0;}
+  .pred-prob-label{font-size:11px;color:#666;margin-bottom:2px;}
+  .pred-bar-wrap{background:#eee;border-radius:4px;height:14px;overflow:hidden;}
+  .pred-bar-fill{height:14px;border-radius:4px;background:#c81e1e;transition:width .4s;}
+
+  /* ── AI文案助手 ── */
+  .card{background:#faf9f6;border:1px solid #e3e0d8;border-radius:12px;padding:14px;margin-bottom:14px;}
+  .cardTitle{font-size:14px;font-weight:700;color:var(--ink);margin-bottom:10px;}
+  .chatQuickBtn{width:auto;font-size:12px;padding:8px 14px;}
+  #chatInput{background:#fff;border:1px solid #d8d3c5;color:var(--ink);}
+  #chatInput:focus{outline:none;border-color:#a89a6f;}
+  .chatBubble{max-width:85%;padding:10px 14px;border-radius:14px;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
+  .chatBubble.user{align-self:flex-end;background:#1a1a2e;color:#fff;border-bottom-right-radius:4px;}
+  .chatBubble.ai{align-self:flex-start;background:#fff;border:1px solid #e3e0d8;color:var(--ink);border-bottom-left-radius:4px;}
+  .chatBubbleRow{display:flex;flex-direction:column;}
+  .chatBubbleRow.user{align-items:flex-end;}
+  .chatBubbleRow.ai{align-items:flex-start;}
+  .chatCopyBtn{font-size:11px;color:#888;background:none;border:none;cursor:pointer;padding:4px 0;text-align:left;}
+  .chatCopyBtn:hover{color:var(--ink);text-decoration:underline;}
+
+  .rec-group{display:inline-block;margin:4px;padding:6px 10px;background:#1a1a2e;border-radius:8px;color:#f1d688;font-size:13px;font-weight:700;}
+  .rec-group .ball-r{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#c81e1e;color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px;}
+  .rec-group .ball-b{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#1560c8;color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px;}
+  .rec-group .ball-g{display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#0d9488;color:#fff;font-size:11px;font-weight:700;text-align:center;margin:1px;}
+  .bt-hit{color:#1a7a4c;font-weight:700;}
+  .bt-miss{color:#aaa;}
+  .bt-row{display:flex;gap:8px;margin:4px 0;font-size:12px;flex-wrap:wrap;}
+  .bt-tag{padding:2px 8px;border-radius:4px;font-size:11px;}
+  .bt-tag.hit{background:#e8f5e9;color:#1a7a4c;}
+  .bt-tag.miss{background:#fafafa;color:#aaa;}
+
+  /* ── 走势图预览容器 ── */
+  #trendWrap{
+    font-size:13px;
+    width:100%;
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+  }
+  /* 横屏建议提示条：竖屏时显示，横屏自动隐藏 */
+  .rotateHint{
+    display:none;
+    align-items:center;
+    gap:10px;
+    background:linear-gradient(135deg,#2c2c4e,#1a1a2e);
+    color:#f1d688;
+    padding:12px 16px;
+    border-radius:10px;
+    margin-bottom:14px;
+    font-size:13px;
+    line-height:1.5;
+  }
+  .rotateHint .icon{
+    font-size:26px;
+    animation: rotateHintSpin 1.8s ease-in-out infinite;
+    flex-shrink:0;
+  }
+  @keyframes rotateHintSpin{
+    0%,100%{ transform:rotate(0deg); }
+    50%{ transform:rotate(90deg); }
+  }
+  @media (max-width:900px) and (orientation:portrait){
+    .rotateHint{ display:flex; }
+  }
+  .trendScrollBox{
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+    border-radius:8px;
+    box-shadow:0 2px 10px rgba(0,0,0,.1);
+    position:relative;
+  }
+  .trendTable{
+    border-collapse:collapse;
+    table-layout:auto;
+    background:#fff;
+    font-family:"Noto Sans SC",sans-serif;
+    font-size:13px;
+  }
+  .trendTable th{
+    background:#1a1a2e;color:#f1d688;
+    padding:6px 5px;text-align:center;
+    border:1px solid #333;
+    position:sticky;top:0;z-index:2;
+    font-weight:600;font-size:12px;
+    white-space:nowrap;
+  }
+  .trendTable td{
+    padding:5px 4px;text-align:center;
+    border:1px solid #ddd;
+    min-width:32px;
+  }
+  .trendTable tr:nth-child(even) td{background:#f8f6f2;}
+  .trendTable tr:hover td{background:#fff3e0;}
+  /* 走势圆点：正常可读大小 */
+  .trendDot{
+    display:inline-block;width:26px;height:26px;
+    line-height:26px;border-radius:50%;
+    font-size:13px;font-weight:700;
+    color:#fff;background:#c81e1e;
+  }
+  .trendDot.miss{
+    background:transparent;color:#bbb;
+    font-size:12px;font-weight:400;
+  }
+  .ballDot{
+    display:inline-block;
+    width:26px;height:26px;line-height:26px;
+    border-radius:50%;font-size:12px;font-weight:700;
+    color:#fff;text-align:center;
+  }
+  .ballDot.red{background:#c81e1e;}
+  .ballDot.blue{background:#1560c8;}
+  .ballDot.gold{background:#c8940f;}
+  .tag-odd{color:#c81e1e;font-weight:700;}
+  .tag-even{color:#1560c8;font-weight:700;}
+  .tag-big{color:#e87d00;font-weight:700;}
+  .tag-small{color:#1a7a4c;font-weight:700;}
+  .tag-0{color:#9b59b6;font-weight:700;}
+  .tag-1{color:#e74c3c;font-weight:700;}
+  .tag-2{color:#3498db;font-weight:700;}
+  .sectionTitle{
+    font-size:13px;font-weight:700;
+    padding:8px 0 5px;color:var(--ink);
+    border-bottom:2px solid var(--ink);
+    margin:14px 0 6px;
+  }
+
+  /* ── 海报日期行 ── */
+  .posterDate{
+    position:relative;z-index:2;
+    text-align:center;
+    margin-top:10px;
+  }
+  .style-fest .posterDate{
+    font-size:20px;
+    color:#f1d688;
+    letter-spacing:.12em;
+    font-weight:500;
+  }
+  .style-nova .posterDate{
+    font-family:"Noto Serif SC",serif;
+    font-size:20px;
+    color:#f1d688;
+    letter-spacing:.1em;
+    opacity:.9;
+  }
+  .style-mod .posterDate{
+    font-family:"Rajdhani",sans-serif;
+    font-size:18px;
+    letter-spacing:.15em;
+    color:#a8b3c8;
+  }
+
+  /* ===================== QR block ---------------- */
+  .qrBlock{
+    position:relative;z-index:2;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    margin-top:34px;
+  }
+  .qrImg{
+    width:150px;height:150px;
+    object-fit:contain;
+    background:#fff;
+    padding:8px;
+    border-radius:12px;
+  }
+  .style-fest .qrImg{border:4px solid #d4a017;}
+  .style-fest .qrCaption{
+    margin-top:12px;
+    font-size:15px;
+    color:#f1d688;
+    font-weight:500;
+  }
+  .style-mod .qrImg{border:1px solid #26344f;}
+  .style-mod .qrCaption{
+    margin-top:12px;
+    font-family:"Rajdhani",sans-serif;
+    font-size:15px;
+    letter-spacing:.05em;
+    color:#a8b3c8;
+  }
+
+  /* ---------------- combo (四合一) sections ---------------- */
+  .comboHeader{
+    position:relative;z-index:2;
+    text-align:center;
+  }
+  .comboSections{
+    position:relative;z-index:2;
+    display:flex;
+    flex-direction:column;
+    gap:0;
+    margin-top:36px;
+  }
+  .comboSection{
+    padding:22px 46px;
+  }
+  .style-fest .comboSection + .comboSection{
+    border-top:1px dashed rgba(241,214,136,.35);
+  }
+  .style-mod .comboSection{
+    margin:0 46px;
+  }
+  .style-mod .comboSection + .comboSection{
+    border-top:1px solid #22304a;
+  }
+  .comboSection .sectionTitleRow{
+    display:flex;
+    align-items:baseline;
+    justify-content:space-between;
+    margin-bottom:14px;
+  }
+  .style-fest .comboSection .sectionName{
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:30px;
+    color:#fdf6e3;
+  }
+  .style-fest .comboSection .sectionMeta{
+    font-size:14px;
+    color:#f1d688;
+  }
+  .style-mod .comboSection .sectionName{
+    font-weight:700;
+    font-size:24px;
+    color:#f4f6fb;
+  }
+  .style-mod .comboSection .sectionMeta{
+    font-family:"Rajdhani",sans-serif;
+    font-size:14px;
+    color:#6e7b96;
+  }
+  .comboSection .ballsRow{
+    margin-top:0;
+    justify-content:flex-start;
+    gap:9px;
+  }
+  .comboSection .ball{
+    width:58px;height:58px;
+    font-size:22px;
+  }
+  .comboSection .plaque{
+    width:64px;height:78px;
+  }
+  .comboSection .plaque .num{font-size:30px;}
+  .comboSection .plaque .lbl{font-size:11px;margin-top:3px;}
+  .comboSection .sep{font-size:28px;}
+  .comboSection .kl8Row{max-width:100%;}
+
+  /* ===================== NOVA / STARRY BRIEFING THEME ===================== */
+  .style-nova{
+    background: radial-gradient(ellipse at 50% -10%, #1b2340 0%, #0a0e1c 55%, #05070f 100%);
+    color:#f5efe0;
+  }
+  .style-nova .stars{
+    position:absolute;inset:0;
+    background-image:
+      radial-gradient(1.6px 1.6px at 40px 60px, #fff, transparent),
+      radial-gradient(1.2px 1.2px at 180px 140px, #fff, transparent),
+      radial-gradient(1.6px 1.6px at 320px 240px, #fff, transparent),
+      radial-gradient(1.2px 1.2px at 460px 80px, #fff, transparent),
+      radial-gradient(1.6px 1.6px at 600px 320px,#fff,transparent),
+      radial-gradient(1.2px 1.2px at 100px 440px,#fff,transparent),
+      radial-gradient(1.6px 1.6px at 760px 180px,#fff,transparent);
+    background-repeat:repeat;
+    background-size:840px 520px;
+    opacity:.6;
+  }
+  .style-nova .novaTitle{
+    position:relative;z-index:2;
+    text-align:center;
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:46px;
+    letter-spacing:.03em;
+    margin:52px 0 34px;
+    color:#f1d688;
+    text-shadow:0 2px 0 #8a6408, 0 6px 16px rgba(0,0,0,.45);
+  }
+  .style-nova .novaSections{
+    position:relative;z-index:2;
+    display:flex;
+    flex-direction:column;
+    gap:22px;
+    padding:0 40px;
+  }
+  .style-nova .novaSection{
+    border-radius:18px;
+    border:1.5px solid rgba(212,160,23,.55);
+    padding:22px 26px 26px;
+    box-shadow:0 10px 24px -8px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  .style-nova .novaSection .sectionTitleRow{
+    display:flex;align-items:baseline;gap:14px;margin-bottom:16px;
+  }
+  .style-nova .novaSection .sectionName{
+    font-family:"Noto Serif SC",serif;
+    font-weight:900;
+    font-size:26px;
+    color:#f7e7b0;
+  }
+  .style-nova .novaSection .sectionMeta{
+    font-size:15px;
+    color:rgba(247,231,176,.75);
+  }
+  .style-nova .novaSection .ballsRow{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:12px;
+  }
+  .style-nova .ball{
+    width:60px;height:60px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:24px;color:#fff;
+    box-shadow:inset 0 -6px 10px rgba(0,0,0,.25), inset 0 4px 8px rgba(255,255,255,.3), 0 6px 12px rgba(0,0,0,.35);
+  }
+  .style-nova .ball.red{background:radial-gradient(circle at 35% 30%,#ff6b5a,#c81e1e 60%,#8f0f0f);}
+  .style-nova .ball.blue{background:radial-gradient(circle at 35% 30%,#5aa9ff,#1560c8 60%,#0a3a80);}
+  .style-nova .sep{font-size:30px;color:#f7e7b0;font-weight:900;}
+  .style-nova .plaque{
+    width:70px;height:80px;
+    border-radius:12px;
+    background:linear-gradient(180deg,#ff6b5a,#c81e1e);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 6px 14px rgba(0,0,0,.35);
+  }
+  .style-nova .plaque .num{font-size:34px;font-weight:900;color:#fff;}
+  .style-nova .plaque .lbl{display:none;}
+  .style-nova .novaDivider{
+    position:relative;z-index:2;
+    display:flex;align-items:center;justify-content:center;
+    gap:10px;
+  }
+  .style-nova .novaDivider .line{
+    height:1px;width:80px;
+    background:linear-gradient(90deg,transparent,rgba(212,160,23,.6),transparent);
+  }
+  .style-nova .novaDivider .diamond{
+    width:14px;height:14px;
+    background:linear-gradient(135deg,#f7e7b0,#d4a017);
+    transform:rotate(45deg);
+    box-shadow:0 0 8px rgba(212,160,23,.6);
+  }
+  .style-nova .footer{
+    position:relative;bottom:auto;
+    z-index:2;
+    margin:36px 0 40px;
+    text-align:center;
+    font-size:15px;
+    color:rgba(247,231,176,.85);
+    font-weight:500;
+    letter-spacing:.02em;
+  }
+  .style-nova .qrImg{border:3px solid #d4a017;}
+  .style-nova .qrCaption{
+    margin-top:12px;
+    font-size:15px;
+    color:#f7e7b0;
+    font-weight:500;
+  }
+
+  /* ═══════════════ 扫码存档 Tab ═══════════════ */
+  .scanLayout{max-width:640px;margin:0 auto;}
+  .scanModeRow{
+    display:flex;gap:6px;margin-bottom:10px;
+  }
+  .scanModePill{
+    flex:1;text-align:center;padding:7px 6px;border-radius:8px;
+    border:1px solid var(--panel-border);background:#faf9f6;
+    font-size:12.5px;font-weight:600;cursor:pointer;user-select:none;
+    transition:all .15s ease;
+  }
+  .scanModePill:hover{border-color:#c7c0b0;}
+  .scanModePill.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .scanCropPreview{
+    margin-top:10px;padding:10px;
+    background:#1a1712;border-radius:10px;text-align:center;
+  }
+  .scanCropPreview img{
+    max-width:100%;border-radius:6px;
+    image-rendering:pixelated;   /* 放大展示时保留原始像素细节，方便肉眼判断清晰度 */
+  }
+  .scanCropPreview .cropHint{
+    font-size:11px;color:#c9c2b4;margin-top:6px;
+  }
+  .nativeCamBtn{
+    width:100%;padding:12px;border-radius:10px;
+    background:var(--accent);color:#fff;border:none;font-size:14px;font-weight:700;
+    cursor:pointer;
+  }
+  .nativeCamHint{font-size:11px;color:var(--muted);margin-top:6px;text-align:center;}
+  .cropStage{
+    position:relative;margin-top:12px;border-radius:12px;overflow:hidden;
+    background:#1a1712;touch-action:none;display:none;
+  }
+  .cropStage img{width:100%;display:block;user-select:none;-webkit-user-drag:none;}
+  .cropBox{
+    position:absolute;border:2px solid #f1d688;background:rgba(241,214,136,.12);
+    box-shadow:0 0 0 999px rgba(0,0,0,.45);
+  }
+  .cropBox .cropHandle{
+    position:absolute;width:22px;height:22px;background:#f1d688;border-radius:50%;
+    right:-11px;bottom:-11px;touch-action:none;
+  }
+  .cropActions{display:flex;gap:8px;margin-top:10px;}
+  .cropActions .btn{flex:1;}
+  .scanFieldsForm{margin-top:14px;}
+  .scanFieldRow{
+    display:flex;gap:8px;margin-bottom:10px;align-items:flex-end;
+  }
+  .scanFieldRow .field{flex:1;margin-bottom:0;}
+  .scanFieldRow .field label{
+    display:block;font-size:12px;color:var(--muted);margin-bottom:5px;
+  }
+  .scanFieldRow .field input{
+    width:100%;padding:9px 11px;border:1px solid var(--panel-border);
+    border-radius:8px;font-size:14px;font-family:inherit;
+  }
+  .scanFieldRow .miniCamBtn{
+    width:auto;padding:9px 12px;white-space:nowrap;
+    border:1px solid var(--panel-border);background:#faf9f6;color:var(--ink);
+    border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;
+  }
+  .scanFieldRow .miniCamBtn:hover{border-color:#c7c0b0;}
+  .scanFieldRow .miniCamBtn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .scanTableWrap{
+    margin-top:18px;max-height:360px;overflow-y:auto;overflow-x:auto;
+    border:1px solid var(--panel-border);border-radius:12px;
+  }
+  .scanTable{width:100%;min-width:560px;border-collapse:collapse;font-size:13px;}
+  .scanTable th{
+    position:sticky;top:0;background:var(--ink);color:#f1d688;
+    padding:9px 10px;text-align:left;font-weight:600;font-size:11.5px;
+    letter-spacing:.03em;text-transform:uppercase;
+  }
+  .scanTable td{
+    padding:9px 10px;border-top:1px solid var(--panel-border);
+    font-family:"Rajdhani",monospace;color:var(--ink);
+  }
+  .scanTable tr:nth-child(even) td{background:#faf9f6;}
+  .scanTable .delBtn{
+    color:var(--accent);cursor:pointer;font-weight:700;font-size:16px;
+    background:none;border:none;padding:0 4px;
+  }
+  .scanEmptyRow td{
+    text-align:center;color:var(--muted);padding:22px 10px;font-family:inherit;
+  }
+  .scanFootActions{display:flex;gap:8px;margin-top:12px;}
+  .scanFootActions .btn{flex:1;}
+  .scanCountBadge{
+    display:inline-block;background:var(--accent);color:#fff;
+    border-radius:999px;padding:1px 9px;font-size:12px;font-weight:700;margin-left:6px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- ===================== CONTROL PANEL ===================== -->
+  <div>
+    <h1 class="appTitle">福彩开奖数据中心</h1>
+
+    <!-- 主Tab栏 -->
+    <div class="mainTabs">
+      <div class="mainTab active" data-tab="poster">🎨 海报生成</div>
+      <div class="mainTab" data-tab="trend">📊 走势图</div>
+      <div class="mainTab" data-tab="predict">🤖 ML预测报告</div>
+      <div class="mainTab" data-tab="chat">💬 AI文案助手</div>
+      <div class="mainTab" data-tab="scan">📷 扫码存档</div>
+    </div>
+
+    <!-- 海报Tab内容 -->
+    <div id="tabPoster" class="tabContent active">
+    <p class="appSub">下方一次性填好四种彩票的开奖号码，再选择要生成「单彩种」还是「四合一」海报即可，无需重复输入。</p>
+
+    <div class="panel">
+      <h2>海报组合</h2>
+      <div class="pillrow" id="comboRow">
+        <div class="pill" data-combo="single">单彩种海报</div>
+        <div class="pill" data-combo="combo">四合一组合海报</div>
+      </div>
+      <div class="status">只决定下方预览/下载的是哪种海报，下面的开奖信息只需填一次，两种海报共用同一份数据。</div>
+    </div>
+
+    <div class="panel" id="typePanel">
+      <h2>彩种</h2>
+      <div class="pillrow" id="typeRow">
+        <div class="pill" data-type="ssq">双色球</div>
+        <div class="pill" data-type="3d">福彩3D</div>
+        <div class="pill" data-type="qlc">七乐彩</div>
+        <div class="pill" data-type="kl8">快乐8</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>海报风格</h2>
+      <div class="pillrow" id="styleRow">
+        <div class="pill" data-style="fest">喜庆店铺风</div>
+        <div class="pill" data-style="mod">简洁现代风</div>
+        <div class="pill" data-style="nova">星空快报风</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>数据来源</h2>
+
+      <div class="field">
+        <label>GitHub 仓库地址（推荐配置，配置后每天全自动更新）</label>
+        <input type="text" id="githubRepoInput" placeholder="用户名/仓库名，例如：zhangsan/fucai-data" style="font-family:monospace;">
+      </div>
+      <div class="status" style="margin-top:-6px;margin-bottom:10px;">
+        填好仓库地址后，工具每次点「一键获取」会直接读取 GitHub 上自动爬取好的 JSON 数据，<b>无需任何 API Key，每天22点自动更新</b>。<br>
+        没有仓库？见下方"如何配置"指引，5分钟完成，一次配置永久生效。
+      </div>
+
+      <button class="btn secondary" id="fetchBtn" style="margin-bottom:10px;">⚡ 一键获取最新开奖号码</button>
+      <div class="status" id="fetchStatus">
+        获取顺序：①GitHub自动数据 → ②直连官方API → ③Claude API中转（需Key）
+      </div>
+
+      <details style="margin-top:14px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ Claude API Key（直连失败时备用）</summary>
+        <div style="margin-top:10px;">
+          <div class="field">
+            <label>Anthropic API Key</label>
+            <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
+          </div>
+          <div class="status" style="margin-top:-4px;">Key 只存内存，刷新即清。填好后再点获取按钮使用。</div>
+        </div>
+      </details>
+
+      <details style="margin-top:10px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ 如何配置 GitHub 自动抓取（5分钟，一次配置永久生效）</summary>
+        <div style="margin-top:10px;font-size:13px;line-height:1.8;color:var(--ink);">
+          <b>第一步：</b>注册 <a href="https://github.com" target="_blank">github.com</a> 账号（免费）<br>
+          <b>第二步：</b>创建新仓库，命名为 <code>fucai-data</code>（设为 Public 公开）<br>
+          <b>第三步：</b>将下方两个文件上传到仓库根目录（从本工具的下载区获取）：<br>
+          &nbsp;&nbsp;• <code>lottery_crawler.py</code> — 爬虫脚本<br>
+          &nbsp;&nbsp;• <code>.github/workflows/crawl.yml</code> — 自动执行计划<br>
+          <b>第四步：</b>仓库 Settings → Actions → General → 勾选 "Allow GitHub Actions to create and approve pull requests" 并保存<br>
+          <b>第五步：</b>回到本工具，上方填入 <code>你的用户名/fucai-data</code>，点「保存仓库地址」<br>
+          <b>之后：</b>每天北京时间22:00 GitHub 自动跑爬虫，结果存到 latest.json，本工具直接读取。
+        </div>
+      </details>
+
+      <button class="btn ghost" id="saveRepoBtn" style="margin-top:12px;">保存仓库地址</button>
+    </div>
+
+    <div class="panel" id="formPanel">
+      <h2>开奖信息</h2>
+      <div class="status ok" id="memoryHint" style="margin-bottom:12px;">正在读取本地记忆…</div>
+      <button class="btn ghost" id="openOfficialBtn" type="button" style="margin-bottom:14px;">打开中国福彩网核对最新开奖（不用AI）</button>
+      <div id="formFields"></div>
+    </div>
+
+    <div class="panel">
+      <h2>二维码（可选）</h2>
+      <div class="field">
+        <label>上传二维码图片（店铺公众号 / 官方小程序 / 门店地址等）</label>
+        <input type="file" id="qrFileInput" accept="image/*">
+      </div>
+      <div class="field">
+        <label>二维码下方说明文字</label>
+        <input type="text" id="qrCaptionInput" placeholder="例如：扫码关注门店公众号 / 扫码查看更多开奖公告">
+      </div>
+      <div class="status">
+        提示：默认没有预填"加好友""专业分析/内幕建议"这类话术——彩票开奖是随机的，任何声称能"专业分析预测号码"或引导私加好友指导投注的说法，都是常见的诈骗/非法赌博引流话术，请不要使用这类文案，也提醒身边人提高警惕。这里的二维码建议仅用于店铺公众号、官方小程序或门店信息等正常用途。
+      </div>
+    </div>
+
+    <button class="btn" id="downloadBtn">下载海报图片（PNG）</button>
+    <p class="status" id="downloadStatus"></p>
+    </div><!-- end tabPoster -->
+
+    <!-- 走势图Tab内容 -->
+    <div id="tabTrend" class="tabContent">
+      <p class="appSub">数据来自 GitHub 仓库历史记录，近50期走势。需先在「数据来源」里配置好仓库地址。</p>
+      <div class="panel">
+        <h2>选择彩种</h2>
+        <div class="pillrow" id="trendTypeRow">
+          <div class="pill active" data-trend="3d">福彩3D</div>
+          <div class="pill" data-trend="ssq">双色球</div>
+          <div class="pill" data-trend="kl8">快乐8</div>
+        </div>
+      </div>
+      <button class="btn secondary" id="loadTrendBtn">加载走势图</button>
+      <div class="status" id="trendStatus" style="margin-top:8px;"></div>
+      <button class="btn" id="downloadTrendBtn" style="margin-top:10px;display:none;">下载走势图（PNG）</button>
+
+      <!-- AI专家解读面板 -->
+      <div class="panel" id="aiPanel" style="margin-top:18px;display:none;">
+        <h2>🤖 AI 专家解读</h2>
+        <div class="field">
+          <label>API 地址（直连 OpenRouter，也可填自建 Gateway）</label>
+          <input type="text" id="gwUrlInput" placeholder="https://openrouter.ai/api" value="https://openrouter.ai/api" style="font-family:monospace;font-size:12px;">
+        </div>
+        <div class="field">
+          <label>OpenRouter API Key</label>
+          <input type="password" id="gwSecretInput" placeholder="sk-or-v1-...">
+        </div>
+        <div class="field">
+          <label>模型（推荐 openrouter/free 自动路由）</label>
+          <input type="text" id="gwModelInput" placeholder="openrouter/free" value="openrouter/free" style="font-family:monospace;font-size:12px;">
+        </div>
+        <div class="status" style="margin-bottom:10px;">
+        密钥只保存在本机浏览器，不会上传任何服务器。到 <b>openrouter.ai/keys</b> 免费注册即可获取（无需信用卡）。<br>
+        免费模型名单经常无预警轮换，写死单个模型ID容易突然失效；填 <code>openrouter/free</code> 会自动路由到当前可用的免费模型。<br>
+        免费额度：每分钟20次、每天50次（一次性充值满$10后升到1000次/天，额度永久有效）。</div>
+        <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
+        <div class="status" id="aiStatus" style="margin-top:8px;"></div>
+
+        <!-- 解读展示窗口 -->
+        <div id="aiResult" style="display:none;margin-top:14px;">
+          <div style="
+            background:linear-gradient(135deg,#1a1a2e 0%,#2c2c4e 100%);
+            border-radius:12px;
+            padding:18px 20px;
+            border:1px solid #f1d688;
+          ">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;border-bottom:1px solid rgba(241,214,136,.25);padding-bottom:12px;">
+              <span style="font-size:24px;">🎯</span>
+              <div>
+                <div style="font-size:14px;font-weight:700;color:#f1d688;" id="aiResultTitle">福彩专家今日解读</div>
+                <div style="font-size:11px;color:rgba(241,214,136,.6);" id="aiResultDate"></div>
+              </div>
+            </div>
+            <div id="aiResultContent" style="
+              font-size:14px;
+              color:#e8ecf4;
+              line-height:1.9;
+              white-space:pre-wrap;
+            "></div>
+            <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(241,214,136,.2);font-size:11px;color:rgba(241,214,136,.4);text-align:center;">
+              ⚠️ 以上内容由 AI 根据历史数据规律生成，仅供娱乐参考，不构成任何投注建议。彩票开奖结果完全随机，请理性购彩。
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- end tabTrend -->
+
+    <!-- ═══════════ ML预测报告 Tab ═══════════ -->
+    <div id="tabPredict" class="tabContent">
+      <p class="appSub">基于 XGBoost + LightGBM + 随机森林 + 马尔可夫 + 遗漏分析，每日 Kaggle 自动训练生成。</p>
+      <div class="panel">
+        <h2>加载预测报告</h2>
+        <button class="btn secondary" id="loadPredictBtn">📥 加载今日预测报告</button>
+        <div class="status" id="predictStatus" style="margin-top:8px;"></div>
+      </div>
+      <div id="predictContent" style="display:none;">
+        <div class="panel" id="backtestPanel">
+          <h2>📋 昨日预测回测结果</h2>
+          <div id="backtestContent"></div>
+        </div>
+        <div id="gamePredict3d" style="display:none;">
+          <div class="panel"><h2>🎯 福彩3D · 今日预测</h2><div id="predict3dContent"></div></div>
+        </div>
+        <div id="gamePredictSSQ" style="display:none;">
+          <div class="panel"><h2>🔴 双色球 · 今日预测</h2><div id="predictSSQContent"></div></div>
+        </div>
+        <div id="gamePredictKL8" style="display:none;">
+          <div class="panel"><h2>🟡 快乐8 · 今日预测</h2><div id="predictKL8Content"></div></div>
+        </div>
+        <div class="status" style="color:#1a7a4c;font-size:12px;margin-top:8px;padding:8px;background:#f0fff4;border-radius:8px;border:1px solid #c3e6cb;">
+          💡 已加载ML预测数据后，切换到「走势图」Tab 生成 AI 专家解读，将自动融合机器学习结果，解读质量更高。
+        </div>
+        <!-- DL+RL 结果展示区（运行 kaggle_dl_rl.py 后出现） -->
+        <div id="dlResultPanel" style="display:none;margin-top:14px;">
+          <div class="panel" style="border:2px solid #9b59b6;">
+            <h2>🧠 深度学习 + 强化学习（LSTM · Transformer · PPO）</h2>
+            <div style="font-size:12px;color:#888;margin-bottom:10px;" id="dlResultMeta"></div>
+            <div id="dlResultContent"></div>
+          </div>
+        </div>
+        <div class="status" style="color:#aaa;font-size:11px;margin-top:6px;">
+          ⚠️ 彩票开奖具有完全随机性，ML预测仅为数据统计演示，不具实际预测意义，仅供娱乐参考，请勿作为投注依据。
+        </div>
+      </div>
+    </div><!-- end tabPredict -->
+
+    <!-- AI文案助手Tab内容 -->
+    <div id="tabChat" class="tabContent">
+      <p class="appSub">告诉AI你的需求，帮你写朋友圈、微信文案，或者聊聊其它的都可以。用的是「走势图分析」里配置的同一个AI通道。</p>
+
+      <div class="card">
+        <div class="cardTitle">⚙️ AI通道设置</div>
+        <div class="status" style="margin-bottom:10px;" id="chatGwHint">
+          与走势图AI解读共用同一份 API 配置，若尚未填写请先在「走势图」页签设置一次。
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">✨ 快捷场景</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px;">
+          <button class="btn secondary chatQuickBtn" data-preset="moments">朋友圈文案</button>
+          <button class="btn secondary chatQuickBtn" data-preset="wechat">微信聊天话术</button>
+          <button class="btn secondary chatQuickBtn" data-preset="product">产品/活动推广</button>
+          <button class="btn secondary chatQuickBtn" data-preset="holiday">节日祝福文案</button>
+          <button class="btn secondary chatQuickBtn" data-preset="reply">得体回复建议</button>
+        </div>
+        <div class="status" style="font-size:11px;color:#888;margin-top:6px;">
+          点击快捷场景会在输入框里填入提示模板，你可以直接改成自己的具体需求再发送。
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">💬 对话</div>
+        <div id="chatMessages" style="display:flex;flex-direction:column;gap:10px;max-height:480px;overflow-y:auto;padding:4px 0;margin-bottom:12px;">
+          <div class="status" id="chatEmptyHint">还没有对话，说说你的需求吧，比如："帮我写一条发朋友圈的文案，周末去爬山拍的照片，想要轻松一点的风格"</div>
+        </div>
+
+        <textarea id="chatInput" rows="3" placeholder="输入你的需求…比如：帮我写一句适合发朋友圈的加班文案，带点自嘲幽默"
+          style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;font-size:14px;resize:vertical;margin-bottom:8px;"></textarea>
+        <button class="btn" id="chatSendBtn">发送</button>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+          <div class="status" id="chatStatus" style="margin:0;"></div>
+          <button class="btn secondary" id="chatClearBtn" style="width:auto;font-size:12px;padding:6px 12px;">清空对话</button>
+        </div>
+      </div>
+    </div><!-- end tabChat -->
+
+    <!-- 扫码存档Tab内容 -->
+    <div id="tabScan" class="tabContent">
+      <p class="appSub">名称/金额/编号支持拍照自动识别，中奖金额刮开后手动填写。四项凑齐后加入清单，记录同步保存到 GitHub 仓库，也可一键导出Excel。</p>
+
+      <div class="scanLayout">
+        <div class="panel">
+          <h2>GitHub 存储设置</h2>
+          <div class="field">
+            <label>仓库地址（复用「海报生成」页签已保存的仓库）</label>
+            <input type="text" id="scanRepoInput" placeholder="例如 your-name/fucai-data">
+          </div>
+          <div class="field">
+            <label>GitHub Token（需勾选 Contents 读写权限，仅保存在本机浏览器）</label>
+            <input type="password" id="scanTokenInput" placeholder="github_pat_… 或 ghp_…">
+          </div>
+          <button class="btn secondary" id="scanSaveConfigBtn">保存设置</button>
+          <div class="status" id="scanConfigStatus"></div>
+        </div>
+
+        <div class="panel">
+          <h2>拍照识别</h2>
+          <div class="scanModeRow">
+            <div class="scanModePill" data-mode="name">① 拍票名</div>
+            <div class="scanModePill" data-mode="amount">② 拍面值</div>
+            <div class="scanModePill active" data-mode="code">③ 拍编号</div>
+          </div>
+
+          <input type="file" accept="image/*" capture="environment" id="nativeCamInput" style="display:none;">
+          <button class="nativeCamBtn" id="nativeCamBtn">📷 拍照（自动识别当前选中的内容）</button>
+          <div class="nativeCamHint">调起手机自带相机拍照，拍完自动尝试识别；识别不准时可在下方手动框选重试</div>
+          <div class="status" id="scanCameraStatus"></div>
+
+          <div class="cropStage" id="cropStage">
+            <img id="cropSourceImg" alt="拍摄的照片">
+            <div class="cropBox" id="cropBox" style="left:2%;top:8%;width:96%;height:55%;">
+              <div class="cropHandle" id="cropHandle"></div>
+            </div>
+          </div>
+          <div class="cropActions" id="cropActions" style="display:none;">
+            <button class="btn" id="cropConfirmBtn">✓ 识别框选区域</button>
+            <button class="btn ghost" id="cropCancelBtn">取消</button>
+          </div>
+          <div class="scanCropPreview" id="scanCropPreview" style="display:none;">
+            <img id="scanCropImg" alt="识别区域预览">
+            <div class="cropHint" id="scanCropHintText">↑ 实际用于识别的区域</div>
+          </div>
+
+          <div class="scanFieldsForm">
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>① 票名</label>
+                <input type="text" id="fieldName" placeholder="例如：心想事成">
+              </div>
+              <button class="miniCamBtn" data-mode="name">重新框选</button>
+            </div>
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>② 面值（票面价格）</label>
+                <input type="text" id="fieldAmount" placeholder="例如：10元">
+              </div>
+              <button class="miniCamBtn" data-mode="amount">重新框选</button>
+            </div>
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>③ 编号</label>
+                <input type="text" id="fieldCode" placeholder="例如：J0790-26147-0040880-135-3">
+              </div>
+              <button class="miniCamBtn" data-mode="code">重新框选</button>
+            </div>
+            <div class="scanFieldRow">
+              <div class="field">
+                <label>④ 中奖金额（刮开后手动填写，未中奖填0）</label>
+                <input type="text" id="fieldPrize" placeholder="例如：50 或 0">
+              </div>
+            </div>
+            <button class="btn" id="scanConfirmBtn" style="margin-top:4px;">✓ 加入清单</button>
+            <button class="btn ghost" id="scanNewTicketBtn" style="margin-top:4px;">🔄 换新票（清空票名和面值）</button>
+            <div class="status" id="scanFormStatus"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>已存档记录<span class="scanCountBadge" id="scanCountBadge">0</span></h2>
+          <div class="status" id="scanSyncStatus" style="margin-bottom:8px;"></div>
+          <div class="scanTableWrap">
+            <table class="scanTable">
+              <thead>
+                <tr>
+                  <th style="width:30px;">#</th>
+                  <th>票名</th><th>面值</th><th>编号</th><th>中奖金额</th>
+                  <th style="width:100px;">时间</th><th style="width:32px;"></th>
+                </tr>
+              </thead>
+              <tbody id="scanTableBody">
+                <tr class="scanEmptyRow"><td colspan="7">暂无记录，拍照或手动添加后会显示在这里</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="scanFootActions">
+            <button class="btn ghost" id="scanRefreshBtn">🔄 从GitHub刷新</button>
+            <button class="btn" id="scanExportBtn">📥 导出Excel</button>
+            <button class="btn ghost" id="scanClearAllBtn">清空全部</button>
+          </div>
+          <div class="status" id="scanListStatus"></div>
+        </div>
+      </div>
+    </div><!-- end tabScan -->
+
+  <!-- ===================== PREVIEW ===================== -->
+  <div class="previewWrap">
+    <div id="stage"></div>
+    <footer class="credit" id="previewCredit">预览已缩放显示，实际下载为高清尺寸</footer>
+    <!-- 走势图容器 -->
+    <div id="trendWrap" style="display:none;width:100%;overflow-x:auto;"></div>
+  </div>
+</div>
+
+<script>
+const AI_CACHE_KEY = 'fucaiAiReadingCache';
+const aiCache = { '3d': null, 'ssq': null, 'kl8': null };
+function saveAiCache(){
+  try{ localStorage.setItem(AI_CACHE_KEY, JSON.stringify(aiCache)); } catch(e){}
 }
-VOTE_NSAMP = {'ssq': 300000, 'kl8': 200000}   # 蒙特卡洛样本数
-VOTE_K = {'ssq': 10, 'kl8': 30}               # 每一方投票的球数（3D每位固定投3个数字）
-VOTE_FLAT_EPS = 0.03                          # 提升倍数最大最小差小于它 → 无明显倾向
-VOTE_MIN_TARGETS = 4                          # 一方至少给出几个目标的概率才算有效
-VOTE_ALPHA = 1.0                              # 似然比指数（<1 表示对 ML/DL 判断打折）
-VOTE_LAYOUT_CUR = VOTE_LAYOUT['3d']            # 当前正在计算的游戏的目标布局（vote_ball_lifts/vote_3d_joints 会设置）
-
-_D3_ALL = np.array([[b, s, g] for b in range(10) for s in range(10) for g in range(10)], dtype=np.int64)
-_PRIME_ARR_80 = np.zeros(81, dtype=bool)
-for _p in [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79]:
-    _PRIME_ARR_80[_p] = True
-
-
-def _grp3(x, lo, hi):
-    return np.where(x <= lo, 0, np.where(x <= hi, 1, 2))
-
-
-def _count_unique_diffs(S):
-    n, k = S.shape
-    iu, ju = np.triu_indices(k, 1)
-    d = np.sort(S[:, ju] - S[:, iu], axis=1)
-    return 1 + (d[:, 1:] != d[:, :-1]).sum(axis=1)
-
-
-def vote_feats_3d(C):
-    """3D的7个目标分类（定义与ML/DL的标签函数一致），C:(N,3)"""
-    sm = C.sum(axis=1)
-    tri = (C[:, 0] == C[:, 1]) & (C[:, 1] == C[:, 2])
-    eq = (C[:, 0] == C[:, 1]) | (C[:, 1] == C[:, 2]) | (C[:, 0] == C[:, 2])
-    s3 = np.sort(C, axis=1)
-    span = C.max(axis=1) - C.min(axis=1)
-    rd = C % 3
-    rc = np.stack([(rd == r).sum(axis=1) for r in range(3)], axis=1)
-    return {'sum_grp': _grp3(sm, 9, 17), 'odd': (C % 2 != 0).sum(axis=1),
-            'group_type': np.where(tri, 0, np.where(eq, 1, 2)), 'big': (C >= 5).sum(axis=1),
-            'span_grp': _grp3(span, 3, 6), 'road_dom': rc.argmax(axis=1),
-            'arith': (((s3[:, 1] - s3[:, 0]) == (s3[:, 2] - s3[:, 1])) & ((s3[:, 2] - s3[:, 0]) > 0)).astype(np.int64)}
-
-
-def vote_feats_ssq(S):
-    """双色球红球(已排序 N×6，值1..33)的7个目标分类"""
-    sm = S.sum(axis=1)
-    gaps = np.diff(S, axis=1)
-    z = np.stack([(S <= 11).sum(axis=1), ((S >= 12) & (S <= 22)).sum(axis=1), (S >= 23).sum(axis=1)], axis=1)
-    ac = _count_unique_diffs(S) - (S.shape[1] - 1)
-    return {'odd': (S % 2 != 0).sum(axis=1), 'sum_grp': np.where(sm < 70, 0, np.where(sm < 100, 1, 2)),
-            'ac_grp': _grp3(ac, 2, 5), 'red_zone_dom': z.argmax(axis=1),
-            'gap_grp': _grp3(gaps.max(axis=1), 5, 10), 'big': (S > 16).sum(axis=1),
-            'consec': (gaps == 1).sum(axis=1)}
-
-
-def vote_feats_kl8(S):
-    """快乐8开奖20球(已排序 N×20，值1..80)的7个目标分类"""
-    sm = S.sum(axis=1)
-    odd = (S % 2 != 0).sum(axis=1)
-    big = (S > 40).sum(axis=1)
-    zone = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 20), (21, 40), (41, 60), (61, 80)]], axis=1)
-    five = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 16), (17, 32), (33, 48), (49, 64), (65, 80)]], axis=1)
-    adj = (np.diff(S, axis=1) == 1)
-    runs = adj[:, 0].astype(np.int64) + (adj[:, 1:] & ~adj[:, :-1]).sum(axis=1)
-    rng = S[:, -1] - S[:, 0]
-    return {'odd_grp': np.where(odd < 9, 0, np.where(odd <= 11, 1, 2)), 'zone_dom': zone.argmax(axis=1),
-            'tot_grp': np.where(sm < 640, 0, np.where(sm < 820, 1, 2)),
-            'big_grp': np.where(big < 9, 0, np.where(big <= 11, 1, 2)), 'five_dom': five.argmax(axis=1),
-            'consec_grp': np.where(runs == 0, 0, np.where(runs <= 2, 1, 2)),
-            'range_grp': np.where(rng < 60, 0, np.where(rng < 70, 1, 2))}
-
-
-def _vote_subsets(rng, n, pool, k):
-    r = rng.random((n, pool))
-    idx = np.argpartition(r, k, axis=1)[:, :k] + 1
-    idx.sort(axis=1)
-    return idx.astype(np.int64)
-
-
-def _vote_probs(dct, n):
-    """{'0':12.3,'1':...}(百分数，键是类别号) → 长度n的概率向量；全空返回None"""
-    if not isinstance(dct, dict) or not dct:
-        return None
-    v = np.array([float(dct.get(str(i), 0.0)) for i in range(n)], dtype=np.float64) / 100.0
-    return v / v.sum() if v.sum() > 0 else None
-
-
-def vote_source_targets(game, ml_pred, dl_game):
-    """取ML/DL各目标的概率向量。返回 {'ml': {目标:向量}, 'dl': {...}}，不足VOTE_MIN_TARGETS个目标的来源置None"""
-    out = {'ml': {}, 'dl': {}}
-    mm = (ml_pred or {}).get('models', {}) or {}
-    for name, n in VOTE_LAYOUT[game]:
-        pv = _vote_probs(((mm.get(name) or {}).get('prediction') or {}).get('probs'), n)
-        if pv is not None: out['ml'][name] = pv
-        pv = _vote_probs(((dl_game or {}).get(name) or {}).get('probs'), n)
-        if pv is not None: out['dl'][name] = pv
-    return {k: (v if len(v) >= VOTE_MIN_TARGETS else None) for k, v in out.items()}
-
-
-def _vote_logw(feats, tgt):
-    """乘积专家：对每个有概率的目标累加 log(模型概率/随机占比)"""
-    n = len(next(iter(feats.values())))
-    logw = np.zeros(n)
-    ncs = dict(VOTE_LAYOUT_CUR)
-    for name, p in tgt.items():
-        nc = ncs[name]; f = feats[name]
-        q = np.bincount(f, minlength=nc)[:nc] / n
-        p = np.clip(np.asarray(p, dtype=np.float64)[:nc], 1e-3, 1.0); p = p / p.sum()
-        ratio = np.where(q > 0, p / np.maximum(q, 1e-12), 1.0)
-        logw += VOTE_ALPHA * np.log(ratio[np.minimum(f, nc - 1)])
-    return logw
-
-
-def vote_ball_lifts(game, sources, rl_scores, seed):
-    """ssq/kl8：返回 {'ml':lift数组或None,'dl':..., 'rl':...}；lift=入选概率/随机基准(K/N)"""
-    global VOTE_LAYOUT_CUR
-    VOTE_LAYOUT_CUR = VOTE_LAYOUT[game]
-    pool, k = (33, 6) if game == 'ssq' else (80, 20)
-    rng = np.random.default_rng(seed)
-    S = _vote_subsets(rng, VOTE_NSAMP[game], pool, k)
-    feats = vote_feats_ssq(S) if game == 'ssq' else vote_feats_kl8(S)
-    lifts = {}
-    for key in ('ml', 'dl'):
-        tgt = sources.get(key)
-        if not tgt:
-            lifts[key] = None; continue
-        logw = _vote_logw(feats, tgt)
-        w = np.exp(logw - logw.max()); w /= w.sum()
-        inc = np.zeros(pool)
-        for c in range(k):
-            inc += np.bincount(S[:, c] - 1, weights=w, minlength=pool)
-        lifts[key] = inc / (k / pool)
-    if rl_scores is not None:
-        lifts['rl'] = ball_sample_probs(rl_scores) * pool   # RL分数→softmax概率→相对均匀的倍数
-    else:
-        lifts['rl'] = None
-    return lifts
-
-
-def vote_balls(game, lifts):
-    """对ssq/kl8的逐球lift投票。返回 (共识分数组, 汇总dict)"""
-    K = VOTE_K[game]; pool = 33 if game == 'ssq' else 80
-    names = {'ml': 'ML', 'dl': 'DL', 'rl': 'RL'}
-    votes = np.zeros(pool); active = []; info = {}
-    for key in ('ml', 'dl', 'rl'):
-        lf = lifts.get(key)
-        if lf is None:
-            info[key] = {'available': False}; continue
-        strength = float(lf.max() - lf.min())
-        flat = strength < VOTE_FLAT_EPS
-        order = sorted(range(pool), key=lambda i: (-lf[i], i))
-        top = [i + 1 for i in order[:K]]
-        info[key] = {'available': True, 'flat': bool(flat), 'strength': round(strength, 3),
-                     'max_lift': round(float(lf.max()), 3), 'top': top}
-        if not flat:
-            active.append(key)
-            for b in top: votes[b - 1] += 1
-    mean_lift = np.mean([lifts[k] for k in active], axis=0) if active else np.ones(pool)
-    score = votes * 10 + mean_lift
-    order = sorted(range(pool), key=lambda i: (-score[i], i))
-    table = [{'ball': i + 1, 'votes': int(votes[i]), 'lift': round(float(mean_lift[i]), 3)} for i in order[:24]]
-    return score, {'sources': info, 'k_vote': K, 'n_active': len(active), 'active': active, 'table': table}
-
-
-# ── 3D ──
-def vote_3d_joints(sources, rl_pos_probs):
-    """返回 {'ml':1000维联合概率或None, 'dl':..., 'rl':...}"""
-    global VOTE_LAYOUT_CUR
-    VOTE_LAYOUT_CUR = VOTE_LAYOUT['3d']
-    feats = vote_feats_3d(_D3_ALL)
-    J = {}
-    for key in ('ml', 'dl'):
-        tgt = sources.get(key)
-        if not tgt:
-            J[key] = None; continue
-        logw = _vote_logw(feats, tgt)
-        w = np.exp(logw - logw.max()); J[key] = w / w.sum()
-    if rl_pos_probs is not None:
-        pp = [np.asarray(p, dtype=np.float64) / np.sum(p) for p in rl_pos_probs]
-        J['rl'] = np.array([pp[0][b] * pp[1][s] * pp[2][g] for b, s, g in _D3_ALL])
-    else:
-        J['rl'] = None
-    return J
-
-
-SUM_BANDS = [(0, 5), (6, 9), (10, 13), (14, 17), (18, 21), (22, 27)]
-SPAN_BANDS = [(0, 2), (3, 4), (5, 6), (7, 9)]
-GROUP_N6, GROUP_N3 = 6, 2      # 组选覆盖：推荐几注组六、几注组三
-STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
-
-
-def vote_3d(sources, rl_pos_probs, n_bets=12):
-    J = vote_3d_joints(sources, rl_pos_probs)
-    names = ['百位', '十位', '个位']
-    info = {}; active = []
-    marg = {}
-    for key in ('ml', 'dl', 'rl'):
-        j = J.get(key)
-        if j is None:
-            info[key] = {'available': False}; continue
-        mp = [np.bincount(_D3_ALL[:, c], weights=j, minlength=10) for c in range(3)]
-        marg[key] = mp
-        strength = max(float(m.max() - m.min()) for m in mp)
-        flat = strength < 0.01
-        info[key] = {'available': True, 'flat': bool(flat), 'strength': round(strength, 4),
-                     'top': [[int(d) for d in np.argsort(-m, kind='stable')[:3]] for m in mp]}
-        if not flat: active.append(key)
-    use = active if active else [k for k in marg]
-    if not use:
-        return {}
-    # 各位共识：每一方给自己Top3数字各投1票；按 (得票, 平均概率) 排序
-    pos = []
-    for c in range(3):
-        mean_p = np.mean([marg[k][c] for k in use], axis=0)
-        votes = np.zeros(10)
-        for k in active:
-            for d in np.argsort(-marg[k][c], kind='stable')[:3]: votes[d] += 1
-        order = sorted(range(10), key=lambda d: (-votes[d], -mean_p[d], d))
-        pos.append({'name': names[c], 'cands': [
-            {'digit': d, 'votes': int(votes[d]), 'prob': round(float(mean_p[d]) * 100, 1),
-             'by': {k: round(float(marg[k][c][d]) * 100, 1) for k in marg}} for d in order[:3]]})
-    Jc = np.mean([J[k] for k in use], axis=0); Jc = Jc / Jc.sum()
-    order = np.argsort(-Jc, kind='stable')
-    bets = [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in order[:n_bets]]
-
-    # ── 组选覆盖：一注组选覆盖它的全部直选排列（组六6个、组三3个），按组概率选 ──
-    groups = {}
-    for i in range(1000):
-        key = tuple(sorted(int(x) for x in _D3_ALL[i]))
-        groups[key] = groups.get(key, 0.0) + float(Jc[i])
-    def _kind(k): return {3: 'zu6', 2: 'zu3', 1: 'baozi'}[len(set(k))]
-    zu6 = sorted([(k, p) for k, p in groups.items() if _kind(k) == 'zu6'], key=lambda x: (-x[1], x[0]))[:GROUP_N6]
-    zu3 = sorted([(k, p) for k, p in groups.items() if _kind(k) == 'zu3'], key=lambda x: (-x[1], x[0]))[:GROUP_N3]
-    gl = []
-    for k, p in zu6 + zu3:
-        n_perm = 6 if _kind(k) == 'zu6' else 3
-        gl.append({'digits': list(k), 'type': '组六' if n_perm == 6 else '组三', 'perms': n_perm,
-                   'prob': round(p * 100, 2), 'base': round(n_perm / 10.0, 2), 'lift': round(p / (n_perm / 1000.0), 2)})
-    cov_p = sum(g['prob'] for g in gl); cov_n = sum(g['perms'] for g in gl)
-    group_cover = {'bets': gl, 'n_bets': len(gl), 'perms': cov_n, 'prob': round(cov_p, 2),
-                   'base': round(cov_n / 10.0, 2),
-                   'direct_prob': round(sum(b['prob'] for b in bets), 2), 'direct_n': len(bets)}
-
-    # ── 和值/跨度分层：把1000注按(和值段×跨度段)分格，按概率质量选格，每格选最优的几注 ──
-    sm = _D3_ALL.sum(axis=1); sp = _D3_ALL.max(axis=1) - _D3_ALL.min(axis=1)
-    def _bi(v, bands):
-        for i, (lo, hi) in enumerate(bands):
-            if lo <= v <= hi: return i
-        return len(bands) - 1
-    sb = np.array([_bi(v, SUM_BANDS) for v in sm]); pb = np.array([_bi(v, SPAN_BANDS) for v in sp])
-    mass = np.zeros((len(SUM_BANDS), len(SPAN_BANDS))); cnt = np.zeros_like(mass)
-    for i in range(1000):
-        mass[sb[i], pb[i]] += Jc[i]; cnt[sb[i], pb[i]] += 1
-    cells = sorted([(r, c) for r in range(len(SUM_BANDS)) for c in range(len(SPAN_BANDS)) if cnt[r, c] > 0],
-                   key=lambda rc: -mass[rc])
-    chosen, per_sb = [], {}
-    for r, c in cells:
-        if per_sb.get(r, 0) >= STRAT_MAX_PER_SUMBAND: continue
-        chosen.append((r, c)); per_sb[r] = per_sb.get(r, 0) + 1
-        if len(chosen) >= STRAT_CELLS: break
-    sl = []
-    for r, c in chosen:
-        idxs = [i for i in order if sb[i] == r and pb[i] == c][:STRAT_PER_CELL]
-        sl.append({'sum': f'{SUM_BANDS[r][0]}~{SUM_BANDS[r][1]}', 'span': f'{SPAN_BANDS[c][0]}~{SPAN_BANDS[c][1]}',
-                   'prob': round(float(mass[r, c]) * 100, 1), 'base': round(float(cnt[r, c]) / 10.0, 1),
-                   'bets': [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in idxs]})
-    strat = {'cells': sl,
-             'sum_bands': [f'{a}~{b}' for a, b in SUM_BANDS], 'span_bands': [f'{a}~{b}' for a, b in SPAN_BANDS],
-             'matrix': [[round(float(mass[r, c]) * 100, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
-             'base_matrix': [[round(float(cnt[r, c]) / 10.0, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
-             'chosen': [[int(r), int(c)] for r, c in chosen]}
-    return {'sources': info, 'active': active, 'n_active': len(active), 'pos': pos, 'bets': bets,
-            'group_cover': group_cover, 'stratified': strat}
-
-
-def build_consensus(game, records, ml_pred, dl_game, result):
-    """给一个游戏的RL结果挂上共识投票。result 里需要有 rl_scores(ssq/kl8) 或 rl_pos_probs(3d)。失败不影响主结果。"""
-    src = vote_source_targets(game, ml_pred, dl_game)
-    seed = zlib.crc32(f"{game}-{len(records)}".encode()) & 0xffffffff
-    if game == '3d':
-        rp = result.get('rl_pos_probs')
-        c = vote_3d(src, rp)
-        if c: c['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
-        return c
-    scores = result.get('rl_scores')
-    lifts = vote_ball_lifts(game, src, np.array(scores, dtype=np.float64) if scores else None, seed)
-    score, summary = vote_balls(game, lifts)
-    summary['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
-    if game == 'ssq':
-        bets, core, pool = diverse_picks(score, 6, 6)
-        blues = (result.get('ppo_groups') or [{}])[0]
-        summary['bets'] = [{'red': b, 'blue': blues.get('blue'), 'blues': blues.get('blues', []),
-                            'blue_probs': blues.get('blue_probs', [])} for b in bets]
-        summary['core'] = core; summary['pool'] = pool
-    else:
-        cnts = [('xuan4', '选四', 4, 3), ('xuan5', '选五', 5, 3), ('xuan5_fu', '选五复式', 8, 1),
-                ('xuan6', '选六', 6, 3), ('xuan9', '选九', 9, 2), ('xuan10', '选十', 10, 1)]
-        plays = {}
-        for pk, nm, n, c in cnts:
-            b, _, _ = diverse_picks(score, n, c)
-            plays[pk] = {'name': nm, 'balls': n, 'groups': b}
-        summary['plays'] = plays
-    return summary
-
-
-# ══════════════════════════════════════════════════════
-#  主流程
-# ══════════════════════════════════════════════════════
-print(f"\n{'#'*55}\nPPO 强化学习 每日增量微调  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
-
-raw = gh_raw('history.json')
-if not raw: print("失败"); sys.exit(1)
-history = json.loads(raw)
-
-# 读取 prediction.json 取ML概率向量（RL状态的一部分）
-raw_ml = gh_raw('prediction.json')
-ml_preds = {}
-if raw_ml:
-    try: ml_preds = json.loads(raw_ml).get('predictions', {})
-    except Exception: pass
-
-# 读取上一次的 dl_rl.json，双色球非开奖日跳过训练时用来沿用完整结果
-# （保持字段结构跟正常训练完全一致，HTML渲染逻辑不用感知任何变化）
-# 读取DL（LSTM/TFM）各目标的最新预测概率，共识投票用（每周更新；读不到就只用ML+RL投票）
-raw_dl = gh_raw('dl_lstm_tfm.json')
-dl_results_json = {}
-if raw_dl:
-    try: dl_results_json = json.loads(raw_dl).get('results', {})
-    except Exception as e: print(f"! 解析dl_lstm_tfm.json失败: {e}，共识投票将缺少DL")
-else:
-    print("! 未读到dl_lstm_tfm.json，共识投票将缺少DL")
-
-raw_prev_rl = gh_raw('dl_rl.json')
-prev_rl_results = {}
-if raw_prev_rl:
-    try: prev_rl_results = json.loads(raw_prev_rl).get('results', {})
-    except Exception: pass
-
-os.makedirs(RL_LOCAL_DIR, exist_ok=True)
-rl_results = {}
-
-for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_ssq_daily)]:
-    records = history.get(game, [])
-    if not isinstance(records,list) or len(records)<65:
-        print(f"\n{game}: 数据不足，跳过"); continue
-    ml_pred = ml_preds.get(game, {})
-    try:
-        # 三个游戏统一传入上次结果，无新数据时沿用，避免重复训练造成过拟合
-        rl_results[game] = run_fn(records, ml_pred, prev_rl_results.get(game))
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        print(f"{game} 失败: {e}")
-    # ── 共识投票（ML+DL+RL）：失败不影响RL本身的结果。无新数据沿用上次结果时，也用最新的ML/DL概率重算 ──
-    _r = rl_results.get(game)
-    if _r and (_r.get('rl_scores') or _r.get('rl_pos_probs')):
-        try:
-            _t0 = time.time()
-            _cons = build_consensus(game, records, ml_pred, dl_results_json.get(game), _r)
-            if _cons:
-                _r['consensus'] = _cons
-                _st = {k: v.get('flat') if v.get('available') else None for k, v in _cons['sources'].items()}
-                print(f"  [共识投票] {game}: 参与投票{_cons.get('active', _cons.get('n_active'))}；"
-                      f"各方是否无明显倾向(flat) {_st}；耗时{time.time()-_t0:.1f}s")
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            print(f"  [共识投票] {game} 计算失败（不影响RL结果）: {e}")
-
-# 推送RL模型到Kaggle Dataset
-print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
-# 判断这次是不是"全部游戏都跳过了训练"（比如手动运行、没有任何新开奖数据）。
-# carry_over_result 会在结果里标 skipped=True；只要有一个游戏真的训练过，
-# 就不算"全部跳过"，因为那个游戏确实产生了要保存的新内容。
-_all_skipped = bool(rl_results) and all(r.get('skipped') for r in rl_results.values())
-if _all_skipped:
-    print("  本次全部游戏都无新数据、跳过了训练，本地也没有产生任何新的模型文件，"
-          "跳过推送——不做无意义的Dataset版本更新，也避免用不完整的本地目录覆盖已保存的内容。")
-else:
-    # 推送前先把"本地没有、但挂载目录（上次版本）里有"的文件补齐，
-    # 防止这次只训练了部分游戏时，把没训练的游戏已保存的模型文件覆盖掉。
-    sync_local_with_mounted()
-    push_rl_dataset()
-
-# ── 写入独立文件 dl_rl.json（不再读取/合并 prediction.json，速度更快）──
-out = {
-    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    'method': 'PPO强化学习（每日增量微调）',
-    'state_composition': '原始特征 + ML概率向量 + LSTM隐层 + Transformer特征 + 遗漏向量',
-    'results': rl_results,
+function loadAiCache(){
+  try{
+    const c = JSON.parse(localStorage.getItem(AI_CACHE_KEY)||'{}');
+    ['3d','ssq','kl8'].forEach(g=>{ if(c[g]) aiCache[g] = c[g]; });
+  } catch(e){}
 }
-out_json = json.dumps(out, ensure_ascii=False, indent=2)
+function restoreAiResult(game){
+  if(typeof aiCache === 'undefined') return;  // 防止未初始化
+  const cache = aiCache[game];
+  const resultEl = document.getElementById('aiResult');
+  const statusEl = document.getElementById('aiStatus');
+  if(!resultEl || !statusEl) return;
+  if(cache){
+    const t = document.getElementById('aiResultTitle');
+    const d = document.getElementById('aiResultDate');
+    const c = document.getElementById('aiResultContent');
+    if(t) t.textContent = cache.title || '';
+    if(d) d.textContent = cache.date  || '';
+    if(c) c.innerHTML  = cache.content|| '';
+    resultEl.style.display = 'block';
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ 已恢复${cache.gameLabel||''}的解读（${cache.savedAt||''}）`;
+  } else {
+    resultEl.style.display = 'none';
+    statusEl.className = 'status';
+    statusEl.textContent = '';
+  }
+}
 
-if not GH_TOKEN:
-    print("\n[DRY RUN] 未配置 GH_TOKEN")
-else:
-    print("\n推送 dl_rl.json…")
-    gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("✓ 完成")
+const state = {
+  type: 'ssq',
+  style: 'fest',
+  posterMode: 'single', // 'single' | 'combo'
+  data: {
+    ssq: { qihao:'2026083', date:'2026-07-17', red:[3,8,12,19,24,31], blue:7 },
+    '3d': { qihao:'2026183', date:'2026-07-17', digits:[3,7,2] },
+    qlc: { qihao:'2026083', date:'2026-07-17', numbers:[2,7,11,15,22,26,29], special:9 },
+    kl8: { qihao:'2026083', date:'2026-07-17', numbers:[2,5,9,14,18,23,27,31,36,40,44,48,53,58,61,65,69,72,76,80] }
+  },
+  // 默认二维码（购彩小程序），用户上传自己的二维码后会自动替换（见 qrFileInput 的change事件）。
+  qr: { image:'data:image/png;base64,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', caption:'', show:true },
+  apiKey: ''
+};
 
-print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+const gameOrder = ['ssq','3d','qlc','kl8'];
+const gameNames = { ssq:'双色球', '3d':'福彩3D', qlc:'七乐彩', kl8:'快乐8' };
+const accentByType = {
+  ssq:{acc:'#ff4d4d', glow:'rgba(255,77,77,.22)'},
+  '3d':{acc:'#2fd9c0', glow:'rgba(47,217,192,.22)'},
+  qlc:{acc:'#a78bfa', glow:'rgba(167,139,250,.22)'},
+  kl8:{acc:'#ffb020', glow:'rgba(255,176,32,.22)'}
+};
+
+function pad2(n){ return String(n).padStart(2,'0'); }
+
+/* ---------------- FORM RENDERING ---------------- */
+function renderForm(){
+  const box = document.getElementById('formFields');
+  // 无论当前是"单彩种"还是"四合一"展示模式，都统一填写全部四种彩票的号码，
+  // 这样切换展示模式或下载哪种海报都不需要重复输入。
+  box.innerHTML = gameOrder.map(g=> gameFormSection(g)).join('');
+  box.querySelectorAll('input').forEach(inp=>{
+    inp.addEventListener('input', onFieldChange);
+  });
+}
+
+function gameFormSection(game, showLabel){
+  const d = state.data[game];
+  const withHeader = showLabel !== false;
+  let html = withHeader ? `<div class="field" style="margin-top:18px;"><label style="font-size:13px;font-weight:700;color:var(--ink);">${gameNames[game]}</label></div>` : '';
+  html += field(game, '期号', 'qihao', d.qihao);
+  html += field(game, '开奖日期', 'date', d.date, 'date');
+
+  if(game === 'ssq'){
+    html += `<div class="field"><label>红球（6个，1-33）</label><div class="ballGrid">`;
+    for(let i=0;i<6;i++) html += `<input type="number" min="1" max="33" data-game="${game}" data-arr="red" data-idx="${i}" value="${d.red[i]}">`;
+    html += `</div></div>`;
+    html += field(game, '蓝球（1-16）', 'blue', d.blue, 'number');
+  } else if(game === '3d'){
+    html += `<div class="field"><label>开奖数字（3位，各0-9）</label><div class="ballGrid" style="grid-template-columns:repeat(3,1fr)">`;
+    for(let i=0;i<3;i++) html += `<input type="number" min="0" max="9" data-game="${game}" data-arr="digits" data-idx="${i}" value="${d.digits[i]}">`;
+    html += `</div></div>`;
+  } else if(game === 'qlc'){
+    html += `<div class="field"><label>基本号码（7个，1-30）</label><div class="ballGrid">`;
+    for(let i=0;i<7;i++) html += `<input type="number" min="1" max="30" data-game="${game}" data-arr="numbers" data-idx="${i}" value="${d.numbers[i]}">`;
+    html += `</div></div>`;
+    html += field(game, '特别号（1-30）', 'special', d.special, 'number');
+  } else if(game === 'kl8'){
+    html += `<div class="field"><label>开奖号码（20个，1-80，从小到大）</label><div class="ballGrid" style="grid-template-columns:repeat(5,1fr)">`;
+    for(let i=0;i<20;i++) html += `<input type="number" min="1" max="80" data-game="${game}" data-arr="numbers" data-idx="${i}" value="${d.numbers[i]}">`;
+    html += `</div></div>`;
+  }
+  return html;
+}
+
+function field(game, label, key, value, type='text'){
+  return `<div class="field"><label>${label}</label><input type="${type}" data-game="${game}" data-key="${key}" value="${value}"></div>`;
+}
+
+function onFieldChange(e){
+  const el = e.target;
+  const game = el.dataset.game || state.type;
+  const d = state.data[game];
+  if(el.dataset.arr){
+    d[el.dataset.arr][+el.dataset.idx] = +el.value;
+  } else {
+    const key = el.dataset.key;
+    d[key] = (key === 'blue' || key === 'special') ? +el.value : el.value;
+  }
+  saveMemory();
+  renderPoster();
+}
+
+/* ---------------- 期号/日期记忆与自动顺延 ---------------- */
+// 各彩种的每周开奖日（0=周日 ... 6=周六）。3D、快乐8每天开奖；双色球周二四日；七乐彩周一三五。
+const scheduleDays = {
+  ssq: [2,4,0],
+  '3d': [0,1,2,3,4,5,6],
+  qlc: [1,3,5],
+  kl8: [0,1,2,3,4,5,6]
+};
+const MEMORY_KEY = 'fucaiPosterMemory_v1';
+
+function toISODate(d){
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+// 从上次记录的期号/日期，按该彩种真实的开奖日规律，顺延推算到"今天"应该是第几期、哪天开奖。
+function advanceQihao(game, seedQihao, seedDateStr, today){
+  const days = scheduleDays[game];
+  let year = parseInt(String(seedQihao).slice(0,4), 10);
+  let seq = parseInt(String(seedQihao).slice(4), 10);
+  if(isNaN(year) || isNaN(seq)){ year = today.getFullYear(); seq = 1; }
+  let cursor = new Date((seedDateStr || toISODate(today)) + 'T00:00:00');
+  const target = new Date(toISODate(today) + 'T00:00:00');
+  let lastDrawDateStr = seedDateStr || toISODate(today);
+  let advanced = false;
+  while(cursor.getTime() < target.getTime()){
+    cursor.setDate(cursor.getDate()+1);
+    if(days.includes(cursor.getDay())){
+      const cy = cursor.getFullYear();
+      if(cy !== year){ year = cy; seq = 1; } else { seq += 1; }
+      lastDrawDateStr = toISODate(cursor);
+      advanced = true;
+    }
+  }
+  return { qihao: String(year) + String(seq).padStart(3,'0'), date: lastDrawDateStr, advanced };
+}
+
+function saveMemory(){
+  try{
+    const toSave = {};
+    gameOrder.forEach(g=>{ toSave[g] = { qihao: state.data[g].qihao, date: state.data[g].date }; });
+    localStorage.setItem(MEMORY_KEY, JSON.stringify(toSave));
+  } catch(e){ /* 本地存储不可用时静默忽略，不影响正常填写 */ }
+}
+
+// 页面打开时调用：读取上次记住的期号/日期，结合电脑当前系统日期，按各彩种真实开奖日规律自动顺延。
+function loadMemoryAndAdvance(){
+  let stored = {};
+  let storageOk = true;
+  try{
+    stored = JSON.parse(localStorage.getItem(MEMORY_KEY) || '{}');
+  } catch(e){ storageOk = false; }
+
+  const today = new Date();
+  let anyAdvanced = false;
+  gameOrder.forEach(g=>{
+    const seed = stored[g] || { qihao: state.data[g].qihao, date: state.data[g].date };
+    const result = advanceQihao(g, seed.qihao, seed.date, today);
+    state.data[g].qihao = result.qihao;
+    state.data[g].date = result.date;
+    if(result.advanced) anyAdvanced = true;
+  });
+  saveMemory();
+
+  const hint = document.getElementById('memoryHint');
+  if(hint){
+    if(!storageOk){
+      hint.textContent = '当前浏览器环境无法使用本地存储，期号/日期不会自动记忆，需要每次手动填写。';
+    } else if(anyAdvanced){
+      hint.textContent = `已根据系统日期（${toISODate(today)}）自动顺延各彩种的期号与开奖日期，只需要填写今天的开奖号码即可。`;
+    } else {
+      hint.textContent = `期号与日期已是最新（系统日期 ${toISODate(today)}），可以直接填写开奖号码。`;
+    }
+  }
+}
+
+// 海报统一显示日期：取3D（每天开奖）的开奖日期
+// 3D和快乐8每天开奖，日期最新最准；双色球/七乐彩隔天开奖可能滞后，不用它们的日期
+function getDisplayDate(){
+  const d3date = state.data['3d'] && state.data['3d'].date;
+  if(d3date && /^\d{4}-\d{2}-\d{2}/.test(d3date)) return formatDate(d3date);
+  return '';
+}
+
+/* ---------------- POSTER RENDERING ---------------- */
+function ballsHtmlForGame(game, isMod){
+  const d = state.data[game];
+  const acc = accentByType[game];
+  let html = '';
+  if(game === 'ssq'){
+    d.red.forEach(n=> html += `<div class="ball red" style="--acc:${acc.acc}">${pad2(n)}</div>`);
+    html += `<div class="sep">${isMod ? '/' : '+'}</div><div class="ball ${isMod?'special':'blue'}" style="--acc:${acc.acc}">${pad2(d.blue)}</div>`;
+  } else if(game === '3d'){
+    const lbls = isMod ? ['百','十','个'] : ['百位','十位','个位'];
+    d.digits.forEach((n,i)=> html += `<div class="plaque" style="--acc:${acc.acc}"><div class="num" style="--acc:${acc.acc}">${n}</div><div class="lbl">${lbls[i]}</div></div>`);
+  } else if(game === 'qlc'){
+    d.numbers.forEach(n=> html += `<div class="ball red" style="--acc:${acc.acc}">${pad2(n)}</div>`);
+    html += `<div class="sep">${isMod ? '/' : '+'}</div><div class="ball ${isMod?'special':'blue'}" style="--acc:${acc.acc}">${pad2(d.special)}</div>`;
+  } else if(game === 'kl8'){
+    d.numbers.forEach(n=> html += `<div class="ball ${isMod?'':'gold'}" style="--acc:${acc.acc}">${pad2(n)}</div>`);
+  }
+  return html;
+}
+
+function ballsRowClass(game){
+  return game === 'kl8' ? 'ballsRow kl8Row' : 'ballsRow';
+}
+
+function comboSectionHtml(game, isMod){
+  const d = state.data[game];
+  return `<div class="comboSection">
+    <div class="sectionTitleRow">
+      <span class="sectionName">${gameNames[game]}</span>
+      <span class="sectionMeta">第 ${d.qihao} 期 · ${formatDate(d.date)}</span>
+    </div>
+    <div class="${ballsRowClass(game)}">${ballsHtmlForGame(game, isMod)}</div>
+  </div>`;
+}
+
+const novaPanelColors = {
+  kl8: 'linear-gradient(160deg,#7a1233,#4a0a1f)',
+  ssq: 'linear-gradient(160deg,#123a66,#0b2440)',
+  '3d': 'linear-gradient(160deg,#0e6b57,#083f34)',
+  qlc: 'linear-gradient(160deg,#5a2170,#33123f)'
+};
+const novaDividerHtml = `<div class="novaDivider"><span class="line"></span><span class="diamond"></span><span class="line"></span></div>`;
+
+function novaSectionHtml(game){
+  const d = state.data[game];
+  return `<div class="novaSection" style="background:${novaPanelColors[game]}">
+    <div class="sectionTitleRow">
+      <span class="sectionName">${gameNames[game]}</span>
+      <span class="sectionMeta">第${d.qihao}期开奖号码</span>
+    </div>
+    <div class="${ballsRowClass(game)}">${ballsHtmlForGame(game, false)}</div>
+  </div>`;
+}
+
+function qrBlockHtml(){
+  if(!state.qr.show || !state.qr.image) return '';
+  const cap = state.qr.caption ? `<div class="qrCaption">${escapeHtml(state.qr.caption)}</div>` : '';
+  return `<div class="qrBlock"><img class="qrImg" src="${state.qr.image}">${cap}</div>`;
+}
+
+function escapeHtml(str){
+  return str.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function getPosterHeight(){
+  const hasQr = state.qr.show && state.qr.image;
+  if(state.style === 'nova'){
+    let h;
+    if(state.posterMode === 'combo') h = 1300;
+    else h = state.type === 'kl8' ? 660 : 560;
+    if(hasQr) h += 260;
+    return h;
+  }
+  let h = state.posterMode === 'combo' ? 1480 : 1120;
+  if(hasQr) h += 240;
+  return h;
+}
+
+function computeScale(){
+  const wrap = document.querySelector('.previewWrap');
+  const avail = wrap ? wrap.clientWidth : 340;
+  return Math.max(0.24, Math.min(0.65, (avail - 16) / 800));
+}
+
+function renderPoster(){
+  const posterH = getPosterHeight();
+  let inner = '';
+
+  if(state.posterMode === 'combo'){
+    if(state.style === 'fest'){
+      inner += `<div class="cloudPattern"></div><div class="frame"></div>`;
+      inner += `<div class="comboHeader"><div class="eyebrow" style="margin-top:70px;font-size:26px;letter-spacing:.3em;">中 国 福 利 彩 票</div><div class="gameName" style="font-size:52px;">综合开奖公告</div><div class="ribbon">四合一开奖速览</div>${getDisplayDate()?`<div class="posterDate">${getDisplayDate()}</div>`:''}</div>`;
+      inner += `<div class="comboSections">` + gameOrder.map(g=>comboSectionHtml(g,false)).join('') + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer" style="position:relative;bottom:auto;margin-top:34px;"><div class="brand">祝彩民朋友好运连连</div>开奖信息以中国福利彩票官方网站 www.cwl.gov.cn 公布为准</div>`;
+    } else if(state.style === 'nova'){
+      inner += `<div class="stars"></div>`;
+      inner += `<div class="novaTitle">中国福利彩票开奖快报</div>`;
+      if(getDisplayDate()) inner += `<div class="posterDate">${getDisplayDate()}</div>`;
+      inner += `<div class="novaSections">` + gameOrder.map(g=>novaSectionHtml(g)).join(novaDividerHtml) + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer">数据源自官方开奖，仅供参考。祝您好运！</div>`;
+    } else {
+      const acc = accentByType.ssq;
+      inner += `<div class="gridLines"></div><div class="scanGlow" style="--acc-glow:${acc.glow}"></div>`;
+      inner += `<div class="topbar"><span><span class="dot" style="background:${acc.acc};box-shadow:0 0 10px ${acc.acc}"></span>DRAW TERMINAL</span><span>CWL · OFFICIAL</span></div>`;
+      inner += `<div class="comboHeader"><div class="eyebrow" style="font-size:16px;letter-spacing:.25em;">中国福利彩票 · 开奖终端</div><div class="gameName" style="font-size:44px;">综合开奖公告<span class="accentbar" style="background:${acc.acc}"></span></div>${getDisplayDate()?`<div class="posterDate">${getDisplayDate()}</div>`:''}</div>`;
+      inner += `<div class="comboSections">` + gameOrder.map(g=>comboSectionHtml(g,true)).join('') + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer" style="position:relative;bottom:auto;margin-top:34px;"><div class="brand">CHINA WELFARE LOTTERY</div>数据来源 www.cwl.gov.cn，最终以官方公告为准</div>`;
+    }
+  } else {
+    const d = state.data[state.type];
+    const name = gameNames[state.type];
+    const acc = accentByType[state.type];
+
+    if(state.style === 'fest'){
+      inner += `<div class="cloudPattern"></div><div class="frame"></div>`;
+      inner += `<div class="eyebrow">中 国 福 利 彩 票</div>`;
+      inner += `<div class="gameName">${name}</div>`;
+      inner += `<div class="ribbon">开奖公告</div>`;
+      inner += `<div class="metaRow"><span>第 ${d.qihao} 期</span><span>${formatDate(d.date)} 开奖</span></div>`;
+      if(getDisplayDate() && state.type !== '3d' && state.type !== 'kl8'){
+        inner += `<div class="posterDate" style="margin-top:8px;font-size:16px;">开奖日期：${getDisplayDate()}</div>`;
+      }
+      inner += `<div class="${ballsRowClass(state.type)}">${ballsHtmlForGame(state.type, false)}</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer"><div class="brand">祝彩民朋友好运连连</div>开奖信息以中国福利彩票官方网站 www.cwl.gov.cn 公布为准</div>`;
+    } else if(state.style === 'nova'){
+      inner += `<div class="stars"></div>`;
+      inner += `<div class="novaTitle" style="font-size:38px;margin:56px 0 16px;">中国福利彩票开奖快报</div>`;
+      if(getDisplayDate()) inner += `<div class="posterDate" style="margin-bottom:20px;">${getDisplayDate()}</div>`;
+      inner += `<div class="novaSections" style="padding:0 50px;">` + novaSectionHtml(state.type) + `</div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer">数据源自官方开奖，仅供参考。祝您好运！</div>`;
+    } else {
+      inner += `<div class="gridLines"></div><div class="scanGlow" style="--acc-glow:${acc.glow}"></div>`;
+      inner += `<div class="topbar"><span><span class="dot" style="background:${acc.acc};box-shadow:0 0 10px ${acc.acc}"></span>DRAW TERMINAL</span><span>CWL · OFFICIAL</span></div>`;
+      inner += `<div class="eyebrow">中国福利彩票 · 开奖终端</div>`;
+      inner += `<div class="gameName">${name}<span class="accentbar" style="background:${acc.acc}"></span></div>`;
+      inner += `<div class="metaRow"><span>期号 ${d.qihao}</span><span>${getDisplayDate() || formatDate(d.date)}</span></div>`;
+      inner += `<div class="panelCard" style="--acc:${acc.acc}"><div class="caption" style="--acc:${acc.acc}">RESULT</div><div class="${ballsRowClass(state.type)}" style="--acc:${acc.acc}">${ballsHtmlForGame(state.type, true)}</div></div>`;
+      inner += qrBlockHtml();
+      inner += `<div class="footer"><div class="brand">CHINA WELFARE LOTTERY</div>数据来源 www.cwl.gov.cn，最终以官方公告为准</div>`;
+    }
+  }
+
+  const stage = document.getElementById('stage');
+  const scale = computeScale();
+  stage.innerHTML = `<div class="scaleWrap" style="width:${800*scale}px;height:${posterH*scale}px;"><div id="posterEl" class="poster style-${state.style}" style="height:${posterH}px;transform:scale(${scale});">${inner}</div></div>`;
+}
+
+/* ═══════════════════════════════════════════════════
+   AI 专家解读
+═══════════════════════════════════════════════════ */
+// ── AI API 配置（直连 OpenRouter 或自建 Gateway）────────
+const GW_CACHE_KEY = 'fucaiGatewayConfig';
+function saveGwConfig(){
+  try{
+    localStorage.setItem(GW_CACHE_KEY, JSON.stringify({
+      url:    document.getElementById('gwUrlInput').value.trim(),
+      secret: document.getElementById('gwSecretInput').value.trim(),
+      model:  document.getElementById('gwModelInput').value.trim() || 'openrouter/free',
+    }));
+  } catch(e){}
+}
+function loadGwConfig(){
+  try{
+    const c = JSON.parse(localStorage.getItem(GW_CACHE_KEY)||'{}');
+    // 只有存过非空地址才覆盖默认值，避免把预填的 OpenRouter 地址清成空白。
+    // 用户若自建了 Gateway，填进去照样能用（本程序走的是标准 OpenAI 兼容格式）。
+    if(c.url)    document.getElementById('gwUrlInput').value    = c.url;
+    if(c.secret) document.getElementById('gwSecretInput').value = c.secret;
+    // 旧配置里存的是 'auto'，但 OpenRouter 并没有这个模型ID，会直接报错。
+    // 这里自动迁移到 openrouter/free（官方的免费模型自动路由）。
+    if(c.model && c.model !== 'auto'){
+      document.getElementById('gwModelInput').value = c.model;
+    } else if(c.model === 'auto'){
+      document.getElementById('gwModelInput').value = 'openrouter/free';
+    }
+  } catch(e){}
+}
+// 任意输入变化时自动保存
+['gwUrlInput','gwSecretInput','gwModelInput'].forEach(id=>{
+  document.getElementById(id)?.addEventListener('input', saveGwConfig);
+});
+
+function buildPrompt(type, records, mlContext=''){
+  const latest = records[records.length-1];
+  const gameNames = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+  const name = gameNames[type];
+
+  let dataDesc = '';
+  if(type==='3d'){
+    const rows = records.slice(-10).map(r=>{
+      const m = calc3D(r.digits);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): ${r.digits.join('')} 和值${m.sum} 跨度${m.span} ${m.oddEven} ${m.bigSmall}`;
+    });
+    const allRows = records.map(r=>({...r,...calc3D(r.digits)}));
+    const sumAvg = (allRows.reduce((s,r)=>s+r.sum,0)/allRows.length).toFixed(1);
+    const spanCount={};
+    allRows.forEach(r=>{ spanCount[r.span]=(spanCount[r.span]||0)+1; });
+    const topSpan = Object.entries(spanCount).sort((a,b)=>b[1]-a[1])[0];
+    const oeCount={};
+    allRows.forEach(r=>{ oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1; });
+    const topOE = Object.entries(oeCount).sort((a,b)=>b[1]-a[1])[0];
+    dataDesc = `最近10期开奖：\n${rows.join('\n')}\n\n近${records.length}期统计：和值均值${sumAvg}，最频繁跨度${topSpan[0]}(${topSpan[1]}次)，最常见奇偶组合${topOE[0]}(${topOE[1]}次)`;
+  } else if(type==='ssq'){
+    const rows = records.slice(-8).map(r=>{
+      const m = calcSSQ(r.red,r.blue);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 红[${r.red.join(',')}] 蓝${r.blue} ${m.odd}奇${m.even}偶 AC值${m.ac} 连号${m.consec}`;
+    });
+    const redCnt={};
+    records.forEach(r=>r.red.forEach(n=>{ redCnt[n]=(redCnt[n]||0)+1; }));
+    const hot5 = Object.entries(redCnt).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    const cold5 = Object.entries(redCnt).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    dataDesc = `最近8期开奖：\n${rows.join('\n')}\n\n近${records.length}期红球热号：${hot5}\n冷号：${cold5}`;
+  } else if(type==='kl8'){
+    const rows = records.slice(-5).map(r=>{
+      const m = calcKL8(r.numbers);
+      return `第${r.qihao.slice(-3)}期(${r.date.slice(5)}): 号码[${r.numbers.join(',')}] 区间[${m.zones.join('/')}] ${m.odd}奇${m.even}偶`;
+    });
+    const cnt={};
+    records.forEach(r=>r.numbers.forEach(n=>{ cnt[n]=(cnt[n]||0)+1; }));
+    const hot5 = Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    const cold5 = Object.entries(cnt).sort((a,b)=>a[1]-b[1]).slice(0,5).map(([k,v])=>`${k}号(${v}次)`).join('、');
+    dataDesc = `最近5期开奖：\n${rows.join('\n')}\n\n近${records.length}期热号：${hot5}\n冷号：${cold5}`;
+  }
+
+  const system = `你是一位资深彩票数据分析专家，同时具备机器学习、深度学习和强化学习结果的解读能力。
+
+你的分析结合三类数据：
+① 人工统计走势特征（和值/跨度/遗漏/冷热/马尔可夫等）
+② 传统机器学习（随机森林+XGBoost+LightGBM+马尔可夫链+遗漏贝叶斯）
+③ 深度学习+强化学习（LSTM序列建模+Transformer注意力+PPO强化学习选号策略，状态融合ML概率+LSTM隐层+遗漏向量）
+
+要求：
+1. 自然融合三类信息，不要割裂成独立板块，让分析有层次有深度。
+2. 提到模型时用"模型信号"/"深度学习信号"/"强化学习策略"等表述，不夸大准确性。
+3. 多模型一致时重点强调，分歧时如实说明各自倾向。
+4. 所有观点基于提供的数据，不虚构规律，不保证命中。
+5. 结构清晰，语言自然生动，像专业彩票资讯网站的每日深度解读。
+6. 全文400-500字。
+7. 最后必须附上："彩票开奖具有完全随机性，本分析结合统计模型与深度学习，仅供娱乐参考，请理性购彩。"`;
+
+
+const user = `请根据以下${name}近期开奖数据，撰写一篇今日专家解读分析。
+
+历史数据：
+${dataDesc}
+
+最新一期（${latest.date}）已开奖。
+
+${mlContext ? `【机器学习 + 深度学习 + 强化学习 分析结果】
+${mlContext}
+
+` : ''}请结合历史数据${mlContext?'和上方模型分析结果':''}，自然完成一篇分析文章，内容需要覆盖但不限于：
+
+- 最近走势特征与规律
+- 各项指标值得关注的变化
+- 近期号码分布特点（冷热、遗漏、奇偶、大小、区间、和值、跨度等）
+${mlContext ? '- 结合模型预测信号（ML/LSTM/TFM/RL）给出综合判断\n- 特别说明强化学习和深度学习的预测信号与走势统计是否吻合' : ''}
+- 今日整体走势总结
+- 根据历史统计，列出近期值得关注的号码，然后再有针对性推荐五组以上参考号码组合
+
+写作要求：
+- 必须随机自由调整分析顺序，自然衔接各个观点，例如先分析走势，再结合号码分布，最后总结并给出参考号码。
+- 各项分析内容应自然融合在正文中，不要让读者感觉是在完成一份提纲。
+- 可以使用2~4个符合内容的小标题，但小标题不要直接对应上述要求，应更像彩票资讯网站每日专家解读，例如："走势观察"、"冷热变化"、"近期焦点"、"综合判断"等。
+- 推荐号码随便放，以"参考号码"或"关注号码"形式展示即可。
+- 每个观点尽量结合数据说明原因，避免空洞描述。
+- 整体风格参考专业彩票资讯网站的每日行情解读，语言自然、有节奏，像资深分析师撰写，而不是AI按要求逐项作答。
+- 请使用中文回答。`;
+
+  return { system, user };
+}
+
+/* ── getMlContext：从 _lastPrediction 提取ML+DL+RL信息供AI解读 ── */
+function getMlContext(type){
+  try{
+    const pred = window._lastPrediction;
+    if(!pred) return '';
+    const lines = [];
+
+    const tLabels={bai:'百位',shi:'十位',ge:'个位',sum_grp:'和值区间',odd:'奇数个数',group_type:'组型',span_grp:'跨度区间',road_dom:'012路主力',arith:'斜连(等差)',big:'大数个数',consec:'连号数',
+                   blue:'蓝球',red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
+                   zone_dom:'主落区',tot_grp:'总和区间',odd_grp:'奇数区间',
+                   big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
+
+    // ── 基础ML部分（传统机器学习：RF/XGB/LGB，含全部特征工程后的预测目标）──
+    const mlData = pred.predictions?.[type];
+    if(mlData){
+      lines.push(`【传统机器学习（RF/XGB/LGB，特征含AC值/三区分布/最大间距/重号/斜连/五行等完整特征工程）】`);
+      lines.push(`训练数据：${mlData.data_count||'—'}期  更新：${mlData.updated_at||'—'}`);
+      for(const [tname, mdata] of Object.entries(mlData.models||{})){
+        const lbl = tLabels[tname]||tname;
+        const pred_v = mdata.prediction?.value;
+        const conf   = mdata.prediction?.confidence;
+        const ens    = mdata.accuracy?.ensemble;
+        const top3probs = Object.entries(mdata.prediction?.probs||{})
+          .sort((a,b)=>b[1]-a[1]).slice(0,3)
+          .map(([k,v])=>`${k}(${v}%)`).join('、');
+        lines.push(`  ${lbl}：集成预测→${pred_v??'—'}（置信${conf??'—'}%，回测准确率${ens??'—'}%）  概率TOP3：${top3probs}`);
+      }
+      const rec = mlData.recommendation||{};
+      if(type==='3d' && rec.groups?.length){
+        lines.push(`  ML推荐号码：${rec.groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
+        if(rec.sum_pred) lines.push(`  和值区间预测：${rec.sum_pred}`);
+        if(rec.markov_hint?.length) lines.push(`  马尔可夫转移：${rec.markov_hint.join('；')}`);
+      } else if(type==='ssq' && rec.groups?.length){
+        lines.push(`  ML推荐蓝球：${(rec.blue_recommend||[]).join('、')}  奇偶预测：${rec.odd_pred??'—'}奇  和值：${rec.sum_pred||'—'}`);
+        lines.push(`  ML热号：${(rec.hot_red||[]).slice(0,8).join(' ')}  遗漏关注：${(rec.overdue_red||[]).slice(0,5).join(' ')}`);
+        if(rec.ac_pred) lines.push(`  AC值预测：${rec.ac_pred}  红球主力区预测：${rec.red_zone_dom_pred||'—'}  最大间距预测：${rec.max_gap_pred||'—'}`);
+      } else if(type==='kl8' && rec.plays){
+        lines.push(`  ML区间预测：${rec.zone_dominant_pred||'—'}  总和区间：${rec.total_range_pred||'—'}`);
+        lines.push(`  ML五行主力段：${rec.five_dominant_pred||'—'}  大数个数：${rec.big_count_pred||'—'}  连续号组：${rec.consec_pred||'—'}  极差：${rec.range_pred||'—'}`);
+        lines.push(`  ML热号：${(rec.hot_nums||[]).slice(0,10).join(' ')}  遗漏关注：${(rec.overdue||[]).slice(0,6).join(' ')}`);
+      }
+    }
+
+    // ── 深度学习部分（LSTM+Transformer，每周训练，特征工程与传统ML完全一致）──
+    const lstmTfmGame = pred.dl_result?.lstm_tfm?.results?.[type];
+    if(lstmTfmGame){
+      lines.push(`\n【深度学习（LSTM + Transformer，每周训练，输入特征与传统ML完全一致）】`);
+      lines.push(`更新：${pred.dl_result.lstm_tfm.updated_at||'—'}`);
+      for(const [tname, tm] of Object.entries(lstmTfmGame)){
+        const lbl = tLabels[tname]||tname;
+        lines.push(`  ${lbl}：${tm.lstm_acc!=null?`LSTM准确率${tm.lstm_acc}%  TFM准确率${tm.tfm_acc??'—'}%  `:''}集成预测→${tm.ensemble_pred??'—'}（置信${tm.confidence??'—'}%）`);
+      }
+    }
+
+    // ── 强化学习部分（PPO，每日增量微调，状态融合ML概率+LSTM隐层+遗漏向量）──
+    const rlGame = pred.dl_result?.rl?.results?.[type];
+    if(rlGame){
+      lines.push(`\n【强化学习（PPO Agent，每日增量微调，状态融合传统ML概率+LSTM隐层+Transformer特征+遗漏向量）】`);
+      lines.push(`更新：${pred.dl_result.rl.updated_at||'—'}`);
+      if(type==='3d'){
+        const md = rlGame.match_distribution||{};
+        lines.push(`  奖励函数：按位命中数给分，三位全中（直选）额外奖励`);
+        lines.push(`  回测（近${rlGame.games_tested??'—'}期）：平均命中${rlGame.avg_match_digits??'—'}位，全中率${rlGame.exact_hit_rate_pct??'—'}%`);
+        if(rlGame.ppo_groups?.length) lines.push(`  PPO推荐（${rlGame.ppo_groups.length}注）：${rlGame.ppo_groups.map((g,i)=>`第${i+1}注[${g.join('')}]`).join(' ')}`);
+        else if(rlGame.ppo_pred) lines.push(`  PPO预测组合：${rlGame.ppo_pred.join('')}`);
+      } else if(type==='kl8'){
+        lines.push(`  方法：对全部80个球连续打分排序（非候选池预筛），奖励函数=快乐8真实赔率净收益+连续塑形项`);
+        if(rlGame.backtest_by_play){
+          const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+          const btLines = [4,5,6,9,10].map(n=>{
+            const bt = rlGame.backtest_by_play[n]||rlGame.backtest_by_play[String(n)];
+            return bt ? `${playNames[n]}净${bt.avg_net_per_game}元/期均命中${bt.avg_hit}个` : '';
+          }).filter(Boolean).join('、');
+          lines.push(`  回测（近${rlGame.games_tested??'—'}期，全玩法对比）：${btLines}`);
+          if(rlGame.best_play_n!=null) lines.push(`  回测表现最好的玩法：${playNames[rlGame.best_play_n]}（历史回测仅供参考，不代表未来）`);
+        } else {
+          lines.push(`  回测（近${rlGame.games_tested??'—'}期，选六标准）：平均净收益${rlGame.avg_net_per_game??'—'}元/期`);
+        }
+        if(rlGame.plays){
+          const playNames={xuan4:'选四',xuan5:'选五',xuan5_fu:'选五复式',xuan6:'选六',xuan9:'选九',xuan10:'选十'};
+          for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
+            const play = rlGame.plays[pk];
+            if(play?.groups?.length) lines.push(`  PPO${playNames[pk]}：${play.groups.map(g=>`[${g.join(' ')}]`).join(' ')}`);
+          }
+        } else {
+          const pbn = rlGame.picks_by_n;
+          if(pbn){
+            for(const n of [4,5,6,9,10]){
+              const nums = pbn[n]||pbn[String(n)];
+              if(nums?.length) lines.push(`  PPO选${['','','','','四','五','六','','','九','十'][n]}推荐：${nums.join(' ')}`);
+            }
+          }
+        }
+      } else if(type==='ssq'){
+        let ssqRlCtx = rlGame;
+        const ctxHasFullData = rlGame.ppo_groups?.length || rlGame.ppo_red_selected?.length;
+        if(!ctxHasFullData && rlGame.skipped){
+          try{
+            const cached = localStorage.getItem('fucaiSsqRlFullCache');
+            if(cached) ssqRlCtx = { ...JSON.parse(cached), skipped: true };
+          } catch(e){}
+        }
+        if(ssqRlCtx.skipped) lines.push(`  ⏸️ 今日非开奖日，未重新训练，以下为${ssqRlCtx!==rlGame?'本机缓存的':''}上次训练结果`);
+        lines.push(`  方法：红球33全量打分排序（Top6）+ 蓝球打分，联合优化，奖励按双色球真实奖级结构分级`);
+        lines.push(`  回测（近${ssqRlCtx.games_tested??'—'}期）：红球平均命中${ssqRlCtx.avg_red_hit??'—'}个  蓝球准确率${ssqRlCtx.blue_acc_pct??'—'}%（随机基准6.25%）`);
+        if(ssqRlCtx.ppo_groups?.length) lines.push(`  PPO推荐（${ssqRlCtx.ppo_groups.length}注）：${ssqRlCtx.ppo_groups.map((g,i)=>{
+          const bs = g.blues?.length ? g.blues : (g.blue!=null?[g.blue]:[]);
+          return `第${i+1}注[${(g.red||[]).join(' ')}]+蓝${bs.join('/')}`;
+        }).join(' ')}`);
+        else {
+          if(ssqRlCtx.ppo_red_selected?.length) lines.push(`  PPO推荐红球：${ssqRlCtx.ppo_red_selected.join(' ')}`);
+          if(ssqRlCtx.ppo_blue_pred!=null) lines.push(`  PPO推荐蓝球：${ssqRlCtx.ppo_blue_pred}`);
+        }
+      }
+      if(rlGame.note) lines.push(`  备注：${rlGame.note}`);
+    }
+
+    if(!lstmTfmGame && !rlGame){
+      lines.push(`\n【深度学习/强化学习】暂无数据（LSTM每周、RL每日更新，需先运行 kaggle_lstm_tfm.py 和 kaggle_rl_daily.py）`);
+    }
+
+    return lines.join('\n');
+  } catch(e){
+    console.warn('getMlContext错误:', e);
+    return '';
+  }
+}
+
+// 把AI返回的纯文本渲染成带格式的HTML
+/* 把 Gateway/OpenRouter 的 HTTP 错误翻译成能看懂的原因，
+   免费模型最常见的两种失败是"当天额度用完"和"模型被下架"，
+   笼统报个状态码没法判断该等一等还是该换模型。 */
+function explainGwError(status, body){
+  const b = (body || '').toLowerCase();
+  if(status === 429){
+    return '请求过于频繁或今日额度已用完。OpenRouter 免费额度为每分钟20次、'
+         + '每天50次（终身充值满$10后升到1000次/天）。等几分钟再试，或明天再用。';
+  }
+  if(status === 404 || b.includes('not found') || b.includes('no endpoints')){
+    return '模型不存在或已被下架。OpenRouter 的免费模型名单经常无预警轮换，'
+         + '建议把模型填成 openrouter/free 让它自动路由到当前可用的免费模型。';
+  }
+  if(status === 402 || b.includes('insufficient') || b.includes('credit')){
+    return '账户额度不足。若余额为负，连免费模型也会被拒绝，需要充值使余额回正。';
+  }
+  if(status === 401 || status === 403){
+    return '密钥无效或没有权限，请检查 Gateway Secret 是否填对、是否已过期。';
+  }
+  if(status >= 500){
+    return '上游服务暂时不可用（免费模型在高峰期容易超时或排队），稍后重试即可。';
+  }
+  return (body || '').slice(0, 150);
+}
+
+function renderAIText(text){
+  return text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong style="color:#f1d688;">$1</strong>')
+    .replace(/^(\d+)\.\s+/gm,'<span style="color:#f1d688;font-weight:700;">$1.</span> ')
+    .replace(/^#{1,3}\s+(.+)$/gm,'<div style="color:#f1d688;font-weight:700;margin:10px 0 4px;">$1</div>')
+    .replace(/\n/g,'<br>');
+}
+
+async function generateAIReading(){
+  const btn = document.getElementById('aiReadBtn');
+  const statusEl = document.getElementById('aiStatus');
+
+  const gwUrl    = document.getElementById('gwUrlInput').value.trim();
+  const gwSecret = document.getElementById('gwSecretInput').value.trim();
+  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'openrouter/free';
+
+  if(!gwUrl){
+    statusEl.className='status err';
+    statusEl.textContent='请先填入 API 地址（直连 OpenRouter 填 https://openrouter.ai/api）';
+    return;
+  }
+  if(!gwSecret){
+    statusEl.className='status err';
+    statusEl.textContent='请先填入 API Key（到 openrouter.ai/keys 免费获取）';
+    return;
+  }
+  if(!window._trendRecords || window._trendRecords.length===0){
+    statusEl.className='status err';
+    statusEl.textContent='请先点「加载走势图」获取数据';
+    return;
+  }
+
+  btn.disabled=true; btn.textContent='AI 分析中…';
+  statusEl.className='status'; statusEl.textContent='正在请求 AI，请稍候…';
+  document.getElementById('aiResult').style.display='none';
+
+  try{
+    saveGwConfig();
+
+    const mlContext = getMlContext(window._trendType);
+    const {system, user} = buildPrompt(window._trendType, window._trendRecords, mlContext);
+    const messages = [
+      {role:'system', content: system},
+      {role:'user',   content: user},
+    ];
+
+    // 与你的 AI Gateway 完全一致的调用方式
+    const endpoint = gwUrl.replace(/\/$/, '') + '/v1/chat/completions';
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + gwSecret,
+        // OpenRouter 建议带上来源标识，便于在其后台区分调用来源；
+        // 自建 Gateway 会忽略这两个头，不影响兼容性
+        'HTTP-Referer':  location.origin || 'https://github.io',
+        'X-Title':       'Fucai Analyzer',
+      },
+      body: JSON.stringify({
+        model:       gwModel,
+        messages:    messages,
+        max_tokens:  1500,
+        temperature: 0.7,
+      }),
+    });
+
+    if(!resp.ok){
+      const err = await resp.text().catch(()=>'');
+      throw new Error(`HTTP ${resp.status} — ${explainGwError(resp.status, err)}`);
+    }
+    const data = await resp.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    if(!text) throw new Error('AI 返回内容为空');
+
+    const usedModel    = data.model    || gwModel;
+    const usedProvider = data.provider || '';
+
+    // 渲染结果
+    const gameLabel = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'}[window._trendType] || '';
+    const latest = window._trendRecords[window._trendRecords.length-1];
+    const titleText = `${gameLabel} · AI专家今日解读`;
+    const dateText  = `基于 ${latest.date} 最新数据 · ${usedProvider ? usedProvider+' · ' : ''}${usedModel}`;
+    const contentHtml = renderAIText(text);
+    const savedAt = new Date().toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+
+    document.getElementById('aiResultTitle').textContent   = titleText;
+    document.getElementById('aiResultDate').textContent    = dateText;
+    document.getElementById('aiResultContent').innerHTML   = contentHtml;
+    document.getElementById('aiResult').style.display = 'block';
+
+    // 保存到缓存（按彩种独立存储）
+    aiCache[window._trendType] = {
+      title: titleText, date: dateText,
+      content: contentHtml, gameLabel, savedAt,
+    };
+    saveAiCache();
+
+    statusEl.className='status ok';
+    statusEl.textContent='✓ 解读已生成并保存，切换彩种再切回时会自动恢复';
+  } catch(e){
+    statusEl.className='status err';
+    statusEl.textContent='生成失败：'+e.message;
+  } finally{
+    btn.disabled=false; btn.textContent='✨ 生成今日专家解读';
+  }
+}
+
+function formatDate(str){
+  if(!str) return '';
+  const parts = str.split('-');
+  if(parts.length !== 3) return str;
+  return `${parts[0]}年${parts[1]}月${parts[2]}日`;
+}
+
+/* ---------------- PILL SELECTORS ---------------- */
+function setupPills(rowId, attr, onPick){
+  const row = document.getElementById(rowId);
+  row.querySelectorAll('.pill').forEach(p=>{
+    p.addEventListener('click', ()=>{
+      row.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
+      p.classList.add('active');
+      onPick(p.dataset[attr]);
+    });
+  });
+}
+
+setupPills('typeRow','type', v=>{ state.type=v; renderPoster(); });
+setupPills('styleRow','style', v=>{ state.style=v; renderPoster(); });
+setupPills('comboRow','combo', v=>{
+  state.posterMode = v;
+  document.getElementById('typePanel').style.display = v==='combo' ? 'none' : 'block';
+  renderPoster();
+});
+
+// default active states
+document.querySelector('[data-type="ssq"]').classList.add('active');
+document.querySelector('[data-style="fest"]').classList.add('active');
+document.querySelector('[data-combo="single"]').classList.add('active');
+
+/* ---------------- QR CODE ---------------- */
+document.getElementById('qrFileInput').addEventListener('change', e=>{
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ev=>{
+    state.qr.image = ev.target.result;
+    state.qr.show = true;
+    renderPoster();
+  };
+  reader.readAsDataURL(file);
+});
+document.getElementById('qrCaptionInput').addEventListener('input', e=>{
+  state.qr.caption = e.target.value;
+  renderPoster();
+});
+
+/* ---------------- AI AUTO-FETCH ---------------- */
+const schemas = {
+  ssq: '{"qihao":"期号字符串","date":"YYYY-MM-DD","red":[6个1-33的整数,从小到大排列],"blue":1个1-16的整数}',
+  '3d': '{"qihao":"期号字符串","date":"YYYY-MM-DD","digits":[3个0-9的整数,按百十个位顺序]}',
+  qlc: '{"qihao":"期号字符串","date":"YYYY-MM-DD","numbers":[7个1-30的整数,从小到大排列],"special":1个1-30的整数}',
+  kl8: '{"qihao":"期号字符串","date":"YYYY-MM-DD","numbers":[20个1-80的整数,从小到大排列]}'
+};
+
+document.getElementById('fetchBtn').addEventListener('click', fetchLatestDraw);
+
+const cwlNames = { ssq:'ssq', '3d':'3d', qlc:'qlc', kl8:'kl8' };
+const cwlApiBase = 'https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice';
+
+// ── 方式一：读 GitHub raw JSON（每天22:00自动更新，无CORS问题）──
+// 用户需在设置里填自己的GitHub用户名和仓库名，格式: "username/reponame"
+function getGithubUrl(){
+  const repo = (localStorage.getItem('fucaiGithubRepo') || '').trim();
+  if(!repo) return null;
+  return `https://raw.githubusercontent.com/${repo}/main/latest.json`;
+}
+
+async function tryGithub(){
+  const url = getGithubUrl();
+  if(!url) throw new Error('未配置GitHub仓库');
+  const resp = await fetch(url + '?t=' + Date.now(), { signal: AbortSignal.timeout(8000) });
+  if(!resp.ok) throw new Error('GitHub HTTP ' + resp.status);
+  const json = await resp.json();
+  if(!json.ssq && !json['3d'] && !json.qlc && !json.kl8) throw new Error('JSON格式不对');
+  return json; // 直接返回整个对象，包含所有4种彩票
+}
+
+// ── 方式二：官方API直连 ──
+function parseCwlResult(game, item){
+  const obj = { qihao: String(item.code), date: (item.date||'').slice(0,10) };
+  if(game === 'ssq'){
+    obj.red = (item.red||'').split(',').map(Number);
+    obj.blue = Number(item.blue);
+  } else if(game === '3d'){
+    obj.digits = (item.red||'').split(',').map(Number).slice(0,3);
+  } else if(game === 'qlc'){
+    const parts = (item.red||'').split(',').map(Number);
+    obj.numbers = parts.slice(0,7);
+    obj.special = Number(item.blue || 0);
+  } else if(game === 'kl8'){
+    obj.numbers = (item.red||'').split(',').map(Number);
+  }
+  return obj;
+}
+
+async function tryDirectOne(game){
+  const url = `${cwlApiBase}?name=${cwlNames[game]}&issueCount=1&pageNo=1&pageSize=1&systemType=PC`;
+  const resp = await fetch(url, { headers:{ 'Referer':'https://www.cwl.gov.cn/' }, signal: AbortSignal.timeout(6000) });
+  if(!resp.ok) throw new Error('HTTP ' + resp.status);
+  const json = await resp.json();
+  const item = json.result?.[0];
+  if(!item) throw new Error('无数据');
+  return parseCwlResult(game, item);
+}
+
+// ── 方式三：Claude API中转（需Key）──
+async function tryClaude(game, apiKey){
+  const schemas_map = schemas; // 已在上方定义
+  const url = `${cwlApiBase}?name=${cwlNames[game]}&issueCount=1&pageNo=1&pageSize=1&systemType=PC`;
+  const prompt = `用web_search工具搜索"福彩${gameNames[game]}最新开奖"或直接访问 ${url}，获取最新一期开奖结果。
+只返回JSON，不加任何说明或代码块标记：${schemas_map[game]}`;
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'x-api-key':apiKey, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
+    body: JSON.stringify({ model:'claude-sonnet-4-6', max_tokens:500, messages:[{role:'user',content:prompt}], tools:[{type:'web_search_20250305',name:'web_search'}] })
+  });
+  if(!resp.ok) throw new Error('Claude API ' + resp.status);
+  const data = await resp.json();
+  const text = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  const match = text.replace(/```json|```/g,'').match(/\{[\s\S]*?\}/);
+  if(!match) throw new Error('无法解析');
+  const parsed = JSON.parse(match[0]);
+  if(!parsed.qihao) throw new Error('期号缺失');
+  return parsed;
+}
+
+async function fetchLatestDraw(){
+  const btn = document.getElementById('fetchBtn');
+  const statusEl = document.getElementById('fetchStatus');
+  const keyInput = document.getElementById('apiKeyInput');
+  state.apiKey = (keyInput.value||'').trim();
+
+  btn.disabled = true;
+
+  // ── 尝试方式一：GitHub JSON（一次拿全部4种）──
+  try{
+    statusEl.className = 'status';
+    statusEl.textContent = '正在读取 GitHub 自动更新的开奖数据…';
+    const allData = await tryGithub();
+    gameOrder.forEach(g=>{ if(allData[g]) applyFetchedData(allData[g], g); });
+    saveMemory();
+    renderForm();
+    renderPoster();
+    const upd = allData.updated_at || '未知时间';
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ 成功！数据来自 GitHub 自动抓取（更新于 ${upd}）。请核对号码后下载海报。`;
+    btn.disabled = false;
+    return;
+  } catch(e1){
+    statusEl.textContent = `GitHub 读取失败（${e1.message}），改用逐项直连官方接口…`;
+  }
+
+  // ── 尝试方式二：直连官方API逐项获取 ──
+  const results = {}, failed = [];
+  for(const game of gameOrder){
+    try{
+      statusEl.textContent = `直连官方接口获取 ${gameNames[game]}…`;
+      results[game] = await tryDirectOne(game);
+    } catch(e2){
+      // 方式三：Claude中转
+      if(state.apiKey){
+        try{
+          statusEl.textContent = `直连失败，Claude中转获取 ${gameNames[game]}…`;
+          results[game] = await tryClaude(game, state.apiKey);
+        } catch(e3){
+          failed.push(`${gameNames[game]}`);
+        }
+      } else {
+        failed.push(`${gameNames[game]}`);
+      }
+    }
+  }
+
+  const ok = Object.keys(results).length;
+  if(ok > 0){
+    Object.entries(results).forEach(([g,d])=> applyFetchedData(d,g));
+    saveMemory(); renderForm(); renderPoster();
+    if(failed.length === 0){
+      statusEl.className = 'status ok';
+      statusEl.textContent = `✓ 全部获取成功！建议配置 GitHub 仓库实现每日自动更新。`;
+    } else {
+      statusEl.className = 'status';
+      statusEl.textContent = `获取 ${ok}/4 成功。失败：${failed.join('、')}（请手动填写，或配置GitHub仓库后重试）。`;
+    }
+  } else {
+    statusEl.className = 'status err';
+    statusEl.textContent = `全部方式均失败。请配置下方 GitHub 仓库后重试，或手动填写号码。`;
+  }
+  btn.disabled = false;
+}
+
+function applyFetchedData(parsed, game){
+  const d = state.data[game];
+  if(parsed.qihao) d.qihao = String(parsed.qihao);
+  if(parsed.date) d.date = String(parsed.date);
+  if(game === 'ssq'){
+    if(Array.isArray(parsed.red) && parsed.red.length===6) d.red = parsed.red.map(Number);
+    if(parsed.blue !== undefined) d.blue = Number(parsed.blue);
+  } else if(game === '3d'){
+    if(Array.isArray(parsed.digits) && parsed.digits.length===3) d.digits = parsed.digits.map(Number);
+  } else if(game === 'qlc'){
+    if(Array.isArray(parsed.numbers) && parsed.numbers.length===7) d.numbers = parsed.numbers.map(Number);
+    if(parsed.special !== undefined) d.special = Number(parsed.special);
+  } else if(game === 'kl8'){
+    if(Array.isArray(parsed.numbers) && parsed.numbers.length===20) d.numbers = parsed.numbers.map(Number);
+  }
+}
+
+/* ---------------- DOWNLOAD ---------------- */
+document.getElementById('downloadBtn').addEventListener('click', async ()=>{
+  const statusEl = document.getElementById('downloadStatus');
+  statusEl.textContent = '正在生成图片…';
+
+  const posterH = getPosterHeight();
+  const label = state.posterMode === 'combo' ? '四合一综合' : gameNames[state.type];
+  const qihaoLabel = state.posterMode === 'combo' ? state.data.ssq.qihao : state.data[state.type].qihao;
+
+  // 在屏幕外新建一个全尺寸poster，避免克隆已缩放元素导致宽高为0的问题
+  const wrap = document.createElement('div');
+  wrap.style.cssText = `position:fixed;left:-9999px;top:0;width:800px;height:${posterH}px;overflow:hidden;`;
+  // 把当前posterEl的内容复制进去（不克隆元素本身，只复制innerHTML）
+  const src = document.getElementById('posterEl');
+  wrap.className = src.className; // 继承风格class
+  wrap.style.width = '800px';
+  wrap.style.height = posterH + 'px';
+  wrap.style.position = 'fixed';
+  wrap.style.left = '-9999px';
+  wrap.style.top = '0';
+  wrap.style.transform = 'none';
+  wrap.style.transformOrigin = 'top left';
+  wrap.style.overflow = 'hidden';
+  wrap.innerHTML = src.innerHTML;
+  document.body.appendChild(wrap);
+
+  // 等一帧让浏览器渲染完成
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  try{
+    const canvas = await html2canvas(wrap, {
+      backgroundColor: null,
+      scale: 2,
+      width: 800,
+      height: posterH,
+      useCORS: true,
+      allowTaint: true,
+    });
+    const link = document.createElement('a');
+    link.download = `福彩开奖海报_${label}_${qihaoLabel}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    statusEl.textContent = '海报已下载。';
+  } catch(err){
+    statusEl.textContent = '生成图片失败：' + err.message;
+  } finally {
+    document.body.removeChild(wrap);
+  }
+});
+
+/* init */
+// 读取已保存的GitHub仓库地址
+try{
+  const savedRepo = localStorage.getItem('fucaiGithubRepo') || '';
+  if(savedRepo) document.getElementById('githubRepoInput').value = savedRepo;
+} catch(e){}
+
+// 保存仓库地址按钮
+document.getElementById('saveRepoBtn').addEventListener('click', ()=>{
+  const val = document.getElementById('githubRepoInput').value.trim();
+  try{
+    if(val){
+      localStorage.setItem('fucaiGithubRepo', val);
+      document.getElementById('fetchStatus').className = 'status ok';
+      document.getElementById('fetchStatus').textContent = `✓ 已保存仓库地址：${val}。下次点「获取」将优先从此处读取数据。`;
+    } else {
+      localStorage.removeItem('fucaiGithubRepo');
+      document.getElementById('fetchStatus').textContent = '已清除仓库地址。';
+    }
+  } catch(e){
+    document.getElementById('fetchStatus').className = 'status err';
+    document.getElementById('fetchStatus').textContent = '保存失败（浏览器不支持本地存储）。';
+  }
+});
+
+loadMemoryAndAdvance();
+renderForm();
+renderPoster();
+
+document.getElementById('openOfficialBtn').addEventListener('click', ()=>{
+  window.open('https://www.cwl.gov.cn/', '_blank', 'noopener');
+});
+
+/* ═══════════════════════════════════════════════════
+   主 Tab 切换
+═══════════════════════════════════════════════════ */
+document.querySelectorAll('.mainTab').forEach(tab=>{
+  tab.addEventListener('click', ()=>{
+    document.querySelectorAll('.mainTab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.tabContent').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    const which = tab.dataset.tab;
+    document.getElementById('tab'+which.charAt(0).toUpperCase()+which.slice(1)).classList.add('active');
+    const stage=document.getElementById('stage');
+    const trendWrap=document.getElementById('trendWrap');
+    const credit=document.getElementById('previewCredit');
+
+    if(which==='trend'){
+      stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
+    } else if(which==='predict' || which==='chat' || which==='scan'){
+      stage.style.display='none'; trendWrap.style.display='none'; credit.style.display='none';
+      if(which==='chat'){
+        const hint = document.getElementById('chatGwHint');
+        const gwUrl = document.getElementById('gwUrlInput').value.trim();
+        const gwSecret = document.getElementById('gwSecretInput').value.trim();
+        if(gwUrl && gwSecret){
+          hint.className = 'status ok';
+          hint.textContent = '✓ 已复用走势图页签的 API 配置，可以直接开始对话。';
+        } else {
+          hint.className = 'status err';
+          hint.textContent = '⚠️ 尚未配置 API，请先到「走势图」页签填写 OpenRouter 地址和 API Key 并保存。';
+        }
+      }
+      if(which==='scan' && typeof loadScanFromGithub==='function') loadScanFromGithub();
+    } else {
+      stage.style.display=''; trendWrap.style.display='none'; credit.style.display='';
+      renderPoster();
+    }
+  });
+});
+
+/* ═══════════════════════════════════════════════════
+   ML 预测报告
+═══════════════════════════════════════════════════ */
+document.getElementById('loadPredictBtn').addEventListener('click', loadPrediction);
+
+/* ═══ 球区下载为图片（自动附带默认二维码）═══ */
+async function downloadBallImage(nodes, title, btn){
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.textContent='生成中…'; btn.disabled=true; }
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:fixed;left:-9999px;top:0;width:520px;background:#fff;padding:16px;box-sizing:border-box;color:#222;font-family:inherit;';
+  const head = document.createElement('div');
+  head.style.cssText='font-size:15px;font-weight:700;margin-bottom:8px;color:#1a1a2e;';
+  head.textContent = title;
+  wrap.appendChild(head);
+  nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
+    if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
+    wrap.appendChild(c); });
+  const qrImg = (state.qr && state.qr.image) || '';
+  if(qrImg){
+    const q = document.createElement('div');
+    q.style.cssText='text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
+    q.innerHTML = `<img src="${qrImg}" style="width:140px;height:140px;display:inline-block;">`
+      + (state.qr.caption ? `<div style="font-size:12px;color:#666;margin-top:4px;">${state.qr.caption.replace(/</g,'&lt;')}</div>` : '');
+    wrap.appendChild(q);
+  }
+  document.body.appendChild(wrap);
+  await Promise.all([...wrap.querySelectorAll('img')].map(im=> im.complete ? 0 : new Promise(r=>{im.onload=im.onerror=r;})));
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  try{
+    const canvas = await html2canvas(wrap,{backgroundColor:'#ffffff',scale:2,useCORS:true,allowTaint:true});
+    const a = document.createElement('a');
+    a.download = `${title.replace(/[\\\/:*?"<>|\s]+/g,'_')}_${new Date().toISOString().slice(0,10)}.png`;
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+  }catch(e){ alert('生成图片失败：'+e.message); }
+  finally{ document.body.removeChild(wrap); if(btn){ btn.textContent=old; btn.disabled=false; } }
+}
+function attachBlockDownloads(){
+  document.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
+  const gameOf = el=>{
+    const top = el.closest('#dlResultContent > div');
+    if(top){ const t=(top.firstElementChild&&top.firstElementChild.textContent||''); const m=t.match(/福彩3D|双色球|快乐8/); if(m) return m[0]; }
+    const pn = el.closest('.panel'); const h = pn && pn.querySelector('h2');
+    const m = h && h.textContent.match(/福彩3D|双色球|快乐8/); return m?m[0]:'';
+  };
+  const sel='.ball-unit, .ball-flex, .ball-line, .rec-group';
+  const done = new Set();
+  document.querySelectorAll('#predictContent '+sel.split(', ').join(', #predictContent ')).forEach(el=>{
+    if(done.has(el) || (!el.classList.contains('ball-flex') && el.closest('.ball-flex')) || (!el.classList.contains('ball-unit') && el.closest('.ball-unit'))) return;
+    const parent = el.parentElement;
+    // 同一父节点下连续的球行合为一个导出单元
+    const kids=[...parent.children]; let k=kids.indexOf(el);
+    const group=[];
+    while(k<kids.length && kids[k].matches(sel)){ group.push(kids[k]); done.add(kids[k]); k++; }
+    const prev = el.previousElementSibling;
+    let nodes = (prev && prev.classList.contains('ball-label')) ? [prev,...group] : group;
+    const pp = nodes[0].previousElementSibling;
+    if(pp && pp.classList.contains('ball-cand')) nodes = [pp,...nodes];
+    const g = gameOf(el);
+    const title = `${g} 推荐号码`.trim();
+    const b=document.createElement('button');
+    b.className='blk-dl-btn';
+    b.textContent='🖼 下载图片';
+    b.style.cssText='float:right;font-size:11px;padding:3px 8px;margin:0 0 4px 6px;border:1px solid #bbb;border-radius:6px;background:#fff;color:#444;cursor:pointer;';
+    b.addEventListener('click',e=>{e.stopPropagation();downloadBallImage(nodes,title,b);});
+    parent.insertBefore(b, nodes[0]);
+  });
+}
+
+async function loadPrediction(){
+  const statusEl=document.getElementById('predictStatus');
+  const btn=document.getElementById('loadPredictBtn');
+  const repo=(localStorage.getItem('fucaiGithubRepo')||'').trim();
+  if(!repo){
+    statusEl.className='status err';
+    statusEl.textContent='请先在「海报生成」→「数据来源」里填写并保存 GitHub 仓库地址';
+    return;
+  }
+  btn.disabled=true; statusEl.className='status'; statusEl.textContent='正在并行加载三份预测文件…';
+
+  // 失败时记录【真实原因】，不再一律吞成 null：原来网络不通、404、JSON格式坏了
+  // 全都表现为"加载失败，先去触发 kaggle_fucai.py"，会把人引到错误的方向上。
+  const fetchErrs = {};
+  const fetchJson = async (name) => {
+    const url = `https://raw.githubusercontent.com/${repo}/main/${name}?t=${Date.now()}`;
+    try{
+      const resp = await fetch(url);
+      if(!resp.ok){ fetchErrs[name] = `HTTP ${resp.status}`; return null; }
+      const txt = await resp.text();
+      try{ return JSON.parse(txt); }
+      catch(pe){ fetchErrs[name] = `文件内容不是合法JSON（${String(pe.message).slice(0,50)}）`; return null; }
+    } catch(e){
+      fetchErrs[name] = `网络请求失败（${String(e && e.message || e).slice(0,40)}；可能是当前网络访问不了 raw.githubusercontent.com）`;
+      return null;
+    }
+  };
+
+  try{
+    // 三个文件互相独立，并行拉取，任意一个缺失不影响其它部分展示
+    const [mlData, lstmData, rlData] = await Promise.all([
+      fetchJson('prediction.json'),
+      fetchJson('dl_lstm_tfm.json'),
+      fetchJson('dl_rl.json'),
+    ]);
+
+    if(!mlData){
+      throw new Error('prediction.json 加载失败：' + (fetchErrs['prediction.json'] || '未知原因'));
+    }
+
+    // 拼装成原有渲染函数期望的结构，保持renderBacktest/renderGamePredict/renderDLResult不用改
+    const combined = {
+      ...mlData,
+      dl_result: (lstmData || rlData) ? {
+        lstm_tfm: lstmData || null,
+        rl: rlData || null,
+      } : null,
+    };
+    window._lastPrediction = combined;
+
+    // 每一块单独 try/catch：某一块渲染出错(比如数据结构变了)只影响它自己，
+    // 其余部分照常显示，并且把出错的是哪一块、报了什么错写在状态栏里，方便定位。
+    const renderErrs = [];
+    const safe = (label, fn) => { try{ fn(); } catch(e){ renderErrs.push(`${label}：${e.message}`); console.error('渲染失败', label, e); } };
+    safe('回测',  () => renderBacktest(combined.backtest||{}));
+    safe('3D',    () => renderGamePredict('3d',  combined.predictions?.['3d']));
+    safe('双色球', () => renderGamePredict('ssq', combined.predictions?.ssq));
+    safe('快乐8',  () => renderGamePredict('kl8', combined.predictions?.kl8));
+    safe('DL/RL', () => { if(combined.dl_result) renderDLResult(combined.dl_result); });
+
+    document.getElementById('predictContent').style.display='block';
+    try{ attachBlockDownloads(); }catch(e){ console.error('下载按钮', e); }
+
+    const parts = [`基础ML更新于 ${mlData.updated_at||'未知'}`];
+    if(lstmData) parts.push(`LSTM/TFM更新于 ${lstmData.updated_at||'未知'}`);
+    else parts.push(`LSTM/TFM读取失败：${fetchErrs['dl_lstm_tfm.json']||'文件不存在'}`);
+    if(rlData)   parts.push(`RL更新于 ${rlData.updated_at||'未知'}`);
+    else parts.push(`RL读取失败：${fetchErrs['dl_rl.json']||'文件不存在'}`);
+    if(renderErrs.length){
+      statusEl.className='status err';
+      statusEl.textContent=`⚠ 数据已读取，但部分内容渲染失败 — ${renderErrs.join('；')}（${parts.join(' · ')}）`;
+    } else {
+      statusEl.className='status ok';
+      statusEl.textContent=`✓ 加载成功（${parts.join(' · ')}）`;
+    }
+  } catch(e){
+    statusEl.className='status err'; statusEl.textContent='加载失败：'+e.message;
+  }
+  btn.disabled=false;
+}
+
+function renderBacktest(bt){
+  const el=document.getElementById('backtestContent');
+  if(!bt||!bt.games||Object.keys(bt.games).length===0){
+    el.innerHTML='<div class="status">暂无回测数据（首次运行时无上期预测可对比）</div>'; return;
+  }
+  let html=`<div style="font-size:12px;color:#888;margin-bottom:10px;">脚本运行时间：${bt.date||'未知'}</div>`;
+  const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+  for(const [game,info] of Object.entries(bt.games)){
+    html+=`<div class="pred-model-card"><div class="pred-model-title">${gNames[game]||game} 回测</div>`;
+    // 显式标出：这份被检验的推荐是什么时候生成的、实际对比的是哪一期开奖，
+    // 让预测和开奖的时间对应关系可以被肉眼核实，不再靠猜
+    html+=`<div style="font-size:11px;color:#888;margin-bottom:6px;padding:6px 8px;background:rgba(255,255,255,.05);border-radius:6px;">
+      📋 被检验的推荐生成于：<b style="color:#f1d688;">${info.prediction_generated_at||'未知'}</b><br>
+      🎯 实际对比的开奖期号：<b style="color:#f1d688;">${info.actual_qihao||'—'}</b>（${info.actual_date||'—'}）
+    </div>`;
+    if(game==='3d'){
+      html+=`<div>实际开奖：<b>${(info.actual||[]).join(' ')}</b></div>`;
+      html+=`<div>完全命中：<span class="${info.hit_count>0?'bt-hit':'bt-miss'}">${info.hit_count||0}注</span>`;
+      html+=` 部分命中(≥2位)：<span class="${info.partial_count>0?'bt-hit':'bt-miss'}">${info.partial_count||0}注</span></div>`;
+    } else if(game==='ssq'){
+      html+=`<div>实际红球：<b>${(info.actual_red||[]).join(', ')}</b> 蓝球：<b>${info.actual_blue||'—'}</b></div>`;
+      html+=`<div>最佳命中红球：<span class="${(info.best_red_hit||0)>=3?'bt-hit':'bt-miss'}">${info.best_red_hit||0}个</span></div>`;
+      if(info.group_results){
+        html+='<div class="bt-row">';
+        info.group_results.forEach((g,i)=>{ html+=`<span class="bt-tag ${g.red_hit>=3?'hit':'miss'}">第${i+1}注 红${g.red_hit}蓝${g.blue_hit}</span>`; });
+        html+='</div>';
+      }
+    } else if(game==='kl8'){
+      html+=`<div>最佳命中：<span class="${(info.best_hit||0)>=9?'bt-hit':'bt-miss'}">${info.best_hit||0}球</span></div>`;
+      const pr=info.play_results||{};
+      ['xuan4','xuan5','xuan5_fu','xuan6','xuan6_ppo','xuan6_dl','xuan9','xuan10'].forEach(pk=>{
+        const p=pr[pk]; if(!p) return;
+        html+=`<div style="margin-bottom:4px;font-size:11px;font-weight:700;">${p.name}：`;
+        html+='<span class="bt-row" style="display:inline-flex;">';
+        (p.groups||[]).forEach((g,i)=>{ html+=`<span class="bt-tag ${g.won?'hit':'miss'}">${p.name.includes('复式')?'复式':('第'+(i+1)+'注')} 中${g.hit}/${g.balls}${g.won?' ✓':''}</span>`; });
+        html+='</span></div>';
+      });
+    }
+    html+='</div>';
+  }
+  el.innerHTML=html;
+}
+
+function factorial(n){ let r=1; for(let i=2;i<=n;i++) r*=i; return r; }
+
+/* 3D采样注的频率统计卡片：显示在"推荐/采样"两栏下方，数据来自RL脚本返回的 sampled_stats。
+   每个统计项做成不可拆分的小块(nowrap)：一行放不下时整块换到下一行，不会把"3-7×4"从中间断开。 */
+function renderD3SampleStats(st, shownCount){
+  if(!st || !st.n) return '';
+  const cnt = v => `<span style="color:#2dd4bf;font-weight:600;">×${v}</span>`;
+  const chip = (k, v, dim) => `<span style="display:inline-block;white-space:nowrap;margin:0 7px 0 0;${dim?'opacity:.35;':''}">${k}${cnt(v)}</span>`;
+  const row = (label, inner) => `<div style="display:flex;gap:6px;margin:2px 0;align-items:baseline;"><div style="flex:0 0 42px;color:#888;font-size:10px;white-space:nowrap;">${label}</div><div style="flex:1;min-width:0;line-height:1.5;">${inner}</div></div>`;
+  const note = t => `<span style="color:#666;font-size:9px;white-space:nowrap;">${t}</span>`;
+  const g = st.group || {}, bs = st.bigsmall || {}, oe = st.oddeven || {};
+  const pairs = (st.pair_top||[]).length
+    ? st.pair_top.map(p=>chip(p[0],p[1],false)).join('') + note('仅列出现≥2次')
+    : note('无（各对均只出现1次）');
+  // 位置共现："十位4-个位8"专指这两个位置分别是4和8，跟上面不认位置的数字对不是一回事。
+  // 每条强信号(≥2次)附带钻取：把其中一半条件单独拎出来，在全部采样注里找出所有符合的注，
+  // 方便看这个信号周边有没有其它注互相印证。整条(标签+两行钻取)用一个块包住不拆开。
+  const betStr = b => b.join('');
+  const posPoolNote = note(`(信号强度只看采样注，钻取时连推荐注一起验证共${st.n_pos_pool||st.n}注)`);
+  const posPairs = (st.pos_pair_top||[]).length
+    ? posPoolNote + '<br>' + st.pos_pair_top.map(p=>`<div style="display:inline-block;vertical-align:top;background:#15152a;border-radius:5px;padding:3px 6px;margin:2px 6px 2px 0;">`
+        + `<div>${p.label}${cnt(p.count)}</div>`
+        + `<div style="color:#888;font-size:9px;margin-top:1px;">${p.pos_a}=${p.val_a}: ${p.related_a.map(betStr).join(' ')}</div>`
+        + `<div style="color:#888;font-size:9px;">${p.pos_b}=${p.val_b}: ${p.related_b.map(betStr).join(' ')}</div>`
+        + `</div>`).join('')
+    : posPoolNote + '<br>' + note('无（各组合均只出现1次）');
+  let h = `<div style="font-size:11px;color:#666;margin:6px 0 3px;">采样统计（共${st.n}注${st.n>shownCount?`，上方仅展示前${shownCount}注`:''}）：</div>`;
+  h += `<div style="background:#1a1a2e;border-radius:6px;padding:3px 8px;color:#ccc;font-size:10px;">`;
+  h += row('号码次数', (st.digit_count||[]).map((c,d)=>chip(d,c,c===0)).join(''));
+  h += row('两号共现', pairs);
+  h += row('位置共现', posPairs);
+  h += row('和值', (st.sum_count||[]).map(p=>chip(p[0],p[1],false)).join(''));
+  h += row('跨度', (st.span_count||[]).map(p=>chip(p[0],p[1],false)).join(''));
+  h += row('组选', chip('组六',g.zu6||0,!g.zu6) + chip('组三',g.zu3||0,!g.zu3) + (g.baozi?chip('豹子',g.baozi,false):''));
+  h += row('大小比', (bs.ratio||[]).map(p=>chip(p[0],p[1],p[1]===0)).join('') + note(`号码共 大${bs.big_digits||0} 小${bs.small_digits||0}`));
+  h += row('奇偶比', (oe.ratio||[]).map(p=>chip(p[0],p[1],p[1]===0)).join('') + note(`号码共 奇${oe.odd_digits||0} 偶${oe.even_digits||0}`));
+  h += `</div>`;
+  return h;
+}
+
+/* 快乐8/双色球 采样统计卡片（数据来自RL脚本 sampled_stats）。样式与3D采样统计一致 */
+function renderBallSampleStats(st, opt){
+  if(!st || !st.n) return '';
+  opt = opt || {};
+  const cnt = v => `<span style="color:#2dd4bf;font-weight:600;">×${v}</span>`;
+  const chip = (k, v, dim) => `<span style="display:inline-block;white-space:nowrap;margin:0 7px 0 0;${dim?'opacity:.35;':''}">${k}${cnt(v)}</span>`;
+  const row = (label, inner) => `<div style="display:flex;gap:6px;margin:2px 0;align-items:baseline;"><div style="flex:0 0 48px;color:#888;font-size:10px;white-space:nowrap;">${label}</div><div style="flex:1;min-width:0;line-height:1.7;">${inner}</div></div>`;
+  const note = t => `<span style="color:#666;font-size:9px;white-space:nowrap;">${t}</span>`;
+  const p2 = x => String(x).padStart(2,'0');
+  const emptyNote = note('无（各球均只出现1次）');
+  let h = `<div style="font-size:11px;color:#666;margin:6px 0 3px;">${opt.title||'采样统计'}（共${st.n}注${opt.shown!=null&&st.n>opt.shown?`，上方仅展示${opt.shown}注`:''}）：</div>`;
+  h += `<div style="background:#1a1a2e;border-radius:6px;padding:3px 8px;color:#ccc;font-size:10px;">`;
+  h += row('球号次数', (st.ball_top||[]).length ? st.ball_top.map(p=>chip(p2(p[0]),p[1],false)).join('') + note('仅列出现≥2次') : emptyNote);
+  h += row('两球共现', (st.pair_top||[]).length ? st.pair_top.map(p=>chip(p[0],p[1],false)).join('') + note('仅列出现≥2次') : note('无（各对均只出现1次）'));
+  if(st.blue_top && st.blue_top.length) h += row('蓝球次数', st.blue_top.map(p=>chip(p2(p[0]),p[1],false)).join(''));
+  h += row('奇数个数', (st.oddeven||[]).map(p=>chip(p[0]+'个',p[1],false)).join(''));
+  h += row('大号个数', (st.bigsmall||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note(opt.bigNote||''));
+  h += row('主力区', (st.zone_dom||[]).map(p=>chip(p[0],p[1],p[1]===0)).join(''));
+  h += row('连号对数', (st.consec||[]).map(p=>chip(p[0]+'对',p[1],false)).join(''));
+  const sm = st.sum_stat||{};
+  h += row('和值', note(`最小${sm.min??'—'} · 平均${sm.avg??'—'} · 最大${sm.max??'—'}`));
+  h += `</div>`;
+  return h;
+}
+/* 快乐8：N期采样（每期20球）的统计，重号/斜连是核心指标，放最前面 */
+function renderKl8DrawStats(st){
+  if(!st || !st.n) return '';
+  const cnt = v => `<span style="color:#2dd4bf;font-weight:600;">×${v}</span>`;
+  const chip = (k, v, dim) => `<span style="display:inline-block;white-space:nowrap;margin:0 7px 0 0;${dim?'opacity:.35;':''}">${k}${cnt(v)}</span>`;
+  const row = (label, inner) => `<div style="display:flex;gap:6px;margin:2px 0;align-items:baseline;"><div style="flex:0 0 48px;color:#888;font-size:10px;white-space:nowrap;">${label}</div><div style="flex:1;min-width:0;line-height:1.7;">${inner}</div></div>`;
+  const note = t => `<span style="color:#666;font-size:9px;white-space:nowrap;">${t}</span>`;
+  let h = `<div style="font-size:11px;color:#666;margin:8px 0 3px;">采样统计（共采样${st.n}期，每期20球）：</div>`;
+  h += `<div style="background:#1a1a2e;border-radius:6px;padding:3px 8px;color:#ccc;font-size:10px;">`;
+  h += row('重号个数', (st.repeat||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note(`采样均值${st.avg_repeat} · 近期真实${st.hist_repeat}`));
+  h += row('斜连个数', (st.diag||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note(`采样均值${st.avg_diag} · 近期真实${st.hist_diag}`));
+  h += row('球号次数', (st.ball_top||[]).map(p=>chip(String(p[0]).padStart(2,'0'),p[1],false)).join('') + note('次数最多的前'+(st.ball_top||[]).length+'个'));
+  h += row('奇数个数', (st.oddeven||[]).map(p=>chip(p[0]+'个',p[1],false)).join(''));
+  h += row('大号个数', (st.bigsmall||[]).map(p=>chip(p[0]+'个',p[1],false)).join('') + note('(41~80算大)'));
+  h += row('主力区', (st.zone_dom||[]).map(p=>chip(p[0],p[1],p[1]===0)).join(''));
+  h += row('连号对数', (st.consec||[]).map(p=>chip(p[0]+'对',p[1],false)).join(''));
+  const sm = st.sum_stat||{};
+  h += row('和值', note(`最小${sm.min??'—'} · 平均${sm.avg??'—'} · 最大${sm.max??'—'}`));
+  h += `</div>`;
+  return h;
+}
+
+/* 共识投票（ML·DL·RL）：数据来自RL脚本返回的 consensus 字段 */
+function renderConsensus(game, c){
+  if(!c) return '';
+  const p2 = x => String(x).padStart(2,'0');
+  const srcName = {ml:'ML', dl:'DL', rl:'RL'};
+  const PUR = '#7c3aed';
+  const ball = (n, bg, sz) => `<span style="display:inline-block;width:${sz||22}px;height:${sz||22}px;line-height:${sz||22}px;border-radius:50%;background:${bg};color:#fff;font-size:${(sz||22)>=22?10:9}px;font-weight:700;text-align:center;margin:1px">${n}</span>`;
+  const note = t => `<span style="color:#888;font-size:10px;">${t}</span>`;
+  const sources = c.sources || {};
+  // 三方状态：参与投票 / 无明显倾向（不投票） / 未获取
+  let h = `<div style="margin-top:10px;padding:8px 10px;border:1px solid ${PUR}55;border-radius:8px;">`;
+  h += `<div style="font-size:12px;font-weight:700;color:${PUR};margin-bottom:4px;">🗳️ 共识投票（ML · DL · RL 三方各自表态）</div>`;
+  h += `<div style="font-size:10.5px;margin-bottom:6px;">` + ['ml','dl','rl'].map(k=>{
+    const s = sources[k]||{};
+    const st = !s.available ? '未获取' : (s.flat ? '无明显倾向，不投票' : `参与投票（倾向强度${s.strength}）`);
+    const col = !s.available ? '#aaa' : (s.flat ? '#c58a00' : '#16a34a');
+    return `<span style="margin-right:10px;color:${col};">● ${srcName[k]}：${st}</span>`;
+  }).join('') + `</div>`;
+  if(game==='3d'){
+    // 各位候选：Top3 数字及得票
+    (c.pos||[]).forEach(ps=>{
+      h += `<div style="margin:3px 0;font-size:11px;color:#666;">${ps.name}：` + ps.cands.map(x=>
+        ball(x.digit, x.votes>=2?PUR:'#9ca3af', 20) + `<span style="color:#888;font-size:10px;margin-right:8px;">${x.votes}票·${x.prob}%</span>`).join('') + `</div>`;
+    });
+    if(c.bets?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">共识直选（${c.bets.length}注）：</span></div>`;
+      c.bets.forEach((b,i)=>{
+        h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;"><span style="margin-right:4px;">${i+1}.</span>${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}</div>`;
+      });
+    }
+    const gc = c.group_cover;
+    if(gc?.bets?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">组选覆盖（${gc.n_bets}注，覆盖${gc.perms}个直选排列）：</span></div>`;
+      gc.bets.forEach((b,i)=>{
+        h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;"><span style="margin-right:4px;">${b.type}</span>${b.digits.map(n=>ball(n,b.type==='组六'?'#0d9488':'#d97706',18)).join('')} ${note(`覆盖${b.perms}注 · 概率${b.prob}%（随机${b.base}%，${b.lift}倍）`)}</div>`;
+      });
+      h += `<div style="font-size:10.5px;color:#888;margin:2px 0;">${gc.n_bets}注组选合计覆盖概率 <b>${gc.prob}%</b>（随机基准${gc.base}%）；对比上面直选${gc.direct_n}注合计 ${gc.direct_prob}%。组选一注覆盖组六6个/组三3个排列，所以同样的票数覆盖面更大（奖金也相应是直选的1/6、1/3）。</div>`;
+    }
+    const st = c.stratified;
+    if(st?.cells?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（按格取概率最大的${st.cells.length}格，每格选${st.cells[0].bets.length}注，避免全挤在同一和值/跨度）：</span></div>`;
+      // 概率矩阵：行=和值段，列=跨度段，高亮被选中的格
+      const chosen = new Set((st.chosen||[]).map(x=>x.join(',')));
+      h += `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:3px 0;"><tr><td style="padding:2px 6px;color:#888;">和值＼跨度</td>${st.span_bands.map(b=>`<td style="padding:2px 6px;color:#888;text-align:center;">${b}</td>`).join('')}</tr>`;
+      st.matrix.forEach((row,r)=>{
+        h += `<tr><td style="padding:2px 6px;color:#888;">${st.sum_bands[r]}</td>` + row.map((v,cc)=>{
+          const base = st.base_matrix[r][cc]; const sel = chosen.has(r+','+cc);
+          return `<td style="padding:2px 6px;text-align:center;border:1px solid #333;${sel?`background:${PUR}55;color:#fff;font-weight:700;`:''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span></td>`;
+        }).join('') + `</tr>`;
+      });
+      h += `</table></div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%；紫色为选中的格</div>`;
+      st.cells.forEach(cell=>{
+        h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`概率${cell.prob}%（随机${cell.base}%）`)}</div>`;
+        cell.bets.forEach(b=>{
+          h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;">${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}</div>`;
+        });
+      });
+    }
+  } else {
+    // ssq / kl8：共识球号榜（得票 + 平均提升倍数），再给共识推荐
+    const tb = c.table||[];
+    h += `<div style="font-size:11px;color:#666;margin:2px 0 3px;">共识球号榜（得票/${c.n_active}方，倍数=相对随机的提升）：</div><div style="line-height:1.9;">`;
+    tb.slice(0, game==='kl8'?20:12).forEach(t=>{
+      h += `<span style="display:inline-block;white-space:nowrap;margin:0 8px 2px 0;">${ball(p2(t.ball), t.votes>=Math.max(2,c.n_active)?PUR:(t.votes>=2?'#a78bfa':'#9ca3af'), 20)}<span style="color:#888;font-size:10px;">${t.votes}票·${t.lift}×</span></span>`;
+    });
+    h += `</div>`;
+    ['ml','dl','rl'].forEach(k=>{
+      const s = sources[k]; if(!s?.available) return;
+      h += `<div style="font-size:10.5px;color:#888;margin:2px 0;">${srcName[k]}看好：` + (s.top||[]).slice(0, game==='kl8'?20:10).map(n=>p2(n)).join(' ') + (s.flat?'（无明显倾向，仅供参考）':'') + `</div>`;
+    });
+    if(game==='ssq' && c.bets?.length){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">共识推荐（${c.bets.length}注，按共识分选号，蓝球沿用RL）：</span></div>`;
+      c.bets.forEach((g,i)=>{
+        h += `<div class="rec-group">共${i+1}：` + g.red.map(n=>`<span class="ball-r" style="background:${PUR};">${p2(n)}</span>`).join('') + (g.blues||[]).map(b=>`<span class="ball-b">${p2(b)}</span>`).join('') + `</div>`;
+      });
+    }
+    if(game==='kl8' && c.plays){
+      h += `<div class="ball-unit">`;
+      for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
+        const pl = c.plays[pk]; if(!pl?.groups?.length) continue;
+        h += `<div style="margin:6px 0 2px;"><span style="font-size:11px;font-weight:700;color:${PUR};">共识·${pl.name}：</span></div>`;
+        pl.groups.forEach((g,i)=>{
+          h += `<div style="margin:2px 0;font-size:11px;color:#666;">${pl.name.includes('复式')?'复式':'第'+(i+1)+'注'}：${g.map(x=>ball(p2(x),PUR,22)).join('')}</div>`;
+        });
+      }
+      h += `</div>`;
+    }
+  }
+  h += `<div style="font-size:9.5px;color:#999;margin-top:4px;">说明：ML/DL给的是和值区、奇偶个数等特征目标的概率，已合成为号码级概率；某一方几乎没有倾向时不投票，避免把噪声当共识。各方信号都接近随机时，共识也只是结构上的参考，不代表更容易中。</div>`;
+  h += `</div>`;
+  return h;
+}
+
+function renderDLResult(dlResult){
+  const panel = document.getElementById('dlResultPanel');
+  const meta  = document.getElementById('dlResultMeta');
+  const el    = document.getElementById('dlResultContent');
+  if(!dlResult){ panel.style.display='none'; return; }
+
+  const lstmTfm = dlResult.lstm_tfm;
+  const rl = dlResult.rl;
+  if(!lstmTfm && !rl){ panel.style.display='none'; return; }
+  panel.style.display='block';
+
+  const metaParts = [];
+  if(lstmTfm) metaParts.push(`LSTM/TFM更新：${lstmTfm.updated_at||'—'}（每周）`);
+  if(rl) metaParts.push(`RL更新：${rl.updated_at||'—'}（每日）`);
+  meta.textContent = metaParts.join(' · ');
+
+  const gNames={'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+  const tLabels={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球','group_type':'组型','span_grp':'跨度区间','road_dom':'012路主力','arith':'斜连(等差)','big':'大数个数','consec':'连号数',
+                 'odd':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区',
+                 'red_zone_dom':'红球主力区','ac_grp':'AC值区间','gap_grp':'最大间距区间',
+                 'big_grp':'大数个数区','five_dom':'五行主力段','consec_grp':'连续号组区','range_grp':'极差区'};
+  let html='';
+
+  // ── LSTM+Transformer 各目标准确率（每周） ──
+  if(lstmTfm && lstmTfm.results){
+    html += `<div class="sectionTitle" style="font-size:13px;">🧠 LSTM + Transformer 序列预测（每周训练）</div>`;
+    for(const [game, gdata] of Object.entries(lstmTfm.results)){
+      if(!gdata || !Object.keys(gdata).length) continue;
+      html += `<div style="margin-bottom:10px;">`;
+      html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">${gNames[game]||game}</div>`;
+      html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
+      for(const [tname,tm] of Object.entries(gdata)){
+        const la = tLabels[tname]||tname;
+        const lstmLift = tm.lstm_baseline!=null ? (tm.lstm_acc - tm.lstm_baseline) : null;
+        const baselineNote = lstmLift!=null ? `（基线${tm.lstm_baseline}%${lstmLift>0?' +'+lstmLift.toFixed(1)+'%':''}）` : '';
+        html += `<span class="pred-acc-badge" style="background:#6b3a9b;font-size:11px;">
+          ${la}${tm.lstm_acc!=null?` LSTM${tm.lstm_acc}% TFM${tm.tfm_acc??'—'}%${baselineNote}`:''}
+          → <b>${tm.ensemble_pred??'—'}</b>(${tm.confidence??'—'}%)
+        </span>`;
+      }
+      html += '</div></div>';
+    }
+  }
+
+  // ── PPO 强化学习结果与推荐（每日） ──
+  if(rl && rl.results){
+    html += `<div class="sectionTitle" style="font-size:13px;margin-top:14px;">🤖 强化学习策略（${(rl.mode==='prob_direct')?'概率直出':'每日增量微调'}）</div>`;
+    html += `<div style="font-size:11px;color:#888;margin-bottom:10px;">${rl.state_composition||''}</div>`;
+
+    // 福彩3D
+    const d3Rl = rl.results['3d'];
+    if(d3Rl){
+      html += `<div style="margin-bottom:12px;">`;
+      html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">福彩3D</div>`;
+      const md = d3Rl.match_distribution||{};
+      html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
+        回测（近${d3Rl.games_tested??'—'}期）：平均命中<b>${d3Rl.avg_match_digits??'—'}</b>位，全中率<b>${d3Rl.exact_hit_rate_pct??'—'}%</b>（随机基准0.1%）
+        ${d3Rl.mode==='prob_direct'?'（概率直出）':(d3Rl.is_first_train?'（首次训练）':'（增量微调）')}
+      </div>`;
+      html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
+        命中分布：0位${md[0]??0}期 1位${md[1]??0}期 2位${md[2]??0}期 3位${md[3]??0}期
+      </div>`;
+      // 每位候选明细：让模型对百/十/个位各自看好哪几个数字一目了然
+      if(d3Rl.pos_candidates?.length === 3){
+        const posNames = ['百位','十位','个位'];
+        html += `<div class="ball-cand" style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:8px 10px;margin-bottom:8px;">`;
+        html += `<div style="margin-bottom:4px;">模型对各位的候选判断：</div>`;
+        d3Rl.pos_candidates.forEach((cands, pi)=>{
+          html += `<div style="margin:2px 0;">${posNames[pi]}：`;
+          cands.forEach(c=>{
+            html += `<span style="display:inline-block;background:#8b1a1a;color:#fff;border-radius:4px;padding:1px 6px;margin-right:5px;font-weight:700;">${c.digit}</span><span style="color:#aaa;margin-right:10px;">${c.prob}%</span>`;
+          });
+          html += `</div>`;
+        });
+        html += `</div>`;
+      }
+      if(d3Rl.ppo_groups?.length){
+        // 两栏并排时每栏最多150~180px，原来"第1注："+22px球总宽约142px，
+        // 稍微一点渲染误差就会溢出、球被挤到换行（上面2个下面1个，很难看）。
+        // 改法：标签从"第1注："瘦身成"1."（省约50px），球从22px缩到18px，
+        // 再加 white-space:nowrap 兜底——就算还是不够，也是整行等比收缩，
+        // 不会出现"一张卡片里球换行"这种断裂感。
+        const _d3Ball = (cls,n)=>`<span class="${cls}" style="width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;${cls==='ball-r'?'background:#8b1a1a;':''}">${n}</span>`;
+        html += `<div class="ball-flex" style="display:flex; flex-wrap:nowrap; gap:8px; align-items:flex-start;">`;
+        html += `<div style="flex:1 1 0; min-width:0;">`;
+        html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐（${d3Rl.ppo_groups.length}注）：</span></div>`;
+        d3Rl.ppo_groups.forEach((g,i)=>{
+          html += `<div class="rec-group" style="white-space:nowrap; padding:4px 6px; margin:3px 0; display:block;"><span style="margin-right:4px;">${i+1}.</span>${g.map(n=>_d3Ball('ball-r',n)).join('')}</div>`;
+        });
+        html += `</div>`;
+        if(d3Rl.sampled_groups?.length){
+          html += `<div style="flex:1 1 0; min-width:0;">`;
+          html += `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">采样（${d3Rl.sampled_groups.length}注）：</span></div>`;
+          d3Rl.sampled_groups.forEach((g,i)=>{
+            html += `<div class="rec-group" style="white-space:nowrap; padding:4px 6px; margin:3px 0; display:block;"><span style="margin-right:4px;">${i+1}.</span>${g.map(n=>_d3Ball('ball-g',n)).join('')}</div>`;
+          });
+          html += `</div>`;
+        }
+        html += `</div>`;
+        html += renderD3SampleStats(d3Rl.sampled_stats, (d3Rl.sampled_groups||[]).length);
+      } else if(d3Rl.ppo_pred){
+        html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐组合：</span></div>`;
+        html += `<div class="rec-group" style="display:block;">${d3Rl.ppo_pred.map(n=>`<span class="ball-r" style="background:#8b1a1a;">${n}</span>`).join('')}</div>`;
+      }
+      html += renderConsensus('3d', d3Rl.consensus);
+      html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${d3Rl.note||''}</div>`;
+      html += `</div>`;
+    }
+
+    // 快乐8（全量打分排序，支持所有玩法，分组结构与传统ML一致）
+    const kl8Rl = rl.results.kl8;
+    if(kl8Rl){
+      html += `<div style="margin-bottom:12px;">`;
+      html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">快乐8</div>`;
+      html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
+        回测（近${kl8Rl.games_tested??'—'}期）
+        ${kl8Rl.mode==='prob_direct'?'（概率直出）':(kl8Rl.is_first_train?'（首次训练）':'（增量微调）')}
+      </div>`;
+      if(kl8Rl.ref_info){
+        const ri = kl8Rl.ref_info;
+        html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:6px 10px;margin-bottom:8px;">
+          📎 参考信息（不参与RL决策，仅帮助理解）：主推荐平均遗漏${ri.avg_omission_top6??'—'}期，${ri.top6_repeat!=null?`含上期重号${ri.top6_repeat}个、斜连邻号${ri.top6_diag}个`:(ri.avg_freq_top6!=null?`平均近期频率${ri.avg_freq_top6}次`:'')}；
+          ML预测主力区间=${ri.ml_zone_pred||'—'}，主力五行段=${ri.ml_five_pred||'—'}
+        </div>`;
+      }
+      if(kl8Rl.backtest_by_play){
+        const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+        const bestN = kl8Rl.best_play_n;
+        html += `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">`;
+        for(const n of [4,5,6,9,10]){
+          const bt = kl8Rl.backtest_by_play[n]||kl8Rl.backtest_by_play[String(n)];
+          if(!bt) continue;
+          const isBest = n===bestN;
+          html += `<span style="padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;
+            background:${isBest?'#1a7a4c':'#333'};color:#fff;">
+            ${playNames[n]}${isBest?'★':''} 净${bt.avg_net_per_game}元/期 均命中${bt.avg_hit}个
+          </span>`;
+        }
+        html += `</div>`;
+        html += `<div style="font-size:10px;color:#888;margin-bottom:8px;">★ 标记为近期回测表现最好的玩法（历史回测仅供参考，彩票开奖完全随机，不代表未来表现）</div>`;
+      }
+      if(kl8Rl.plays){
+        html += `<div class="ball-unit">`;
+        for(const pk of ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10']){
+          const play = kl8Rl.plays[pk];
+          if(!play || !play.groups?.length) continue;
+          html += `<div style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${play.name}（${play.tip||''}）：</span></div>`;
+          play.groups.forEach((g,i)=>{
+            const label = play.name.includes('复式') ? `复式${g.length}个球` : `第${i+1}注`;
+            html += `<div style="margin:2px 0;font-size:11px;color:#666;">${label}：`;
+            html += g.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+            html += `</div>`;
+          });
+          // 采样（按概率不放回抽，与3D采样同一思路）：与推荐同样多的注数，青绿色球区分
+          const sg = kl8Rl.sampled_plays && kl8Rl.sampled_plays[pk];
+          if(sg && sg.length){
+            sg.forEach((g,i)=>{
+              const label = play.name.includes('复式') ? `采样复式${g.length}个球` : `采样${i+1}`;
+              html += `<div style="margin:2px 0;font-size:11px;color:#0d9488;">${label}：`;
+              html += g.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#0d9488;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+              html += `</div>`;
+            });
+          }
+        }
+        html += `</div>`;
+        if(kl8Rl.sampled_draws?.length){
+          html += `<div class="ball-label" style="font-size:11px;color:#666;margin:8px 0 3px;">采样出的下一期开奖（每期20球，上面各玩法的“采样”就是从这几期里按RL分数取最高的几个）：</div>`;
+          kl8Rl.sampled_draws.forEach((d,i)=>{
+            html += `<div class="rec-group" style="display:block;font-size:11px;color:#0d9488;">采样第${i+1}期：`;
+            html += d.map(x=>`<span style="display:inline-block;width:20px;height:20px;line-height:20px;border-radius:50%;background:#0d9488;color:#fff;font-size:9px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+            html += `</div>`;
+          });
+        }
+        if(kl8Rl.sampled_stats && kl8Rl.sampled_stats.n){
+          html += renderKl8DrawStats(kl8Rl.sampled_stats);
+        }
+      } else if(kl8Rl.picks_by_n){
+        // 兼容旧结构
+        const playNames={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+        for(const n of [4,5,6,9,10]){
+          const nums = kl8Rl.picks_by_n[n]||kl8Rl.picks_by_n[String(n)];
+          if(!nums || !nums.length) continue;
+          html += `<div class="ball-line" style="margin-bottom:6px;"><span style="font-size:11px;font-weight:700;color:#e87d00;">${playNames[n]}：</span>`;
+          html += nums.map(x=>`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:#e87d00;color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(x).padStart(2,'0')}</span>`).join('');
+          html += `</div>`;
+        }
+      } else if(kl8Rl.ppo_selected?.length){
+        html += `<div class="rec-group" style="display:block;">${kl8Rl.ppo_selected.map(n=>`<span class="ball-r" style="background:#e87d00;">${String(n).padStart(2,'0')}</span>`).join('')}</div>`;
+      }
+      html += renderConsensus('kl8', kl8Rl.consensus);
+      html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${kl8Rl.note||''}</div>`;
+      html += `</div>`;
+    }
+
+    // 双色球
+    // 双色球非开奖日会跳过训练，dl_rl.json里ssq那部分只剩skipped/games_tested/reason/note等
+    // 寥寥几个字段，缺推荐号码/参考信息这些渲染必需的内容。不改Python脚本，改成纯前端兜底：
+    // 用localStorage缓存"上一次拿到完整数据时的ssq结果"，跳过导致数据不全时自动用缓存顶上。
+    const SSQ_RL_CACHE_KEY = 'fucaiSsqRlFullCache';
+    let ssqRl = rl.results.ssq;
+    const ssqHasFullData = ssqRl && (ssqRl.ppo_groups?.length || ssqRl.ppo_red_selected?.length);
+    let ssqUsedCache = false;
+    if(ssqHasFullData){
+      try{ localStorage.setItem(SSQ_RL_CACHE_KEY, JSON.stringify(ssqRl)); } catch(e){}
+    } else if(ssqRl && ssqRl.skipped){
+      try{
+        const cached = localStorage.getItem(SSQ_RL_CACHE_KEY);
+        if(cached){
+          const cachedObj = JSON.parse(cached);
+          ssqRl = { ...cachedObj, skipped: true,
+                    note: (cachedObj.note||'') + '（今日为非开奖日，双色球周二/四/日开奖，以下为本机缓存的上次完整结果，未重新训练）' };
+          ssqUsedCache = true;
+        }
+      } catch(e){}
+    }
+    if(ssqRl){
+      html += `<div style="margin-bottom:12px;">`;
+      html += `<div style="font-size:13px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">双色球</div>`;
+      if(ssqRl.skipped){
+        html += `<div style="font-size:11.5px;color:#8a6d1a;background:rgba(241,196,15,.12);border-left:3px solid #f1c40f;border-radius:6px;padding:6px 10px;margin-bottom:8px;">
+          ⏸️ 今日为非开奖日（双色球周二/四/日开奖），未重新训练${ssqUsedCache ? '，以下为本机缓存的上次完整结果' : '（暂无缓存可用，本机首次打开或已清除缓存）'}
+        </div>`;
+      }
+      html += `<div style="font-size:12px;color:#e87d00;margin-bottom:6px;">
+        回测（近${ssqRl.games_tested??'—'}期）：红球平均命中<b>${ssqRl.avg_red_hit??'—'}</b>个　蓝球准确率<b>${ssqRl.blue_acc_pct??'—'}%</b>（随机基准6.25%）
+        ${ssqRl.mode==='prob_direct'?'（概率直出）':(ssqRl.is_first_train?'（首次训练）':'（增量微调）')}
+      </div>`;
+      const rhd = ssqRl.red_hit_distribution;
+      if(rhd){
+        html += `<div style="font-size:11px;color:#666;margin-bottom:6px;">
+          红球命中分布：${[0,1,2,3,4,5,6].map(k=>`${k}个${rhd[k]??rhd[String(k)]??0}期`).join(' ')}
+        </div>`;
+      }
+      if(ssqRl.ref_info){
+        const ri = ssqRl.ref_info;
+        html += `<div style="font-size:11px;color:#888;background:rgba(255,255,255,.04);border-radius:6px;padding:6px 10px;margin-bottom:8px;">
+          📎 参考信息（不参与RL决策，仅帮助理解）：主推荐平均遗漏${ri.avg_omission_top6??'—'}期；ML预测红球主力区=${ri.ml_zone_pred||'—'}
+        </div>`;
+      }
+      if(ssqRl.ppo_groups?.length){
+        const nBlue = ssqRl.ppo_groups[0]?.blues?.length || 1;
+        if(ssqRl.red_core?.length){
+          html += `<div class="ball-cand" style="font-size:11px;color:#888;margin-bottom:6px;padding:6px 10px;">🎯 胆码（模型最确信，每注必含）：`;
+          ssqRl.red_core.forEach(n=>{ html += `<span style="display:inline-block;background:#c81e1e;color:#fff;border-radius:4px;padding:1px 7px;margin-right:5px;font-weight:700;">${String(n).padStart(2,'0')}</span>`; });
+          html += `　候选池${ssqRl.red_pool?.length||'—'}球</div>`;
+        }
+        html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐（${ssqRl.ppo_groups.length}注，${nBlue}个蓝球候选）：</span></div>`;
+        ssqRl.ppo_groups.forEach((g,i)=>{
+          html += `<div class="rec-group">第${i+1}注：`;
+          (g.red||[]).forEach(n=>{ html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`; });
+          // 模型预测几个蓝球就显示几个（不固定数量，由模型置信度决定）
+          const blues = g.blues?.length ? g.blues : (g.blue!=null ? [g.blue] : []);
+          blues.forEach(b=>{ html += `<span class="ball-b">${String(b).padStart(2,'0')}</span>`; });
+          html += `</div>`;
+        });
+        // 采样（按概率不放回抽红球、按蓝球概率抽蓝球，与3D采样同一思路），青绿色球区分
+        if(ssqRl.sampled_groups?.length){
+          html += `<div class="ball-label" style="margin:8px 0 4px;"><span style="font-size:12px;color:#666;">采样（${ssqRl.sampled_groups.length}注）：</span></div>`;
+          ssqRl.sampled_groups.forEach((g,i)=>{
+            html += `<div class="rec-group">采${i+1}：`;
+            (g.red||[]).forEach(n=>{ html += `<span class="ball-r" style="background:#0d9488;">${String(n).padStart(2,'0')}</span>`; });
+            if(g.blue!=null) html += `<span class="ball-b">${String(g.blue).padStart(2,'0')}</span>`;
+            html += `</div>`;
+          });
+          html += renderBallSampleStats(ssqRl.sampled_stats, {title:'采样统计', shown:ssqRl.sampled_groups.length, bigNote:'(17~33算大)'});
+        }
+      } else if(ssqRl.ppo_red_selected?.length || ssqRl.ppo_blue_pred!=null){
+        html += `<div class="ball-label" style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">推荐整注：</span></div>`;
+        html += `<div class="rec-group" style="display:block;">`;
+        (ssqRl.ppo_red_selected||[]).forEach(n=>{
+          html += `<span class="ball-r" style="background:#c81e1e;">${String(n).padStart(2,'0')}</span>`;
+        });
+        if(ssqRl.ppo_blue_pred!=null){
+          html += `<span class="ball-b">${String(ssqRl.ppo_blue_pred).padStart(2,'0')}</span>`;
+        }
+        html += `</div>`;
+      }
+      html += renderConsensus('ssq', ssqRl.consensus);
+      html += `<div style="font-size:10px;color:#aaa;margin-top:4px;">${ssqRl.note||''}</div>`;
+      html += `</div>`;
+    }
+  }
+
+  el.innerHTML = html || '<div class="status">暂无DL/RL结果（请先运行 kaggle_lstm_tfm.py 和 kaggle_rl_daily.py）</div>';
+}
+
+function renderGamePredict(game, data){
+  const panelIds={'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
+  const contentIds={'3d':'predict3dContent','ssq':'predictSSQContent','kl8':'predictKL8Content'};
+  const panel=document.getElementById(panelIds[game]);
+  const contentEl=document.getElementById(contentIds[game]);
+  if(!data||!data.models){panel.style.display='none';return;}
+  panel.style.display='block';
+  const modelLabels={bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_grp:'和值区间',odd:'奇数个数',group_type:'组型',span_grp:'跨度区间',road_dom:'012路主力',arith:'斜连(等差)',big:'大数个数',consec:'连号数',
+    blue:'蓝球号码',odd_grp:'奇数区间',zone_dom:'主落区',tot_grp:'总和区间',
+    red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
+    big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
+  let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">近${data.data_count||'—'}期数据 · 更新：${data.updated_at||'—'}</div>`;
+  for(const [mname,mdata] of Object.entries(data.models)){
+    if(!mdata||!mdata.accuracy) continue;
+    const acc=mdata.accuracy; const pred=mdata.prediction||{};
+    html+=`<div class="pred-model-card">`;
+    html+=`<div class="pred-model-title">目标：${modelLabels[mname]||mname}</div>`;
+    html+=`<div class="pred-acc-row">`;
+    if(acc.rf!==undefined) html+=`<span class="pred-acc-badge">随机森林 ${acc.rf}%</span>`;
+    if(acc.xgb!==undefined) html+=`<span class="pred-acc-badge" style="background:#1a3a8b;">XGBoost ${acc.xgb}%</span>`;
+    if(acc.lgb!==undefined) html+=`<span class="pred-acc-badge" style="background:#1a6b1a;">LightGBM ${acc.lgb}%</span>`;
+    if(acc.ensemble!==undefined) html+=`<span class="pred-acc-badge" style="background:#6b3a9b;">集成 ${acc.ensemble}%</span>`;
+    html+=`</div>`;
+    if(acc.baseline!==undefined){
+      const lift = acc.lift_over_baseline ?? (acc.ensemble - acc.baseline);
+      const liftColor = lift>5 ? '#1a7a4c' : (lift>0 ? '#e87d00' : '#c81e1e');
+      const liftText  = lift>5 ? '真实提升' : (lift>0 ? '提升有限' : '未超基线，无实际预测力');
+      html+=`<div style="font-size:11px;color:#888;margin-bottom:8px;">
+        基线准确率（永远猜多数类）：${acc.baseline}%　
+        <span style="color:${liftColor};font-weight:700;">提升 ${lift>0?'+':''}${lift}%（${liftText}）</span>
+      </div>`;
+    }
+    if(pred.value!==undefined) html+=`<div style="font-size:12px;margin-bottom:6px;">预测值：<b style="color:#c81e1e;font-size:14px;">${pred.value}</b>（置信度 ${pred.confidence||'—'}%）</div>`;
+    if(pred.probs){
+      const topProbs=Object.entries(pred.probs).sort((a,b)=>b[1]-a[1]).slice(0,6);
+      const maxV=Math.max(...topProbs.map(x=>+x[1]));
+      topProbs.forEach(([k,v])=>{
+        html+=`<div class="pred-prob-bar"><div class="pred-prob-label">${k} — ${v}%</div>`;
+        html+=`<div class="pred-bar-wrap"><div class="pred-bar-fill" style="width:${Math.min(v,100)}%;background:${+v===maxV?'#c81e1e':'#8a97b3'}"></div></div></div>`;
+      });
+    }
+    if(mdata.feature_importance?.length){
+      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">关键特征：`;
+      html+=mdata.feature_importance.map(f=>`${f.name}(${(f.score*100).toFixed(1)}%)`).join(' · ');
+      html+=`</div>`;
+    }
+    const btArr = mdata.bt_detail || mdata.backtest_latest || [];
+    if(btArr.length){
+      html+=`<div style="margin-top:8px;font-size:11px;color:#888;">近期回测（实际→集成）：`;
+      html+=btArr.slice(-5).map(b=>{
+        const pred_v = b.pred_ensemble ?? b.pred_rf ?? b.pred_xgb ?? '—';
+        const hit = b.hit===1 || b.true===pred_v;
+        return `<span class="bt-tag ${hit?'hit':'miss'}">${b.true}→${pred_v}</span>`;
+      }).join(' ');
+      html+=`</div>`;
+    }
+    html+=`</div>`;
+  }
+  // 推荐号码
+  const rec=data.recommendation||{};
+  html+=`<div style="margin-top:16px;"><div class="sectionTitle" style="font-size:13px;">🎯 综合推荐号码</div><div style="margin:10px 0;">`;
+  if(game==='3d'){
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">预测和值区间：${rec.sum_pred||'—'}</div>`;
+    if(rec.markov_hint?.length) html+=`<div style="font-size:11px;color:#888;margin-bottom:6px;">马尔可夫：${rec.markov_hint.join('；')}</div>`;
+    html+=`<div style="font-size:11px;font-weight:700;color:#888;margin:8px 0 4px;">直选（精确顺序）：</div>`;
+    (rec.groups||[]).forEach((g,i)=>{ html+=`<div class="rec-group">第${i+1}注：${g.map(n=>`<span class="ball-r">${n}</span>`).join('')}</div>`; });
+
+    // 衍生玩法：组选3/6、和值大小、和值奇偶、跨度
+    const dp = rec.derived_plays;
+    if(dp && Object.keys(dp).length){
+      html+=`<div style="font-size:11px;font-weight:700;color:#888;margin:14px 0 6px;">🎲 衍生玩法推荐：</div>`;
+      html+='<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;">';
+      const playOrder=['group_bet','sum_big_small','sum_odd_even','span_bet'];
+      const playColors={group_bet:'#8b1a1a',sum_big_small:'#1a3a8b',sum_odd_even:'#1a6b1a',span_bet:'#7a1233'};
+      playOrder.forEach(pk=>{
+        const p=dp[pk]; if(!p) return;
+        html+=`<div style="background:rgba(255,255,255,.04);border-left:3px solid ${playColors[pk]};border-radius:6px;padding:8px 10px;">
+          <div style="font-size:11px;color:#888;">${p.name}</div>
+          <div style="font-size:15px;font-weight:700;color:${playColors[pk]};margin:2px 0;">${p.pred}</div>
+          <div style="font-size:10px;color:#aaa;">置信${p.confidence}%</div>
+        </div>`;
+      });
+      html+='</div>';
+      html+=`<div style="font-size:10px;color:#888;margin-top:6px;">衍生玩法从直选预测结果推算得出（组选/和值大小奇偶/跨度），非独立训练目标，仅供参考。</div>`;
+    }
+  } else if(game==='ssq'){
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">蓝球推荐：${(rec.blue_recommend||[]).join('、')} · 预测奇数：${rec.odd_pred||'—'}个 · 和值：${rec.sum_pred||'—'}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">热号：${(rec.hot_red||[]).join(' ')} · 遗漏回补：${(rec.overdue_red||[]).join(' ')}</div>`;
+    (rec.groups||[]).forEach((g,i)=>{ html+=`<div class="rec-group">第${i+1}注：${(g.red||[]).map(n=>`<span class="ball-r">${String(n).padStart(2,'0')}</span>`).join('')}<span class="ball-b">${String(g.blue||0).padStart(2,'0')}</span></div>`; });
+  } else if(game==='kl8'){
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">主落区：${rec.zone_dominant_pred||'—'} · 总和区间：${rec.total_range_pred||'—'}</div>`;
+    html+=`<div style="font-size:12px;color:#666;margin-bottom:6px;">热号：${(rec.hot_nums||[]).slice(0,10).join(' ')} · 遗漏：${(rec.overdue||[]).slice(0,6).join(' ')}</div>`;
+    const plays=rec.plays||{};
+    const playColors={xuan4:'#c81e1e',xuan5:'#1560c8',xuan5_fu:'#9b59b6',xuan6:'#1a7a4c',xuan9:'#e87d00',xuan10:'#7a1233'};
+    ['xuan4','xuan5','xuan5_fu','xuan6','xuan9','xuan10'].forEach(pk=>{
+      const play=plays[pk]; if(!play) return;
+      const color=playColors[pk]||'#333';
+      html+=`<div style="border:1px solid ${color};border-radius:8px;margin-bottom:8px;overflow:hidden;">`;
+      html+=`<div style="background:${color};color:#fff;padding:5px 10px;font-size:12px;font-weight:700;">${play.name}（选${play.balls}个）<span style="font-size:10px;opacity:.8;margin-left:6px;">${play.tip||''}</span></div>`;
+      html+=`<div style="padding:8px 10px;">`;
+      (play.groups||[]).forEach((g,i)=>{
+        const nums=Array.isArray(g)?g:[];
+        html+=`<div style="margin-bottom:4px;"><span style="font-size:11px;color:#666;">${play.name.includes('复式')?'复式':'第'+(i+1)+'注'}：</span>`;
+        nums.forEach(n=>{ html+=`<span style="display:inline-block;width:22px;height:22px;line-height:22px;border-radius:50%;background:${color};color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px">${String(n).padStart(2,'0')}</span>`; });
+        if(play.name.includes('复式')){ const c=factorial(nums.length)/(factorial(play.balls)*factorial(nums.length-play.balls)); html+=`<span style="font-size:10px;color:#888;margin-left:4px;">=${c}注</span>`; }
+        html+=`</div>`;
+      });
+      html+=`</div></div>`;
+    });
+  }
+  html+=`</div><div style="font-size:11px;color:#aaa;margin-top:6px;">${rec.note||''}</div></div>`;
+  contentEl.innerHTML=html;
+}
+
+// 走势图彩种切换
+let trendType = '3d';
+
+loadAiCache();
+
+document.querySelectorAll('[data-trend]').forEach(p=>{
+  p.addEventListener('click', ()=>{
+    document.querySelectorAll('[data-trend]').forEach(x=>x.classList.remove('active'));
+    p.classList.add('active');
+    trendType = p.dataset.trend;
+    // 切换彩种时立即恢复该彩种的AI解读缓存
+    restoreAiResult(trendType);
+  });
+});
+
+/* ═══════════════════════════════════════════════════
+   走势图：加载 + 渲染
+═══════════════════════════════════════════════════ */
+document.getElementById('loadTrendBtn').addEventListener('click', loadTrend);
+document.getElementById('downloadTrendBtn').addEventListener('click', downloadTrend);
+
+
+// 初始化时读取Gateway配置
+loadGwConfig();
+
+document.getElementById('aiReadBtn').addEventListener('click', generateAIReading);
+
+async function loadTrend(){
+  const statusEl = document.getElementById('trendStatus');
+  const wrap = document.getElementById('trendWrap');
+  const dlBtn = document.getElementById('downloadTrendBtn');
+  const repo = (localStorage.getItem('fucaiGithubRepo') || '').trim();
+  if(!repo){
+    statusEl.className = 'status err';
+    statusEl.textContent = '请先在「数据来源」面板里填写并保存 GitHub 仓库地址。';
+    return;
+  }
+  statusEl.className = 'status';
+  statusEl.textContent = '正在加载历史数据…';
+  dlBtn.style.display = 'none';
+
+  try{
+    const url = `https://raw.githubusercontent.com/${repo}/main/history.json?t=${Date.now()}`;
+    const resp = await fetch(url);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status + '（history.json 不存在？请先触发一次 Actions）');
+    const data = await resp.json();
+    const records = data[trendType];
+    if(!records || records.length === 0) throw new Error('该彩种暂无历史数据');
+
+    const last50 = records.slice(-50);
+    wrap.innerHTML = renderTrendHTML(trendType, last50);
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ 已加载 ${last50.length} 期走势数据`;
+    dlBtn.style.display = '';
+    // 显示AI解读面板，传入数据
+    document.getElementById('aiPanel').style.display = 'block';
+    window._trendRecords = last50;
+    window._trendType = trendType;
+    // 自动恢复该彩种已有的AI解读缓存
+    restoreAiResult(trendType);
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '加载失败：' + e.message;
+  }
+}
+
+/* ── 3D 指标计算 ── */
+function calc3D(digits, prevDigits){
+  const [b, s, g] = digits;
+  const sum = b + s + g;
+  const span = Math.max(b,s,g) - Math.min(b,s,g);
+  const oddEven = digits.map(d => d%2===0 ? '偶' : '奇').join('');
+  const bigSmall = digits.map(d => d>=5 ? '大' : '小').join('');
+  const road = digits.map(d => d%3);
+  const sumTail = sum % 10;
+  const isTriplet = b===s && s===g;
+  const isGroup3 = (b===s || s===g || b===g) && !isTriplet;
+  const groupType = isTriplet ? '豹子' : isGroup3 ? '组三' : '组六';
+  const road012 = digits.map(d => d%3);
+  const roadCount = [0,1,2].map(v => road012.filter(x=>x===v).length);
+  const repeat = prevDigits ? digits.filter((d,i) => prevDigits[i]===d).length : 0;
+  const gapBS = Math.abs(b - s);
+  const gapSG = Math.abs(s - g);
+  const sorted3 = [...digits].sort((a,b)=>a-b);
+  const isArith = (sorted3[1]-sorted3[0]) === (sorted3[2]-sorted3[1]) && sorted3[2]-sorted3[0] > 0;
+  return { sum, span, oddEven, bigSmall, road, sumTail, groupType, road012, roadCount, repeat, gapBS, gapSG, isArith };
+}
+
+/* ── 渲染总入口 ── */
+function renderTrendHTML(type, records){
+  let inner = '';
+  if(type === '3d')       inner = render3DTrend(records);
+  else if(type === 'ssq') inner = renderSSQTrend(records);
+  else if(type === 'kl8') inner = renderKL8Trend(records);
+
+  // 用相对定位容器包住，二维码绝对定位右下角
+  const qr = (state.qr.show && state.qr.image) ? `
+    <div style="position:absolute;right:16px;bottom:16px;text-align:center;z-index:10;">
+      <img src="${state.qr.image}" style="
+        width:110px;height:110px;object-fit:contain;
+        background:#fff;padding:6px;
+        border-radius:10px;border:2px solid #d4a017;
+        display:block;margin:0 auto;
+      ">
+      ${state.qr.caption ? `<div style="margin-top:5px;font-size:11px;color:#666;max-width:120px;line-height:1.4;">${escapeHtml(state.qr.caption)}</div>` : ''}
+    </div>` : '';
+
+  // 外层加 padding-bottom 给二维码留位置，position:relative 让绝对定位生效
+  return `<div style="position:relative;padding-bottom:${state.qr.show && state.qr.image ? '160px' : '20px'};">
+    ${inner}
+    ${qr}
+  </div>`;
+}
+
+/* ════════════════════════════
+   福彩 3D 走势图
+════════════════════════════ */
+function render3DTrend(records){
+  const rows = records.map((r, i)=>{
+    const prev = i>0 ? records[i-1].digits : null;
+    return {...r, ...calc3D(r.digits, prev)};
+  });
+  const n = rows.length;
+
+  let html = `<div class="sectionTitle">福彩3D 走势图（近${n}期）</div>`;
+  html += rotateHintHTML();
+  html += '<div class="trendScrollBox"><table class="trendTable">';
+  html += '<thead><tr>';
+  html += '<th>期号</th><th>日期</th>';
+  html += '<th colspan="10" style="background:#8b1a1a">百位</th>';
+  html += '<th colspan="10" style="background:#1a3a8b">十位</th>';
+  html += '<th colspan="10" style="background:#1a6b1a">个位</th>';
+  html += '<th>和值</th><th>和尾</th><th>跨度</th>';
+  html += '<th>奇偶</th><th>大小</th><th>012路</th><th>组型</th>';
+  html += '<th>重号</th><th>百十距</th><th>十个距</th><th>斜连</th>';
+  html += '</tr><tr><th></th><th></th>';
+  for(let col=0;col<3;col++){
+    const bg=col===0?'#8b1a1a':col===1?'#1a3a8b':'#1a6b1a';
+    for(let d=0;d<=9;d++) html+=`<th style="background:${bg};">${d}</th>`;
+  }
+  html += '<th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>';
+
+  rows.forEach(r=>{
+    html += '<tr>';
+    html += `<td style="color:#555;">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:11px;color:#888;">${r.date.slice(5)}</td>`;
+    r.digits.forEach((digit,col)=>{
+      const color=col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c';
+      for(let d=0;d<=9;d++){
+        html += digit===d
+          ? `<td><span class="trendDot" style="background:${color};">${d}</span></td>`
+          : `<td><span class="trendDot miss">·</span></td>`;
+      }
+    });
+    html += `<td style="font-weight:700;color:${r.sum>=14?'#e87d00':'#1a7a4c'};">${r.sum}</td>`;
+    html += `<td style="font-weight:700;color:#9b59b6;">${r.sumTail}</td>`;
+    html += `<td style="font-weight:700;color:#6b3a9b;">${r.span}</td>`;
+    html += `<td>${r.oddEven.split('').map(c=>`<span style="color:${c==='奇'?'#c81e1e':'#1560c8'};font-weight:700">${c}</span>`).join('')}</td>`;
+    html += `<td>${r.bigSmall.split('').map(c=>`<span style="color:${c==='大'?'#e87d00':'#1a7a4c'};font-weight:700">${c}</span>`).join('')}</td>`;
+    html += `<td>${r.road012.map(v=>`<span style="color:${['#9b59b6','#e74c3c','#3498db'][v]};font-weight:700">${v}</span>`).join('')}</td>`;
+    const gtColor = r.groupType==='豹子'?'#e67e22':r.groupType==='组三'?'#c81e1e':'#1560c8';
+    html += `<td style="font-weight:700;color:${gtColor};font-size:11px;">${r.groupType}</td>`;
+    html += `<td style="font-weight:700;color:${r.repeat>0?'#e74c3c':'#aaa'};">${r.repeat>0?r.repeat+'重':'—'}</td>`;
+    html += `<td style="color:#555;">${r.gapBS}</td>`;
+    html += `<td style="color:#555;">${r.gapSG}</td>`;
+    html += `<td style="font-weight:700;color:${r.isArith?'#16a085':'#aaa'};">${r.isArith?'✓':'—'}</td>`;
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  // ── 统计区 ──
+  html += '<div class="sectionTitle" style="margin-top:18px">指标统计</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px;">';
+
+  const sumGroups={'0-9':0,'10-17':0,'18-27':0};
+  rows.forEach(r=>{ if(r.sum<=9)sumGroups['0-9']++; else if(r.sum<=17)sumGroups['10-17']++; else sumGroups['18-27']++; });
+  html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`));
+
+  const tailCount={};
+  rows.forEach(r=>{ tailCount[r.sumTail]=(tailCount[r.sumTail]||0)+1; });
+  html += statCard('和值尾数TOP5', Object.entries(tailCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`尾${k}: ${v}期`), '#9b59b6');
+
+  const spanCount={};
+  rows.forEach(r=>{ spanCount[r.span]=(spanCount[r.span]||0)+1; });
+  html += statCard('跨度分布', Object.entries(spanCount).sort((a,b)=>+a[0]-+b[0]).map(([k,v])=>`跨度${k}: ${v}期`), '#6b3a9b');
+
+  const gtCount={'组三':0,'组六':0,'豹子':0};
+  rows.forEach(r=>{ gtCount[r.groupType]=(gtCount[r.groupType]||0)+1; });
+  html += statCard('组型分布', Object.entries(gtCount).map(([k,v])=>`${k}: ${v}期`), '#e67e22');
+
+  const repeatCount={'无重号':0,'1重':0,'2重':0,'全重(豹子)':0};
+  rows.forEach(r=>{
+    if(r.repeat===0) repeatCount['无重号']++;
+    else if(r.repeat===1) repeatCount['1重']++;
+    else if(r.repeat===2) repeatCount['2重']++;
+    else repeatCount['全重(豹子)']++;
+  });
+  html += statCard('重号分布', Object.entries(repeatCount).map(([k,v])=>`${k}: ${v}期`), '#e74c3c');
+
+  const arithCount = rows.filter(r=>r.isArith).length;
+  html += statCard('斜连(等差)统计', [`近${n}期出现斜连: ${arithCount}次`, `占比: ${(arithCount/n*100).toFixed(1)}%`, `最近一次: ${rows.slice().reverse().find(r=>r.isArith)?.qihao.slice(-3)||'无'}期`], '#16a085');
+
+  html += '</div>';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px;">';
+  const oeCount={},bsCount={},roadStat={'0路':0,'1路':0,'2路':0};
+  rows.forEach(r=>{
+    oeCount[r.oddEven]=(oeCount[r.oddEven]||0)+1;
+    bsCount[r.bigSmall]=(bsCount[r.bigSmall]||0)+1;
+    r.road012.forEach(v=>{ roadStat[`${v}路`]++; });
+  });
+  html += statCard('奇偶组合TOP5', Object.entries(oeCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#c81e1e');
+  html += statCard('大小组合TOP5', Object.entries(bsCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#e87d00');
+  html += statCard('012路出现次数', Object.entries(roadStat).map(([k,v])=>`${k}: ${v}次`), '#9b59b6');
+  html += '</div>';
+
+  html += '<div class="sectionTitle">各位号码频率</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">';
+  ['百位','十位','个位'].forEach((label,col)=>{
+    const cnt={};
+    rows.forEach(r=>{ const d=r.digits[col]; cnt[d]=(cnt[d]||0)+1; });
+    html += statCard(label, Object.entries(cnt).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k}号: ${v}次`),
+      col===0?'#c81e1e':col===1?'#1560c8':'#1a7a4c');
+  });
+  html += '</div>';
+
+  html += '<div class="sectionTitle">相邻位间距分布</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px;">';
+  const gbsCount={}, gsgCount={};
+  rows.forEach(r=>{
+    gbsCount[r.gapBS]=(gbsCount[r.gapBS]||0)+1;
+    gsgCount[r.gapSG]=(gsgCount[r.gapSG]||0)+1;
+  });
+  html += statCard('百位-十位间距TOP5', Object.entries(gbsCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`间距${k}: ${v}期`), '#8b1a1a');
+  html += statCard('十位-个位间距TOP5', Object.entries(gsgCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`间距${k}: ${v}期`), '#1a6b1a');
+  html += '</div>';
+
+  return html;
+}
+
+/* ════════════════════════════
+   双色球 走势图
+════════════════════════════ */
+function calcSSQ(red, blue){
+  const odd = red.filter(n=>n%2!==0).length;
+  const big = red.filter(n=>n>16).length;
+  const sorted = [...red].sort((a,b)=>a-b);
+  let consec = 0;
+  for(let i=0;i<sorted.length-1;i++) if(sorted[i+1]-sorted[i]===1) consec++;
+  const diffs = new Set();
+  for(let i=0;i<sorted.length;i++)
+    for(let j=i+1;j<sorted.length;j++)
+      diffs.add(sorted[j]-sorted[i]);
+  const ac = diffs.size - (red.length-1);
+  const sumVal = red.reduce((a,b)=>a+b, 0);
+  const zone1 = red.filter(n=>n<=11).length;
+  const zone2 = red.filter(n=>n>=12&&n<=22).length;
+  const zone3 = red.filter(n=>n>=23).length;
+  let maxGap = 0;
+  for(let i=0;i<sorted.length-1;i++) maxGap = Math.max(maxGap, sorted[i+1]-sorted[i]);
+  const blueOdd = blue%2!==0 ? '奇' : '偶';
+  const blueBig = blue>=9 ? '大' : '小';
+  return { odd, even:6-odd, big, small:6-big, consec, ac, sumVal, zone1, zone2, zone3, maxGap, blueOdd, blueBig };
+}
+
+function renderSSQTrend(records){
+  const n = records.length;
+  const rows = records.map(r=>({...r, ...calcSSQ(r.red, r.blue)}));
+
+  let html = `<div class="sectionTitle">双色球 走势图（近${n}期）</div>`;
+  html += rotateHintHTML();
+  html += '<div class="trendScrollBox"><table class="trendTable">';
+  html += '<thead><tr>';
+  html += '<th>期号</th><th>日期</th>';
+  for(let i=1;i<=33;i++) html += `<th style="background:#8b1a1a;">${String(i).padStart(2,'0')}</th>`;
+  html += '<th style="background:#1a3a8b;">蓝</th>';
+  html += '<th>奇偶</th><th>大小</th><th>连号</th><th>AC值</th>';
+  html += '<th>和值</th><th>一区</th><th>二区</th><th>三区</th><th>最大距</th><th>蓝奇偶</th><th>蓝大小</th>';
+  html += '</tr></thead><tbody>';
+
+  rows.forEach(r=>{
+    html += '<tr>';
+    html += `<td style="color:#555;">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:11px;color:#888;">${r.date.slice(5)}</td>`;
+    for(let i=1;i<=33;i++){
+      html += r.red.includes(i)
+        ? `<td><span class="trendDot" style="background:#c81e1e;">${String(i).padStart(2,'0')}</span></td>`
+        : `<td><span class="trendDot miss">·</span></td>`;
+    }
+    html += `<td><span class="ballDot blue">${String(r.blue).padStart(2,'0')}</span></td>`;
+    html += `<td style="font-weight:700;font-size:11px;color:#c81e1e;">${r.odd}奇${r.even}偶</td>`;
+    html += `<td style="font-weight:700;font-size:11px;color:#e87d00;">${r.big}大${r.small}小</td>`;
+    html += `<td style="font-weight:700;color:${r.consec>0?'#e74c3c':'#aaa'};">${r.consec>0?r.consec+'连':'无'}</td>`;
+    html += `<td style="font-weight:700;color:#9b59b6;">${r.ac}</td>`;
+    const sumColor = r.sumVal>=100?'#e87d00':r.sumVal>=70?'#1a7a4c':'#1560c8';
+    html += `<td style="font-weight:700;color:${sumColor};">${r.sumVal}</td>`;
+    html += `<td style="font-weight:700;color:#8b1a1a;">${r.zone1}</td>`;
+    html += `<td style="font-weight:700;color:#1a3a8b;">${r.zone2}</td>`;
+    html += `<td style="font-weight:700;color:#1a6b1a;">${r.zone3}</td>`;
+    html += `<td style="font-weight:700;color:#6b3a9b;">${r.maxGap}</td>`;
+    html += `<td style="font-weight:700;color:${r.blueOdd==='奇'?'#c81e1e':'#1560c8'};">${r.blueOdd}</td>`;
+    html += `<td style="font-weight:700;color:${r.blueBig==='大'?'#e87d00':'#1a7a4c'};">${r.blueBig}</td>`;
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  html += '<div class="sectionTitle" style="margin-top:18px">特征统计</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px;">';
+
+  const oeMap={};
+  rows.forEach(r=>{ const k=`${r.odd}奇${r.even}偶`; oeMap[k]=(oeMap[k]||0)+1; });
+  html += statCard('奇偶比TOP5', Object.entries(oeMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#c81e1e');
+
+  const bsMap={};
+  rows.forEach(r=>{ const k=`${r.big}大${r.small}小`; bsMap[k]=(bsMap[k]||0)+1; });
+  html += statCard('大小比TOP5', Object.entries(bsMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#e87d00');
+
+  const consecMap={'无连号':0,'1连':0,'2连及以上':0};
+  rows.forEach(r=>{ if(r.consec===0)consecMap['无连号']++; else if(r.consec===1)consecMap['1连']++; else consecMap['2连及以上']++; });
+  html += statCard('连号分布', Object.entries(consecMap).map(([k,v])=>`${k}: ${v}期`), '#e74c3c');
+
+  const acMap={};
+  rows.forEach(r=>{ acMap[r.ac]=(acMap[r.ac]||0)+1; });
+  html += statCard('AC值分布TOP5', Object.entries(acMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`AC=${k}: ${v}期`), '#9b59b6');
+
+  const sumGroups={'低(<70)':0,'中(70-99)':0,'高(≥100)':0};
+  rows.forEach(r=>{ if(r.sumVal<70)sumGroups['低(<70)']++; else if(r.sumVal<100)sumGroups['中(70-99)']++; else sumGroups['高(≥100)']++; });
+  html += statCard('和值分布', Object.entries(sumGroups).map(([k,v])=>`${k}: ${v}期`), '#1560c8');
+
+  const zoneAvg = ['一区(1-11)','二区(12-22)','三区(23-33)'].map((z,i)=>{
+    const key = ['zone1','zone2','zone3'][i];
+    const avg = (rows.reduce((s,r)=>s+r[key],0)/n).toFixed(1);
+    return `${z}: 均${avg}个`;
+  });
+  html += statCard('三区平均落球', zoneAvg, '#1a6b1a');
+
+  let blueOddCnt=0, blueBigCnt=0;
+  rows.forEach(r=>{ if(r.blueOdd==='奇')blueOddCnt++; if(r.blueBig==='大')blueBigCnt++; });
+  html += statCard('蓝球属性', [`奇数: ${blueOddCnt}次 偶数: ${n-blueOddCnt}次`,`大(9-16): ${blueBigCnt}次 小(1-8): ${n-blueBigCnt}次`], '#1a3a8b');
+
+  const gapMap={};
+  rows.forEach(r=>{ gapMap[r.maxGap]=(gapMap[r.maxGap]||0)+1; });
+  html += statCard('最大间距TOP5', Object.entries(gapMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`间距${k}: ${v}期`), '#6b3a9b');
+
+  html += '</div>';
+
+  html += '<div class="sectionTitle">蓝球出现频率</div>';
+  const blueCnt={};
+  rows.forEach(r=>{ blueCnt[r.blue]=(blueCnt[r.blue]||0)+1; });
+  html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">';
+  for(let i=1;i<=16;i++){
+    const cnt=blueCnt[i]||0;
+    const op=0.2+cnt/n*1.2;
+    html += `<div style="text-align:center;width:44px">
+      <div style="background:rgba(21,96,200,${Math.min(op,1)});border-radius:50%;width:32px;height:32px;line-height:32px;margin:0 auto;font-size:13px;color:#fff;font-weight:700">${i}</div>
+      <div style="font-size:11px;color:#888;margin-top:2px;">${cnt}次</div>
+    </div>`;
+  }
+  html += '</div>';
+
+  html += '<div class="sectionTitle">红球出现频率</div>';
+  const redCnt={};
+  rows.forEach(r=>r.red.forEach(i=>{ redCnt[i]=(redCnt[i]||0)+1; }));
+  html += '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px;">';
+  for(let i=1;i<=33;i++){
+    const cnt=redCnt[i]||0;
+    const op=0.2+cnt/n*0.8;
+    html += `<div style="text-align:center;width:44px">
+      <div style="background:rgba(200,30,30,${op});border-radius:50%;width:32px;height:32px;line-height:32px;margin:0 auto;font-size:13px;color:#fff;font-weight:700">${i}</div>
+      <div style="font-size:11px;color:#888;margin-top:2px;">${cnt}次</div>
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+/* ════════════════════════════
+   快乐8 走势图
+════════════════════════════ */
+function calcKL8(numbers){
+  const zones = [0,0,0,0];
+  let odd=0, big=0;
+  numbers.forEach(n=>{
+    if(n<=20) zones[0]++; else if(n<=40) zones[1]++; else if(n<=60) zones[2]++; else zones[3]++;
+    if(n%2!==0) odd++;
+    if(n>40) big++;
+  });
+  const sorted = [...numbers].sort((a,b)=>a-b);
+  const total = numbers.reduce((a,b)=>a+b, 0);
+  const maxN = sorted[sorted.length-1];
+  const minN = sorted[0];
+  let consecGroups = 0;
+  let inConsec = false;
+  for(let i=0;i<sorted.length-1;i++){
+    if(sorted[i+1]-sorted[i]===1){ if(!inConsec){ consecGroups++; inConsec=true; } }
+    else { inConsec=false; }
+  }
+  const five = [0,0,0,0,0];
+  numbers.forEach(n=>{ five[Math.min(4, Math.floor((n-1)/16))]++; });
+  return { zones, odd, even:20-odd, big, small:20-big, total, maxN, minN, consecGroups, five };
+}
+
+function renderKL8Trend(records){
+  const n = records.length;
+  const rows = records.map(r=>({...r, ...calcKL8(r.numbers)}));
+
+  let html = `<div class="sectionTitle">快乐8 走势图（近${n}期）</div>`;
+  html += rotateHintHTML();
+  html += '<div class="trendScrollBox"><table class="trendTable">';
+  html += '<thead><tr>';
+  html += '<th>期号</th><th>日期</th>';
+  const zoneBg=['#1a3a8b','#8b1a1a','#1a6b1a','#7a1233'];
+  for(let i=1;i<=80;i++){
+    const zi=Math.floor((i-1)/20);
+    html += `<th style="background:${zoneBg[zi]};font-size:10px;">${i}</th>`;
+  }
+  html += '<th>奇偶</th><th>大小</th>';
+  html += '<th style="background:#1a3a8b;font-size:10px;">1-20</th>';
+  html += '<th style="background:#8b1a1a;font-size:10px;">21-40</th>';
+  html += '<th style="background:#1a6b1a;font-size:10px;">41-60</th>';
+  html += '<th style="background:#7a1233;font-size:10px;">61-80</th>';
+  html += '<th>总和</th><th>最小</th><th>最大</th><th>连续组</th>';
+  html += '<th style="font-size:9px;">五行1</th><th style="font-size:9px;">五行2</th><th style="font-size:9px;">五行3</th><th style="font-size:9px;">五行4</th><th style="font-size:9px;">五行5</th>';
+  html += '</tr></thead><tbody>';
+
+  rows.forEach(r=>{
+    html += '<tr>';
+    html += `<td style="color:#555;">${r.qihao.slice(-3)}</td>`;
+    html += `<td style="font-size:11px;color:#888;">${r.date.slice(5)}</td>`;
+    for(let i=1;i<=80;i++){
+      const zi=Math.floor((i-1)/20);
+      html += r.numbers.includes(i)
+        ? `<td style="background:${zoneBg[zi]};color:#f1d688;font-weight:700;font-size:11px;">${i}</td>`
+        : `<td style="color:#ccc;">·</td>`;
+    }
+    html += `<td style="font-weight:700;font-size:11px;color:#c81e1e;">${r.odd}奇${r.even}偶</td>`;
+    html += `<td style="font-weight:700;font-size:11px;color:#e87d00;">${r.big}大${r.small}小</td>`;
+    r.zones.forEach((z,zi)=>{ html += `<td style="font-weight:700;color:${zoneBg[zi]};">${z}</td>`; });
+    const totalColor = r.total>=820?'#e87d00':r.total>=640?'#1a7a4c':'#1560c8';
+    html += `<td style="font-weight:700;color:${totalColor};font-size:11px;">${r.total}</td>`;
+    html += `<td style="color:#555;">${r.minN}</td>`;
+    html += `<td style="color:#555;">${r.maxN}</td>`;
+    html += `<td style="font-weight:700;color:${r.consecGroups>2?'#e74c3c':'#555'};">${r.consecGroups}</td>`;
+    const fiveColors=['#1a3a8b','#8b1a1a','#1a6b1a','#7a1233','#6b3a9b'];
+    r.five.forEach((v,fi)=>{ html += `<td style="font-weight:700;color:${fiveColors[fi]};">${v}</td>`; });
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+
+  html += '<div class="sectionTitle" style="margin-top:18px">特征统计</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:10px;">';
+
+  const zoneAvg = [0,1,2,3].map(zi=>(rows.reduce((s,r)=>s+r.zones[zi],0)/n).toFixed(1));
+  const zoneNames=['1-20','21-40','41-60','61-80'];
+  html += statCard('区间平均落球数', zoneNames.map((z,i)=>`${z}区: 均${zoneAvg[i]}个`), '#1a3a8b');
+
+  const oeMap={};
+  rows.forEach(r=>{ const k=`${r.odd}奇${r.even}偶`; oeMap[k]=(oeMap[k]||0)+1; });
+  html += statCard('奇偶比TOP5', Object.entries(oeMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#c81e1e');
+
+  const bsMap={};
+  rows.forEach(r=>{ const k=`${r.big}大${r.small}小`; bsMap[k]=(bsMap[k]||0)+1; });
+  html += statCard('大小比TOP5', Object.entries(bsMap).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([k,v])=>`${k}: ${v}期`), '#e87d00');
+
+  const totalGroups={'低(<640)':0,'中(640-819)':0,'高(≥820)':0};
+  rows.forEach(r=>{ if(r.total<640)totalGroups['低(<640)']++; else if(r.total<820)totalGroups['中(640-819)']++; else totalGroups['高(≥820)']++; });
+  html += statCard('号码总和分布', Object.entries(totalGroups).map(([k,v])=>`${k}: ${v}期`), '#1560c8');
+
+  const consecMap={};
+  rows.forEach(r=>{ consecMap[r.consecGroups]=(consecMap[r.consecGroups]||0)+1; });
+  html += statCard('连续号组数', Object.entries(consecMap).sort((a,b)=>+a[0]-+b[0]).map(([k,v])=>`${k}组: ${v}期`), '#e74c3c');
+
+  const fiveAvg = [0,1,2,3,4].map(fi=>(rows.reduce((s,r)=>s+r.five[fi],0)/n).toFixed(1));
+  const fiveNames=['1-16','17-32','33-48','49-64','65-80'];
+  html += statCard('五行平均落球', fiveNames.map((z,i)=>`${z}: 均${fiveAvg[i]}个`), '#6b3a9b');
+
+  const cnt={};
+  rows.forEach(r=>r.numbers.forEach(i=>{ cnt[i]=(cnt[i]||0)+1; }));
+  const sorted=Object.entries(cnt).sort((a,b)=>b[1]-a[1]);
+  html += statCard('🔥 热号TOP10', sorted.slice(0,10).map(([k,v])=>`${k}号: ${v}次`), '#c81e1e');
+  html += statCard('❄️ 冷号TOP10', sorted.slice(-10).reverse().map(([k,v])=>`${k}号: ${v}次`), '#1560c8');
+
+  html += '</div>';
+
+  html += '<div class="sectionTitle">号码出现频率</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(10,1fr);gap:4px;margin-bottom:18px;">';
+  for(let i=1;i<=80;i++){
+    const c=cnt[i]||0;
+    const zi=Math.floor((i-1)/20);
+    const op=0.15+c/n*1.2;
+    html += `<div style="text-align:center;">
+      <div style="background:${zoneBg[zi]};opacity:${Math.min(op,1)};border-radius:4px;font-size:11px;color:#fff;font-weight:700;padding:3px 0;">${i}</div>
+      <div style="font-size:9px;color:#888;">${c}</div>
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+// 横屏建议提示条（竖屏时显示）
+function rotateHintHTML(){
+  return `<div class="rotateHint"><span class="icon">📱</span><span>数据列较多，<b>建议将手机横过来</b>查看会更清晰完整；也可以直接左右滑动表格查看。期号和日期两列会一直固定在左侧。</span></div>`;
+}
+
+function statCard(title, lines, color='#2b2520'){
+  return `<div style="background:#faf9f6;border:1px solid #e3e0d8;border-radius:8px;padding:10px;">
+    <div style="font-size:13px;font-weight:700;color:${color};margin-bottom:6px;">${title}</div>
+    ${lines.map(l=>`<div style="font-size:12px;color:#555;line-height:1.8">${l}</div>`).join('')}
+  </div>`;
+}
+
+async function downloadTrend(){
+  const wrap = document.getElementById('trendWrap');
+  if(!wrap.innerHTML) return;
+  const btn = document.getElementById('downloadTrendBtn');
+  btn.textContent = '正在生成图片…';
+  btn.disabled = true;
+  try{
+    const repo = (localStorage.getItem('fucaiGithubRepo')||'').trim();
+    const url = `https://raw.githubusercontent.com/${repo}/main/history.json?t=${Date.now()}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const records = data[trendType].slice(-50);
+    const canvas = await (trendType==='3d'  ? draw3DCanvas(records)
+                        : trendType==='ssq' ? drawSSQCanvas(records)
+                        :                    drawKL8Canvas(records));
+    const link = document.createElement('a');
+    const labelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
+    link.download = `福彩走势图_${labelMap[trendType]}_${new Date().toISOString().slice(0,10)}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  } catch(e){
+    alert('下载失败：'+e.message);
+  } finally{
+    btn.textContent = '下载走势图（PNG）';
+    btn.disabled = false;
+  }
+}
+
+/* ── Canvas绘图工具函数 ── */
+function makeCanvas(w, h){
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#f2efe8';
+  ctx.fillRect(0,0,w,h);
+  return {c, ctx};
+}
+function ctxText(ctx, text, x, y, opts={}){
+  const {size=12, color='#333', bold=false, align='center', font='Noto Sans SC,Arial,sans-serif'} = opts;
+  ctx.fillStyle = color;
+  ctx.font = `${bold?'bold ':''} ${size}px ${font}`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+}
+function ctxCircle(ctx, x, y, r, fill, text, textColor='#fff', fontSize=11){
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctxText(ctx, String(text), x, y, {size:fontSize, color:textColor, bold:true});
+}
+function ctxRect(ctx, x, y, w, h, fill){
+  ctx.fillStyle = fill;
+  ctx.fillRect(x, y, w, h);
+}
+async function drawQR(ctx, W, startY){
+  // 二维码画在 startY 处，居中，不遮挡走势图
+  if(!state.qr.show || !state.qr.image) return startY;
+  return new Promise(resolve=>{
+    const img = new Image();
+    img.onload = ()=>{
+      const QR = 160, pad = 20;
+      // 分隔线
+      ctx.strokeStyle='#d4a017'; ctx.lineWidth=1.5;
+      ctx.setLineDash([8,6]);
+      ctx.beginPath();
+      ctx.moveTo(pad, startY+20); ctx.lineTo(W-pad, startY+20);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // 白底圆角框
+      const bx = (W-QR)/2 - 12;
+      const by = startY + 36;
+      const bw = QR + 24;
+      const bh = QR + 24 + (state.qr.caption ? 36 : 0);
+      ctx.fillStyle='#fff';
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, 14);
+      ctx.fill();
+      ctx.strokeStyle='#d4a017'; ctx.lineWidth=3;
+      ctx.stroke();
+      // 二维码图片
+      ctx.drawImage(img, (W-QR)/2, by+12, QR, QR);
+      // 说明文字
+      if(state.qr.caption){
+        ctxText(ctx, state.qr.caption, W/2, by+QR+24+10,
+          {size:14, color:'#555', align:'center'});
+      }
+      resolve(by + bh + pad);
+    };
+    img.onerror = ()=>resolve(startY);
+    img.src = state.qr.image;
+  });
+}
+
+/* ════════════════════════════
+   Canvas版：福彩3D走势图
+════════════════════════════ */
+async function draw3DCanvas(records){
+  const SCALE = 2;  // 高清2倍
+  const rows = records.map(r=>({...r, ...calc3D(r.digits)}));
+  const n = rows.length;
+
+  // 手机竖屏友好：3D内容宽度固定，适合手机横屏或平板
+  const COL_Q=58, COL_D=46, COL_N=20, COL_S=36;
+  const W0 = COL_Q + COL_D + COL_N*30 + COL_S*5 + 40;  // 内容宽
+  const ROW_H=28, HEAD_H=56, TITLE_H=48;
+  const QR_H = (state.qr.show && state.qr.image) ? (220 + (state.qr.caption?40:0)) : 0;
+  const FOOT_H = 50;
+  const H0 = TITLE_H + HEAD_H + ROW_H*n + FOOT_H + QR_H + 20;
+
+  const W = W0*SCALE, H = H0*SCALE;
+  const {c, ctx} = makeCanvas(W, H);
+  ctx.scale(SCALE, SCALE);
+
+  const cx=20; let cy=0;
+
+  // 标题栏
+  ctx.fillStyle='#1a1a2e';
+  ctx.fillRect(0,0,W0,TITLE_H);
+  ctxText(ctx,'福彩3D走势图（近'+n+'期）',W0/2,TITLE_H/2,
+    {size:16,bold:true,color:'#f1d688'});
+  cy=TITLE_H;
+
+  const headColors=['#8b1a1a','#1a3a8b','#1a6b1a'];
+  const posLabels=['百位走势','十位走势','个位走势'];
+  const statLabels=['和值','跨度','奇偶','大小','012路'];
+
+  // 表头第1行
+  let hx=cx;
+  const hRow1=[
+    [COL_Q,'期号','#2c2c4e'],
+    [COL_D,'日期','#2c2c4e'],
+    ...posLabels.map((l,i)=>[COL_N*10,l,headColors[i]]),
+    ...statLabels.map(l=>[COL_S,l,'#3a2a0a'])
+  ];
+  hRow1.forEach(([w,label,bg])=>{
+    ctxRect(ctx,hx,cy,w,HEAD_H/2,bg);
+    ctx.strokeStyle='rgba(255,255,255,0.2)';ctx.lineWidth=0.5;
+    ctx.strokeRect(hx,cy,w,HEAD_H/2);
+    ctxText(ctx,label,hx+w/2,cy+HEAD_H/4,{size:10,color:'#f1d688',bold:true});
+    hx+=w;
+  });
+  cy+=HEAD_H/2;
+
+  // 表头第2行：数字0-9
+  hx=cx;
+  ctxRect(ctx,hx,cy,COL_Q,HEAD_H/2,'#2c2c4e'); hx+=COL_Q;
+  ctxRect(ctx,hx,cy,COL_D,HEAD_H/2,'#2c2c4e'); hx+=COL_D;
+  for(let pos=0;pos<3;pos++){
+    for(let d=0;d<10;d++){
+      ctxRect(ctx,hx,cy,COL_N,HEAD_H/2,headColors[pos]);
+      ctx.strokeStyle='rgba(255,255,255,0.2)';ctx.lineWidth=0.3;
+      ctx.strokeRect(hx,cy,COL_N,HEAD_H/2);
+      ctxText(ctx,String(d),hx+COL_N/2,cy+HEAD_H/4,{size:9,color:'#f1d688'});
+      hx+=COL_N;
+    }
+  }
+  statLabels.forEach(()=>{
+    ctxRect(ctx,hx,cy,COL_S,HEAD_H/2,'#3a2a0a');
+    ctx.strokeStyle='rgba(255,255,255,0.1)';ctx.strokeRect(hx,cy,COL_S,HEAD_H/2);
+    hx+=COL_S;
+  });
+  cy+=HEAD_H/2;
+
+  // 数据行
+  const posColors=['#c81e1e','#1560c8','#1a7a4c'];
+  rows.forEach((r,ri)=>{
+    const bg=ri%2===0?'#ffffff':'#f4f0ea';
+    ctxRect(ctx,cx,cy,W0-40,ROW_H,bg);
+    hx=cx;
+    ctxText(ctx,r.qihao.slice(-3),hx+COL_Q/2,cy+ROW_H/2,{size:10,color:'#444'}); hx+=COL_Q;
+    ctxText(ctx,r.date.slice(5),  hx+COL_D/2,cy+ROW_H/2,{size:9, color:'#888'}); hx+=COL_D;
+    r.digits.forEach((digit,pos)=>{
+      for(let d=0;d<10;d++){
+        if(digit===d){
+          ctxCircle(ctx,hx+COL_N/2,cy+ROW_H/2,8,posColors[pos],d,'#fff',9);
+        } else {
+          ctxText(ctx,'·',hx+COL_N/2,cy+ROW_H/2,{size:10,color:'#ccc'});
+        }
+        ctx.strokeStyle='#e8e8e8';ctx.lineWidth=0.3;
+        ctx.strokeRect(hx,cy,COL_N,ROW_H);
+        hx+=COL_N;
+      }
+    });
+    const statVals=[
+      [String(r.sum),  r.sum>=14?'#e87d00':'#1a7a4c'],
+      [String(r.span), '#6b3a9b'],
+      [r.oddEven,      '#c81e1e'],
+      [r.bigSmall,     '#1560c8'],
+      [r.road.join(''),'#9b59b6'],
+    ];
+    statVals.forEach(([val,col])=>{
+      ctx.strokeStyle='#e8e8e8';ctx.lineWidth=0.3;
+      ctx.strokeRect(hx,cy,COL_S,ROW_H);
+      ctxText(ctx,val,hx+COL_S/2,cy+ROW_H/2,{size:10,bold:true,color:col});
+      hx+=COL_S;
+    });
+    cy+=ROW_H;
+  });
+
+  // 底部说明
+  cy+=14;
+  ctxText(ctx,'数据来源  |  仅供参考，开奖以官方公布为准',
+    W0/2,cy,{size:10,color:'#aaa'});
+  cy+=FOOT_H-14;
+
+  // 二维码（正下方）
+  await drawQR(ctx, W0, cy);
+
+  ctx.setTransform(1,0,0,1,0,0); // 重置scale
+  return c;
+}
+
+/* ════════════════════════════
+   Canvas版：双色球走势图
+════════════════════════════ */
+async function drawSSQCanvas(records){
+  const SCALE=2;
+  const n=records.length;
+  const COL_Q=58,COL_D=46,COL_N=20,COL_B=28;
+  const W0=COL_Q+COL_D+COL_N*33+COL_B+40;
+  const ROW_H=26,HEAD_H=32,TITLE_H=48;
+  const QR_H=(state.qr.show&&state.qr.image)?(220+(state.qr.caption?40:0)):0;
+  const H0=TITLE_H+HEAD_H+ROW_H*n+50+QR_H+20;
+  const {c,ctx}=makeCanvas(W0*SCALE,H0*SCALE);
+  ctx.scale(SCALE,SCALE);
+  const cx=20; let cy=0;
+
+  ctx.fillStyle='#1a1a2e';ctx.fillRect(0,0,W0,TITLE_H);
+  ctxText(ctx,'双色球走势图（近'+n+'期）',W0/2,TITLE_H/2,{size:16,bold:true,color:'#f1d688'});
+  cy=TITLE_H;
+
+  let hx=cx;
+  [[COL_Q,'期号','#2c2c4e'],[COL_D,'日期','#2c2c4e']].forEach(([w,l,bg])=>{
+    ctxRect(ctx,hx,cy,w,HEAD_H,bg);
+    ctxText(ctx,l,hx+w/2,cy+HEAD_H/2,{size:10,color:'#f1d688',bold:true}); hx+=w;
+  });
+  for(let n=1;n<=33;n++){
+    ctxRect(ctx,hx,cy,COL_N,HEAD_H,'#8b1a1a');
+    ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=0.3;ctx.strokeRect(hx,cy,COL_N,HEAD_H);
+    ctxText(ctx,String(n).padStart(2,'0'),hx+COL_N/2,cy+HEAD_H/2,{size:8,color:'#f1d688'}); hx+=COL_N;
+  }
+  ctxRect(ctx,hx,cy,COL_B,HEAD_H,'#1a3a8b');
+  ctxText(ctx,'蓝',hx+COL_B/2,cy+HEAD_H/2,{size:10,color:'#f1d688',bold:true});
+  cy+=HEAD_H;
+
+  records.forEach((r,ri)=>{
+    const bg=ri%2===0?'#fff':'#f4f0ea';
+    ctxRect(ctx,cx,cy,W0-40,ROW_H,bg);
+    hx=cx;
+    ctxText(ctx,r.qihao.slice(-3),hx+COL_Q/2,cy+ROW_H/2,{size:10,color:'#444'}); hx+=COL_Q;
+    ctxText(ctx,r.date.slice(5),  hx+COL_D/2,cy+ROW_H/2,{size:9, color:'#888'}); hx+=COL_D;
+    for(let n=1;n<=33;n++){
+      if(r.red.includes(n)){
+        ctxCircle(ctx,hx+COL_N/2,cy+ROW_H/2,8,'#c81e1e',String(n).padStart(2,'0'),'#fff',8);
+      } else {
+        ctxText(ctx,'·',hx+COL_N/2,cy+ROW_H/2,{size:10,color:'#ddd'});
+      }
+      ctx.strokeStyle='#eee';ctx.lineWidth=0.3;ctx.strokeRect(hx,cy,COL_N,ROW_H);
+      hx+=COL_N;
+    }
+    ctxCircle(ctx,hx+COL_B/2,cy+ROW_H/2,10,'#1560c8',String(r.blue).padStart(2,'0'),'#fff',8);
+    cy+=ROW_H;
+  });
+
+  cy+=14;
+  ctxText(ctx,'数据来源： |  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
+  cy+=36;
+  await drawQR(ctx,W0,cy);
+  ctx.setTransform(1,0,0,1,0,0);
+  return c;
+}
+
+/* ════════════════════════════
+   Canvas版：快乐8走势图
+════════════════════════════ */
+async function drawKL8Canvas(records){
+  const SCALE=2;
+  const n=records.length;
+  const COL_Q=56,COL_D=44,COL_N=18;
+  const W0=COL_Q+COL_D+COL_N*80+40;
+  const ROW_H=22,HEAD_H=28,TITLE_H=48;
+  const QR_H=(state.qr.show&&state.qr.image)?(220+(state.qr.caption?40:0)):0;
+  const H0=TITLE_H+HEAD_H+ROW_H*n+50+QR_H+20;
+  const {c,ctx}=makeCanvas(W0*SCALE,H0*SCALE);
+  ctx.scale(SCALE,SCALE);
+  const cx=20; let cy=0;
+
+  ctx.fillStyle='#1a1a2e';ctx.fillRect(0,0,W0,TITLE_H);
+  ctxText(ctx,'快乐8走势图（近'+n+'期）',W0/2,TITLE_H/2,{size:16,bold:true,color:'#f1d688'});
+  cy=TITLE_H;
+
+  let hx=cx;
+  [[COL_Q,'期号','#2c2c4e'],[COL_D,'日期','#2c2c4e']].forEach(([w,l,bg])=>{
+    ctxRect(ctx,hx,cy,w,HEAD_H,bg);
+    ctxText(ctx,l,hx+w/2,cy+HEAD_H/2,{size:10,color:'#f1d688',bold:true}); hx+=w;
+  });
+  for(let n=1;n<=80;n++){
+    ctxRect(ctx,hx,cy,COL_N,HEAD_H,'#7a1233');
+    ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=0.3;ctx.strokeRect(hx,cy,COL_N,HEAD_H);
+    ctxText(ctx,String(n),hx+COL_N/2,cy+HEAD_H/2,{size:7,color:'#f1d688'}); hx+=COL_N;
+  }
+  cy+=HEAD_H;
+
+  records.forEach((r,ri)=>{
+    const bg=ri%2===0?'#fff':'#f4f0ea';
+    ctxRect(ctx,cx,cy,W0-40,ROW_H,bg);
+    hx=cx;
+    ctxText(ctx,r.qihao.slice(-3),hx+COL_Q/2,cy+ROW_H/2,{size:9,color:'#444'}); hx+=COL_Q;
+    ctxText(ctx,r.date.slice(5),  hx+COL_D/2,cy+ROW_H/2,{size:8,color:'#888'}); hx+=COL_D;
+    for(let n=1;n<=80;n++){
+      if(r.numbers.includes(n)){
+        ctxRect(ctx,hx+1,cy+2,COL_N-2,ROW_H-4,'#7a1233');
+        ctxText(ctx,String(n),hx+COL_N/2,cy+ROW_H/2,{size:8,color:'#f1d688',bold:true});
+      } else {
+        ctxText(ctx,'·',hx+COL_N/2,cy+ROW_H/2,{size:8,color:'#ddd'});
+      }
+      ctx.strokeStyle='#eee';ctx.lineWidth=0.2;ctx.strokeRect(hx,cy,COL_N,ROW_H);
+      hx+=COL_N;
+    }
+    cy+=ROW_H;
+  });
+
+  cy+=14;
+  ctxText(ctx,'数据来源：|  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
+  cy+=36;
+  await drawQR(ctx,W0,cy);
+  ctx.setTransform(1,0,0,1,0,0);
+  return c;
+}
+
+/* ═══════════════════════════════════════════════════
+   AI文案助手
+═══════════════════════════════════════════════════ */
+let chatHistory = [];   // [{role:'user'|'assistant', content:'...'}]
+
+const CHAT_PRESETS = {
+  moments: '帮我写一条发朋友圈的文案，主题是：[请在这里描述你想发的内容，比如今天做了什么/心情/照片场景]，风格要轻松自然，不要太长，带1-2个合适的emoji。',
+  wechat:  '帮我想一句微信聊天该怎么回复，场景是：[请描述对方说了什么/你想表达什么]，语气要得体自然。',
+  product: '帮我写一段产品/活动推广文案，产品/活动是：[请描述]，卖点是：[请描述]，要简短有吸引力，适合发朋友圈或群里。',
+  holiday: '帮我写一条节日祝福文案，节日是：[请填写]，发给：[朋友/客户/家人]，风格：[温馨/幽默/正式，任选]。',
+  reply:   '帮我想一个得体的回复，场景是：[请描述对方发了什么消息/什么情况]，我想表达的意思是：[请描述]。',
+};
+
+document.querySelectorAll('.chatQuickBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const preset = CHAT_PRESETS[btn.dataset.preset];
+    if(preset){
+      document.getElementById('chatInput').value = preset;
+      document.getElementById('chatInput').focus();
+    }
+  });
+});
+
+function renderChatMessages(){
+  const wrap = document.getElementById('chatMessages');
+  const emptyHint = document.getElementById('chatEmptyHint');
+  if(chatHistory.length === 0){
+    if(emptyHint) emptyHint.style.display = 'block';
+    wrap.querySelectorAll('.chatBubbleRow').forEach(el=>el.remove());
+    return;
+  }
+  if(emptyHint) emptyHint.style.display = 'none';
+  wrap.querySelectorAll('.chatBubbleRow').forEach(el=>el.remove());
+  chatHistory.forEach(msg=>{
+    const row = document.createElement('div');
+    row.className = 'chatBubbleRow ' + (msg.role==='user' ? 'user' : 'ai');
+    const bubble = document.createElement('div');
+    bubble.className = 'chatBubble ' + (msg.role==='user' ? 'user' : 'ai');
+    bubble.textContent = msg.content;
+    row.appendChild(bubble);
+    if(msg.role === 'assistant'){
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'chatCopyBtn';
+      copyBtn.textContent = '📋 复制';
+      copyBtn.addEventListener('click', ()=>{
+        navigator.clipboard.writeText(msg.content).then(()=>{
+          copyBtn.textContent = '✓ 已复制';
+          setTimeout(()=>{ copyBtn.textContent = '📋 复制'; }, 1500);
+        }).catch(()=>{
+          copyBtn.textContent = '复制失败，请手动选中';
+        });
+      });
+      row.appendChild(copyBtn);
+    }
+    wrap.appendChild(row);
+  });
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function sendChatMessage(){
+  const input = document.getElementById('chatInput');
+  const statusEl = document.getElementById('chatStatus');
+  const sendBtn = document.getElementById('chatSendBtn');
+  const text = input.value.trim();
+  if(!text) return;
+
+  const gwUrl    = document.getElementById('gwUrlInput').value.trim();
+  const gwSecret = document.getElementById('gwSecretInput').value.trim();
+  const gwModel  = document.getElementById('gwModelInput').value.trim() || 'openrouter/free';
+
+  if(!gwUrl || !gwSecret){
+    statusEl.className = 'status err';
+    statusEl.textContent = '请先在「走势图」页签配置好 API 地址和 API Key，再回来使用。';
+    return;
+  }
+
+  chatHistory.push({role:'user', content: text});
+  renderChatMessages();
+  input.value = '';
+  sendBtn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = 'AI 思考中…';
+
+  try{
+    const systemPrompt = `你是一个擅长写短文案的助手，主要帮用户写朋友圈文案、微信聊天话术、产品推广、节日祝福、得体回复等日常社交场景的文字，也可以陪用户聊其它话题。
+
+要求：
+1. 文案类需求默认给出简短版本（1-3句话为主，除非用户要求更长），语言自然口语化，不要写得像广告腔或AI腔。
+2. 可以适量使用emoji让文案更生动，但不要堆砌，1-3个即可，且要契合语境。
+3. 如果用户的描述不够具体（比如没说清楚场景、风格、对象），可以先用一两句话简短反问关键信息，不用啰嗦。
+4. 如果用户要的是文案，直接给出可以直接复制使用的最终文字，不需要额外解释"这是为您准备的文案"这类客套话，除非用户明确要求说明思路。
+5. 保持每次回复简洁，不要长篇大论，除非用户明确要求详细展开。
+6. 请使用中文回答。`;
+
+    const messages = [
+      {role:'system', content: systemPrompt},
+      ...chatHistory.map(m=>({role:m.role, content:m.content})),
+    ];
+
+    const endpoint = gwUrl.replace(/\/$/, '') + '/v1/chat/completions';
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': 'Bearer ' + gwSecret,
+        // OpenRouter 建议带上来源标识，便于在其后台区分调用来源；
+        // 自建 Gateway 会忽略这两个头，不影响兼容性
+        'HTTP-Referer':  location.origin || 'https://github.io',
+        'X-Title':       'Fucai Analyzer',
+      },
+      body: JSON.stringify({
+        model:       gwModel,
+        messages:    messages,
+        max_tokens:  800,
+        temperature: 0.8,
+      }),
+    });
+
+    if(!resp.ok){
+      const err = await resp.text().catch(()=>'');
+      throw new Error(`HTTP ${resp.status} — ${explainGwError(resp.status, err)}`);
+    }
+    const data = await resp.json();
+    const replyText = data.choices?.[0]?.message?.content || '';
+    if(!replyText) throw new Error('AI 返回内容为空');
+
+    chatHistory.push({role:'assistant', content: replyText});
+    renderChatMessages();
+    saveChatHistory();
+    statusEl.className = 'status ok';
+    statusEl.textContent = '✓ 完成';
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '失败：' + e.message;
+    chatHistory.pop();   // 失败时移除刚才添加的用户消息，避免历史里留个没有回应的孤立提问
+    renderChatMessages();
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+function saveChatHistory(){
+  try{ localStorage.setItem('fucaiChatHistory', JSON.stringify(chatHistory.slice(-40))); }catch(e){}
+}
+function loadChatHistory(){
+  try{
+    const raw = localStorage.getItem('fucaiChatHistory');
+    if(raw) chatHistory = JSON.parse(raw);
+  }catch(e){ chatHistory = []; }
+}
+
+document.getElementById('chatSendBtn').addEventListener('click', sendChatMessage);
+document.getElementById('chatInput').addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter' && !e.shiftKey){
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+document.getElementById('chatClearBtn').addEventListener('click', ()=>{
+  if(chatHistory.length === 0) return;
+  if(confirm('确定要清空全部对话记录吗？')){
+    chatHistory = [];
+    renderChatMessages();
+    saveChatHistory();
+  }
+});
+
+loadChatHistory();
+renderChatMessages();
+
+
+/* ═══════════════════════════════════════════════════
+   扫码存档：拍照（系统相机）+ 自动OCR整图+正则提取（票名/面值/编号）
+   + 手动填中奖金额 + 清单管理（存GitHub） + Excel导出
+═══════════════════════════════════════════════════ */
+const SCAN_CACHE_KEY  = 'fucaiScanRecordsCache';   // 离线兜底缓存，GitHub才是数据的真正来源
+const SCAN_FILE_PATH  = 'scan_records.json';
+// OCR worker 实例改由下方 scanWorkers/scanWorkerLoads 按语言分别管理
+let scanRecords = [];       // 当前内存里的记录列表（页面打开时从GitHub拉取）
+let scanCaptureMode = 'code';   // 当前拍摄目标：name / amount / code
+let lastCapturedDataUrl = null; // 最近一次拍的照片，供"重新框选"复用，不用每次都重新调起相机
+let cropImgNaturalW = 0, cropImgNaturalH = 0;
+
+function getScanConfig(){
+  return {
+    repo: (localStorage.getItem('fucaiGithubRepo') || '').trim(),
+    token: (localStorage.getItem('fucaiScanGhToken') || '').trim(),
+  };
+}
+
+/* ── GitHub 读写 ── */
+async function ghScanFetch(){
+  const { repo } = getScanConfig();
+  if(!repo) return { list: [], ok: false, reason: '未配置仓库地址' };
+  try{
+    const url = `https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`;
+    const resp = await fetch(url);
+    if(resp.status === 404) return { list: [], ok: true };
+    if(!resp.ok) return { list: [], ok: false, reason: `HTTP ${resp.status}` };
+    const list = await resp.json();
+    return { list: Array.isArray(list) ? list : [], ok: true };
+  } catch(e){
+    return { list: [], ok: false, reason: e.message };
+  }
+}
+
+async function ghScanGetSha(){
+  const { repo, token } = getScanConfig();
+  if(!repo || !token) return null;
+  try{
+    const url = `https://api.github.com/repos/${repo}/contents/${SCAN_FILE_PATH}`;
+    const resp = await fetch(url, {
+      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
+    });
+    if(resp.status === 404) return null;
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    return data.sha || null;
+  } catch(e){ return null; }
+}
+
+async function ghScanPush(list){
+  const { repo, token } = getScanConfig();
+  if(!repo || !token) return { ok:false, reason:'未配置仓库地址或Token' };
+  try{
+    const sha = await ghScanGetSha();
+    const url = `https://api.github.com/repos/${repo}/contents/${SCAN_FILE_PATH}`;
+    const contentStr = JSON.stringify(list, null, 2);
+    const body = {
+      message: `扫码存档更新 ${new Date().toISOString()}`,
+      content: btoa(unescape(encodeURIComponent(contentStr))),
+      branch: 'main',
+    };
+    if(sha) body.sha = sha;
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify(body)
+    });
+    if(!resp.ok){
+      const err = await resp.json().catch(()=>({}));
+      return { ok:false, reason: `HTTP ${resp.status} ${err.message||''}` };
+    }
+    return { ok:true };
+  } catch(e){
+    return { ok:false, reason: e.message };
+  }
+}
+
+/* ── 本地兜底缓存 ── */
+function loadLocalCache(){
+  try{
+    const raw = localStorage.getItem(SCAN_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch(e){ return []; }
+}
+function saveLocalCache(list){
+  try{ localStorage.setItem(SCAN_CACHE_KEY, JSON.stringify(list)); } catch(e){}
+}
+
+async function syncScanToGithub(){
+  const syncEl = document.getElementById('scanSyncStatus');
+  const { repo, token } = getScanConfig();
+  if(!repo || !token){
+    syncEl.className = 'status err';
+    syncEl.textContent = '⚠️ 未配置GitHub仓库/Token，当前仅保存在本机浏览器，请在上方「GitHub 存储设置」中填写后保存。';
+    saveLocalCache(scanRecords);
+    return false;
+  }
+  syncEl.className = 'status'; syncEl.textContent = '正在同步到GitHub…';
+  const result = await ghScanPush(scanRecords);
+  if(result.ok){
+    saveLocalCache(scanRecords);
+    syncEl.className = 'status ok';
+    syncEl.textContent = `✓ 已同步到 GitHub（${repo}/${SCAN_FILE_PATH}）`;
+    return true;
+  } else {
+    syncEl.className = 'status err';
+    syncEl.textContent = `⚠️ 同步到GitHub失败：${result.reason}（本次记录已保留在本机，稍后可点「从GitHub刷新」重试）`;
+    saveLocalCache(scanRecords);
+    return false;
+  }
+}
+
+async function loadScanFromGithub(){
+  const syncEl = document.getElementById('scanSyncStatus');
+  const { repo } = getScanConfig();
+  if(!repo){
+    syncEl.className = 'status err';
+    syncEl.textContent = '⚠️ 尚未配置GitHub仓库地址，当前使用本机浏览器缓存，配置后点「从GitHub刷新」同步。';
+    scanRecords = loadLocalCache();
+    renderScanTable();
+    return;
+  }
+  syncEl.className = 'status'; syncEl.textContent = '正在从GitHub读取记录…';
+  const result = await ghScanFetch();
+  if(result.ok){
+    scanRecords = result.list;
+    saveLocalCache(scanRecords);
+    syncEl.className = 'status ok';
+    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录`;
+  } else {
+    scanRecords = loadLocalCache();
+    syncEl.className = 'status err';
+    syncEl.textContent = `⚠️ 从GitHub读取失败(${result.reason})，暂时显示本机缓存的 ${scanRecords.length} 条记录`;
+  }
+  renderScanTable();
+}
+
+function renderScanTable(){
+  const body = document.getElementById('scanTableBody');
+  const badge = document.getElementById('scanCountBadge');
+  badge.textContent = scanRecords.length;
+  if(scanRecords.length === 0){
+    body.innerHTML = '<tr class="scanEmptyRow"><td colspan="7">暂无记录，拍照或手动添加后会显示在这里</td></tr>';
+    return;
+  }
+  body.innerHTML = scanRecords.map((item, i) => `
+    <tr>
+      <td>${i+1}</td>
+      <td>${escapeHtml(item.name||'')}</td>
+      <td>${escapeHtml(item.amount||'')}</td>
+      <td>${escapeHtml(item.code||'')}</td>
+      <td>${escapeHtml(item.prize||'')}</td>
+      <td style="font-size:11.5px;color:var(--muted);">${item.time||''}</td>
+      <td><button class="delBtn" data-idx="${i}" title="删除">✕</button></td>
+    </tr>
+  `).join('');
+  body.querySelectorAll('.delBtn').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const idx = parseInt(btn.dataset.idx, 10);
+      scanRecords.splice(idx, 1);
+      renderScanTable();
+      await syncScanToGithub();
+    });
+  });
+}
+
+// escapeHtml 复用文件前面已定义的同名函数（逻辑完全一致）
+
+async function addScanRecord(rec){
+  const now = new Date();
+  const timeStr = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  scanRecords.push({ name: rec.name||'', amount: rec.amount||'', code: rec.code||'', prize: rec.prize||'', time: timeStr });
+  renderScanTable();
+  await syncScanToGithub();
+}
+
+/* ── GitHub 存储设置 ── */
+try{
+  const cfg = getScanConfig();
+  const repoInput = document.getElementById('scanRepoInput');
+  if(repoInput && !repoInput.value) repoInput.value = cfg.repo;
+  const tokenInput = document.getElementById('scanTokenInput');
+  if(tokenInput && cfg.token) tokenInput.value = cfg.token;
+} catch(e){}
+
+document.getElementById('scanSaveConfigBtn').addEventListener('click', ()=>{
+  const repoVal = document.getElementById('scanRepoInput').value.trim();
+  const tokenVal = document.getElementById('scanTokenInput').value.trim();
+  const cfgStatus = document.getElementById('scanConfigStatus');
+  try{
+    if(repoVal) localStorage.setItem('fucaiGithubRepo', repoVal);
+    if(tokenVal) localStorage.setItem('fucaiScanGhToken', tokenVal);
+    cfgStatus.className = 'status ok';
+    cfgStatus.textContent = '✓ 设置已保存（仅存在本机浏览器），正在拉取该仓库的现有记录…';
+    loadScanFromGithub();
+  } catch(e){
+    cfgStatus.className = 'status err';
+    cfgStatus.textContent = '保存失败（浏览器不支持本地存储）。';
+  }
+});
+
+document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFromGithub);
+
+/* ── 拍摄模式：票名/面值/编号 三选一，决定OCR白名单+自动提取用的正则规则 ── */
+const SCAN_MODE_CONFIG = {
+  name:   { fieldId:'fieldName',   whitelist:null, autoExtract:null },
+  amount: { fieldId:'fieldAmount', whitelist:'0123456789.元角¥￥YUAN',
+            autoExtract:(text)=>{
+              const m = text.match(/(\d+(\.\d+)?)\s*[元角¥￥]/);
+              return m ? m[0].replace(/\s+/g,'') : '';
+            } },
+  code:   { fieldId:'fieldCode',   whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+            autoExtract:(text)=>{
+              // 条码竖线常被识别成 | / \ I l 等字符，先统一清成空格，避免干扰分段判断
+              let cleaned = text.toUpperCase()
+                .replace(/[|\/\\]/g, ' ')
+                .replace(/[^A-Z0-9\-\s]/g, ' ')
+                .replace(/[ \t]+/g, ' ');
+
+              const candidates = [];
+
+              // ① 标准格式：字母+数字 起头，后面3-5段用短横线分隔（如 J0792-26139-0176133-100-2）
+              //    注意结尾不能再跟数字/横线，否则贪婪匹配会把最后一段吃掉
+              const strict = cleaned.match(/[A-Z]\d{3,6}(?:-\d{1,8}){3,5}(?![\d-])/g);
+              if(strict) candidates.push(...strict);
+
+              // ② 宽松：任意字母数字段，用短横线分隔≥3段（容忍某些段被识别成字母）
+              const loose = cleaned.match(/[A-Z0-9]{2,}(?:-[A-Z0-9]{1,8}){3,5}(?![\w-])/g);
+              if(loose) candidates.push(...loose);
+
+              // ③ 更宽松：只要有2段以上短横线分隔就算候选
+              const loose2 = cleaned.match(/[A-Z0-9]{2,}(?:-[A-Z0-9]{1,8}){2,}/g);
+              if(loose2) candidates.push(...loose2);
+
+              // ④ 短横线整体没识别出来的情况：找"字母开头+一长串数字和空格"，
+              //    按刮刮乐编号常见分段(5-5-7-3-1)尝试重建，总长度对得上才采用
+              const noDash = cleaned.match(/[A-Z]\d[\d\s]{12,30}\d/g);
+              if(noDash){
+                noDash.forEach(seg=>{
+                  const digits = seg.replace(/\s/g,'');
+                  const letter = digits[0];
+                  const nums = digits.slice(1);
+                  if(nums.length >= 18 && nums.length <= 22){
+                    candidates.push(`${letter}${nums.slice(0,4)}-${nums.slice(4,9)}-${nums.slice(9,16)}-${nums.slice(16,19)}-${nums.slice(19)}`);
+                  }
+                });
+              }
+
+              if(!candidates.length) return '';
+              // 优先选最长的候选（信息量最完整），长度相同时优先选带字母开头的标准格式
+              // 尾段修复：编号标准格式是5段，若最优候选只有4段，
+              // 说明最后一小段（通常只有1位数字）被漏读了。
+              // 到原文里该候选紧随其后的位置找回它——这段字符少、又贴在图片边缘，
+              // 是OCR最容易丢的部分，但它在原始文本里往往还是留有痕迹的。
+              const repaired = candidates.map(c=>{
+                if(c.split('-').length >= 5) return c;
+                const idx = cleaned.indexOf(c);
+                if(idx < 0) return c;
+                const tail = cleaned.slice(idx + c.length, idx + c.length + 4);
+                const m = tail.match(/^\s*-?\s*(\d{1,2})(?!\d)/);
+                return m ? `${c}-${m[1]}` : c;
+              });
+
+              // 择优：先比段数（5段完整格式优先，避免采用漏了尾段的4段结果），
+              // 段数相同再比长度，最后偏好字母开头的标准格式
+              repaired.sort((a,b)=>{
+                const sa = a.split('-').length, sb = b.split('-').length;
+                if(sa !== sb) return sb - sa;
+                if(b.length !== a.length) return b.length - a.length;
+                return (/^[A-Z]/.test(b)?1:0) - (/^[A-Z]/.test(a)?1:0);
+              });
+              return repaired[0];
+            } },
+};
+
+function setScanMode(mode){
+  scanCaptureMode = mode;
+  document.querySelectorAll('.scanModePill').forEach(p=>{
+    p.classList.toggle('active', p.dataset.mode === mode);
+  });
+}
+document.querySelectorAll('.scanModePill').forEach(pill=>{
+  pill.addEventListener('click', ()=> setScanMode(pill.dataset.mode));
+});
+
+/* ── OCR Worker：中英文合并加载一次即可 ── */
+/* OCR Worker 按需加载：
+   编号/面值只需要英文数字，用体积小、推理快的 eng 包即可；
+   票名才需要中文包（体积大好几倍、推理也慢），只在真正拍票名时才下载加载。
+   之前不管识别什么都强制加载中文包，是速度慢的主要原因。 */
+const scanWorkers = {};      // lang -> worker 实例
+const scanWorkerLoads = {};  // lang -> 加载中的Promise
+
+async function ensureScanWorker(lang){
+  const key = lang || 'eng';
+  if(scanWorkers[key]) return scanWorkers[key];
+  if(scanWorkerLoads[key]) return scanWorkerLoads[key];
+  scanWorkerLoads[key] = (async ()=>{
+    const langs = key === 'chi' ? ['chi_sim','eng'] : ['eng'];
+    const worker = await Tesseract.createWorker(langs);
+    scanWorkers[key] = worker;
+    return worker;
+  })();
+  return scanWorkerLoads[key];
+}
+
+// 当前拍摄模式需要哪个语言包（票名要中文，其余只要英文）
+function workerLangFor(mode){ return mode === 'name' ? 'chi' : 'eng'; }
+
+/* ── 拍照（调起系统相机）── */
+document.getElementById('nativeCamBtn').addEventListener('click', ()=>{
+  document.getElementById('nativeCamInput').click();
+});
+
+document.getElementById('nativeCamInput').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev)=>{
+    const img = document.getElementById('cropSourceImg');
+    img.onload = ()=> onPhotoLoaded(img);
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';   // 清空，允许重复选择同一张图片触发change
+});
+
+/* 不同拍摄模式对应的默认框选区域（票名/面值通常在票面中上部，编号通常在底部） */
+function getDefaultCropRegion(mode){
+  // 原来的框太窄（高度只有14%~18%），大多数照片里号码区域装不下，
+  // 每次都要手动拖大。这里把默认框整体放大，宽度贴近全宽、高度翻倍以上，
+  // 中心位置基本保持不变（只是往外扩），减少手动调整的次数。
+  return mode === 'code'
+    ? { left:0.02, top:0.45, width:0.96, height:0.45 }
+    : { left:0.02, top:0.08, width:0.96, height:0.55 };
+}
+
+function cropToCanvas(img, region, naturalW, naturalH, targetMaxDim){
+  const sx = Math.round(region.left * naturalW);
+  const sy = Math.round(region.top * naturalH);
+  const sw = Math.round(region.width * naturalW);
+  const sh = Math.round(region.height * naturalH);
+  const scale = Math.min(1, targetMaxDim / Math.max(sw, sh));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sw * scale));
+  c.height = Math.max(1, Math.round(sh * scale));
+  c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  return c;
+}
+
+/* 拍完照片后：
+   ① 先按模式裁到一个合理默认区域去识别（范围小、干扰少，速度快、准确率通常最高）
+   ② 失败则退而求其次，识别整张照片（万一实际构图跟默认假设的区域对不上）
+   ③ 两次都失败，或票名模式（自由文本没有固定格式可正则提取），才进入手动框选 */
+/* 图像预处理：转灰度+提高对比度+二值化，让点阵印刷的小字边缘更锐利，
+   同时把条码那种大片黑色区域压成纯黑，减少它被当成文字的机会 */
+function enhanceForOcr(srcCanvas){
+  const c = document.createElement('canvas');
+  c.width = srcCanvas.width; c.height = srcCanvas.height;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(srcCanvas, 0, 0);
+  const imgData = ctx.getImageData(0, 0, c.width, c.height);
+  const d = imgData.data;
+  // 先算平均灰度作为自适应阈值基准
+  let sum = 0;
+  for(let i=0;i<d.length;i+=4){ sum += 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]; }
+  const mean = sum / (d.length/4);
+  const thr = mean * 0.85;   // 略低于均值，保留细笔画
+  for(let i=0;i<d.length;i+=4){
+    const g = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    const v = g < thr ? 0 : 255;
+    d[i]=d[i+1]=d[i+2]=v;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return c;
+}
+
+async function tryRecognize(worker, canvas, psm, whitelist, autoExtract){
+  try{
+    await worker.setParameters({
+      tessedit_char_whitelist: whitelist || '',
+      tessedit_pageseg_mode: psm,
+    });
+    const { data:{ text } } = await worker.recognize(canvas);
+    return autoExtract(text || '');
+  } catch(e){ return ''; }
+}
+
+/* ═══ 编号行精确定位 + 纠错（只针对"J0791-26148-0756294-114-3"这一小行）═══
+   问题根源：票面白色标签里，上面是条码、下面才是文字行。框选区域一旦包含条码，
+   Tesseract 会把条码当文字乱读，整行结果就废了。做法：
+   ① 在整张照片里找出白色标签 ② 标签内按行扫描，条码和文字行之间有空白间隔，
+   取最下面一条足够高的"文字带" ③ 只裁这一行、放缩到合适字高再识别
+   ④ 按编号语法纠错（数字位置上的 O→0、I→1 等），并去掉首尾多余横线。 */
+function _fixDigits(s){
+  return s.replace(/[OQD]/g,'0').replace(/[IL|]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/Z/g,'2').replace(/G/g,'6');
+}
+function normalizeTicketCode(raw){
+  let t = String(raw||'').toUpperCase().replace(/[^A-Z0-9\-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
+  const parts = t.split('-');
+  if(parts.length < 2) return t;
+  parts[0] = parts[0].charAt(0) + _fixDigits(parts[0].slice(1));
+  for(let i=1;i<parts.length;i++) parts[i] = _fixDigits(parts[i]);
+  const joined = parts.join('-');
+  const m5 = joined.match(/^[A-Z]\d{3,6}(?:-\d{1,8}){4}/);
+  return m5 ? m5[0] : joined;   // 第5段之后的多余字符（边缘噪点）直接丢弃
+}
+function ticketCodeScore(c){
+  // 3=完全符合 5段(字母+4位-5位-7位-3位-1位)；2=5段且各段全数字；1=段数≥4；0=其它
+  if(/^[A-Z]\d{4}-\d{5}-\d{7}-\d{3}-\d$/.test(c)) return 3;
+  if(/^[A-Z]\d{3,6}(-\d{1,8}){4}$/.test(c)) return 2;
+  if(c.split('-').length >= 4) return 1;
+  return 0;
+}
+/* 在任意画布里找"最下面一条足够高的文字带"，返回裁好并缩放到合适字高的灰度画布 */
+function extractBottomTextLine(src){
+  const w = src.width, h = src.height;
+  const sc = Math.min(1, 400 / h);
+  const sw = Math.max(1, Math.round(w*sc)), sh = Math.max(1, Math.round(h*sc));
+  const sm = document.createElement('canvas'); sm.width=sw; sm.height=sh;
+  const sctx = sm.getContext('2d', {willReadFrequently:true});
+  sctx.drawImage(src,0,0,sw,sh);
+  const d = sctx.getImageData(0,0,sw,sh).data;
+  const gray = new Float32Array(sw*sh);
+  for(let i=0;i<sw*sh;i++) gray[i] = 0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2];
+  const real = []; for(let i=0;i<gray.length;i++){ if(Math.abs(gray[i]-128)>1.5) real.push(gray[i]); }
+  const sorted = Float32Array.from(real.length?real:gray).sort();
+  const white = sorted[Math.floor(sorted.length*0.9)];
+  const thr = white*0.55;
+  // 标签两端斜切处会带进红/蓝背景的楔形，先按"白色像素足够多的列"确定标签真正的水平范围
+  const wt = white*0.8, wcol = new Float32Array(sw); let wmax=0;
+  for(let x=0;x<sw;x++){ let c=0; for(let y=0;y<sh;y++) if(gray[y*sw+x]>wt) c++; wcol[x]=c; if(c>wmax) wmax=c; }
+  let ex0=0, ex1=sw-1;
+  while(ex0<sw-1 && wcol[ex0] < wmax*0.5) ex0++;
+  while(ex1>ex0 && wcol[ex1] < wmax*0.5) ex1--;
+  const x0 = ex0 + Math.floor((ex1-ex0)*0.03), x1 = ex1 - Math.floor((ex1-ex0)*0.03) + 1;
+  const frac = new Float32Array(sh);
+  for(let y=0;y<sh;y++){ let c=0; for(let x=x0;x<x1;x++) if(gray[y*sw+x]<thr) c++; frac[y]=c/(x1-x0); }
+  // 阈值按条码峰值自适应：条码与文字间的窄缝、标签边缘残留的少量深色像素都低于它
+  const nz = Array.from(frac).filter(v=>v>0.01).sort((a,b)=>a-b);
+  const peak = nz.length ? nz[Math.min(nz.length-1, Math.floor(nz.length*0.97))] : 0;
+  const bthr = Math.max(0.05, 0.2*peak);
+  const bands=[]; let st=-1;
+  for(let y=0;y<=sh;y++){
+    const on = y<sh && frac[y]>bthr;
+    if(on && st<0) st=y;
+    if(!on && st>=0){
+      if(bands.length && st-bands[bands.length-1][1] <= 2) bands[bands.length-1][1]=y;
+      else bands.push([st,y]);
+      st=-1;
+    }
+  }
+  // 贴着上/下边缘的深色带是标签边框或背景，不是文字
+  // 标签占整幅画布的比例不定（旋转后画布更大），所以"够高"按最高那条带的相对高度判断
+  let realRows=0;
+  for(let y=0;y<sh;y++){ let c=0; for(let x=ex0;x<=ex1;x++) if(Math.abs(gray[y*sw+x]-128)>1.5) c++; if(c>0.3*(ex1-ex0+1)) realRows++; }
+  const maxBand = bands.reduce((m,b)=>Math.max(m,b[1]-b[0]),0);
+  const tall = bands.filter(b=> b[1]-b[0] >= Math.max(3, maxBand*0.4) && b[0] > 1 && b[1] < sh-2);
+  if(!tall.length) return [];
+  let [bs,be] = tall[tall.length-1];
+  const mk = (a,b)=>{
+    // 横向：只保留有笔画的列；整列几乎全黑的是标签边缘/背景，要去掉（否则会被读成多余字符）
+    let xa=-1, xb=-1;
+    for(let x=ex0;x<=ex1;x++){
+      let c=0; for(let y=a;y<b;y++) if(gray[y*sw+x]<thr) c++;
+      const f=c/(b-a);
+      if(f>0.02 && f<0.6){ if(xa<0) xa=x; xb=x; }
+    }
+    if(xa<0){ xa=ex0; xb=ex1; }
+    const hpad = Math.round((b-a)*0.5);
+    const cx0 = Math.max(0, Math.round((xa-hpad)/sc)), cx1 = Math.min(w, Math.round((xb+hpad)/sc));
+    const cw = Math.max(1, cx1-cx0);
+    const pad = Math.round((b-a)*0.08);
+    const sy = Math.max(0, Math.round((a-pad)/sc)), ey = Math.min(h, Math.round((b+pad)/sc));
+    const lh = Math.max(1, ey-sy);
+    const outH = 80, k = outH/lh;
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(cw*k)) + 30; out.height = outH + 30;
+    const octx = out.getContext('2d');
+    octx.fillStyle='#fff'; octx.fillRect(0,0,out.width,out.height);
+    octx.imageSmoothingQuality='high';
+    octx.drawImage(src,cx0,sy,cw,lh,15,15,out.width-30,outH);
+    return out;
+  };
+  const res = [mk(bs,be)];
+  // 条码与文字行间隙太小被合并成一条厚带时，再给一个"只取厚带下部"的候选
+  if(be-bs > Math.max(realRows,1)*0.42) res.push(mk(be-Math.round(Math.max(realRows,1)*0.30), be));
+  return res;
+}
+/* 在整张照片里找白色标签（大面积、扁长的近白连通区域），返回标签区域画布 */
+function locateWhiteLabel(img){
+  const W0=img.naturalWidth, H0=img.naturalHeight;
+  const sc = Math.min(1, 700/Math.max(W0,H0));
+  const w=Math.round(W0*sc), h=Math.round(H0*sc);
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  const ctx=cv.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0,w,h);
+  const d=ctx.getImageData(0,0,w,h).data;
+  // 亮度阈值按整张图自适应（暗光/偏黄光下白标签也只有 120~160 的亮度）
+  const mins=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++) mins[i]=Math.min(d[i*4],d[i*4+1],d[i*4+2]);
+  const ms=Uint8Array.from(mins).sort();
+  const p97=ms[Math.floor(ms.length*0.97)];
+  const thrB=Math.max(70, p97*0.72);
+  const mask=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const mx=Math.max(d[i*4],d[i*4+1],d[i*4+2]);
+    mask[i]=(mins[i]>thrB && mx-mins[i] < 0.2*mx+8)?1:0;
+  }
+  const lab=new Int32Array(w*h); let nid=0; let best=null;
+  const stack=new Int32Array(w*h);
+  for(let s=0;s<w*h;s++){
+    if(!mask[s]||lab[s]) continue;
+    const id=++nid;
+    let sp=0; stack[sp++]=s; lab[s]=id;
+    let area=0,minx=w,miny=h,maxx=0,maxy=0,Sx=0,Sy=0,Sxx=0,Syy=0,Sxy=0;
+    while(sp){
+      const p=stack[--sp]; const x=p%w, y=(p/w)|0; area++;
+      Sx+=x;Sy+=y;Sxx+=x*x;Syy+=y*y;Sxy+=x*y;
+      if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+      if(x>0&&mask[p-1]&&!lab[p-1]){lab[p-1]=id;stack[sp++]=p-1;}
+      if(x<w-1&&mask[p+1]&&!lab[p+1]){lab[p+1]=id;stack[sp++]=p+1;}
+      if(y>0&&mask[p-w]&&!lab[p-w]){lab[p-w]=id;stack[sp++]=p-w;}
+      if(y<h-1&&mask[p+w]&&!lab[p+w]){lab[p+w]=id;stack[sp++]=p+w;}
+    }
+    // 用二阶矩求主轴方向与扁长程度（任意倾斜角都适用，不依赖外接框的宽高比）
+    const mx_=Sx/area, my_=Sy/area;
+    const cxx=Sxx/area-mx_*mx_, cyy=Syy/area-my_*my_, cxy=Sxy/area-mx_*my_;
+    const tr=cxx+cyy, dt=Math.sqrt(Math.max(0,((cxx-cyy)/2)**2+cxy*cxy));
+    const l1=tr/2+dt, l2=Math.max(1e-6,tr/2-dt);
+    const elong=Math.sqrt(l1/l2);
+    const pang=0.5*Math.atan2(2*cxy,cxx-cyy);   // 主轴与水平方向夹角（y向下为正）
+    if(area>=w*h*0.012 && elong>=2.2 && Math.sqrt(12*l1)>=w*0.25 && (!best||area>best.area)) best={id,area,minx,miny,maxx,maxy,pang};
+  }
+  if(!best) return null;
+  // 逐列取标签上沿/下沿（换算回原图坐标），用来估计倾斜角和透视变形
+  const m=2;
+  const rx=Math.max(0,Math.floor((best.minx-m)/sc)), ry=Math.max(0,Math.floor((best.miny-m)/sc));
+  const rw=Math.min(W0-rx,Math.ceil((best.maxx-best.minx+1+2*m)/sc)), rh=Math.min(H0-ry,Math.ceil((best.maxy-best.miny+1+2*m)/sc));
+  const tops=[], bots=[];
+  for(let x=best.minx;x<=best.maxx;x++){
+    let top=-1,bot=-1;
+    for(let y=best.miny;y<=best.maxy;y++){ if(lab[y*w+x]===best.id){ if(top<0) top=y; bot=y; } }
+    if(top<0||bot-top<(best.maxy-best.miny)*0.25) continue;
+    const xc=x/sc-rx;
+    tops.push([xc, top/sc-ry]); bots.push([xc, (bot+1)/sc-ry]);
+  }
+  const fit=(pts)=>{   // 最小二乘直线 y=a*x+b，剔除一次离群点
+    for(let pass=0;pass<2;pass++){
+      let sx=0,sy=0,sxx=0,sxy=0,n=pts.length;
+      if(n<10) return null;
+      pts.forEach(([x,y])=>{sx+=x;sy+=y;sxx+=x*x;sxy+=x*y;});
+      const den=n*sxx-sx*sx; if(den<=0) return null;
+      const a=(n*sxy-sx*sy)/den, b=(sy-a*sx)/n;
+      if(pass===1) return {a,b};
+      const res=pts.map(([x,y])=>Math.abs(y-(a*x+b)));
+      const sd=Math.sqrt(res.reduce((t,v)=>t+v*v,0)/n)||1;
+      pts=pts.filter((pt,k)=>res[k]<=2*sd+2);
+    }
+  };
+  const lt=fit(tops), lb=fit(bots);
+  const angPCA = best.pang;
+  const angEdge = (lt && lb) ? Math.atan((lt.a+lb.a)/2) : angPCA;
+  const crop=document.createElement('canvas'); crop.width=rw; crop.height=rh;
+  const cctx=crop.getContext('2d');
+  cctx.drawImage(img,rx,ry,rw,rh,0,0,rw,rh);
+  // 把标签上下沿之外的背景（红蓝图案、桌面）涂成中灰，避免被当成文字带
+  if(lt && lb){
+    cctx.fillStyle='#808080';
+    for(let x=0;x<rw;x+=3){
+      const y0=lt.a*(x+1.5)+lt.b, y1=lb.a*(x+1.5)+lb.b;
+      if(y0>0) cctx.fillRect(x,0,3,Math.min(rh,y0));
+      if(y1<rh) cctx.fillRect(x,Math.max(0,y1),3,rh-Math.max(0,y1));
+    }
+  }
+  return {crop, ang:angPCA, angEdge, lt, lb};
+}
+/* 绕中心旋转标签画布（空出的角填中灰，不会被当成白色标签或文字） */
+function rotateLabel(crop, ang){
+  if(Math.abs(ang) < 0.2*Math.PI/180) return crop;
+  const rw=crop.width, rh=crop.height;
+  // 画布放大到能容纳旋转后的整个标签（大角度时直接旋转会把两端切掉）
+  const W=Math.ceil(Math.abs(rw*Math.cos(ang))+Math.abs(rh*Math.sin(ang)))+4;
+  const H=Math.ceil(Math.abs(rw*Math.sin(ang))+Math.abs(rh*Math.cos(ang)))+4;
+  const out=document.createElement('canvas'); out.width=W; out.height=H;
+  const o=out.getContext('2d'); o.fillStyle='#808080'; o.fillRect(0,0,W,H);
+  o.translate(W/2,H/2); o.rotate(-ang); o.drawImage(crop,-rw/2,-rh/2);
+  return out;
+}
+/* 按上下沿直线逐列"拉直"：同时修正倾斜和手机斜拍造成的梯形透视 */
+function straightenLabel(info){
+  const {crop, lt, lb} = info;
+  if(!lt || !lb) return null;
+  const rw=crop.width;
+  const hs=[]; for(let x=0;x<rw;x+=50) hs.push((lb.a*x+lb.b)-(lt.a*x+lt.b));
+  const H=Math.round(hs.reduce((t,v)=>t+v,0)/hs.length);
+  if(!(H>20)) return null;
+  const out=document.createElement('canvas'); out.width=rw; out.height=H;
+  const o=out.getContext('2d'); o.fillStyle='#808080'; o.fillRect(0,0,rw,H);
+  const step=3;
+  for(let x=0;x<rw;x+=step){
+    const xm=x+step/2, y0=lt.a*xm+lt.b, y1=lb.a*xm+lb.b;
+    if(y1-y0<4) continue;
+    o.drawImage(crop, x, Math.max(0,y0), step, Math.min(crop.height,y1)-Math.max(0,y0), x, 0, step, H);
+  }
+  return out;
+}
+const CODE_WL='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-';
+/* 对"只含一行编号"的画布，用两种单行模式各识别一次，纠错后投票取最合格的 */
+async function recognizeCodeLine(worker, lineCanvas){
+  const cands=[];
+  for(const psm of ['7','13']){
+    try{
+      await worker.setParameters({ tessedit_char_whitelist:CODE_WL, tessedit_pageseg_mode:psm });
+      const { data:{ text } } = await worker.recognize(lineCanvas);
+      const c = normalizeTicketCode(text);
+      if(c) cands.push(c);
+    }catch(e){}
+  }
+  return cands;   // 每种模式一个候选，交给上层跨变体投票
+}
+async function recognizeCodeSmart(worker, img, onProgress){
+  const info = locateWhiteLabel(img);
+  if(!info) return '';
+  // 依次尝试多种"摆正"假设：按边缘估计的角度 → 逐列拉直(透视) → 在估计角度上再加减几度
+  // 手机歪着拍时，估计角度偶尔会不准，多试几种比单押一个更稳；任何一种读出完整编号就停
+  const D=Math.PI/180;
+  const variants = [
+    ()=>rotateLabel(info.crop, info.ang),
+    ()=> Math.abs(info.angEdge-info.ang) > 1.5*D ? rotateLabel(info.crop, info.angEdge) : null,
+    ()=>straightenLabel(info),
+    ...[3,-3,6,-6].map(dg=>()=>rotateLabel(info.crop, info.ang + dg*D)),
+  ];
+  const tally={};   // 候选 → 出现次数；完全符合标准格式的结果出现 2 次（不同模式/不同摆正方式互相印证）才采用
+  const add=(c)=>{ tally[c]=(tally[c]||0)+1; return tally[c]; };
+  let vi=0;
+  for(const mkv of variants){
+    vi++;
+    if(onProgress && vi>1) onProgress(`正在尝试其它摆正角度（${vi}/${variants.length}）…`);
+    let lab=null; try{ lab = mkv(); }catch(e){}
+    if(!lab) continue;
+    const lines = extractBottomTextLine(lab);
+    for(const line of lines){
+      const cands = await recognizeCodeLine(worker, line);
+      for(const c of cands){
+        if(ticketCodeScore(c) >= 2 && add(c) >= 2 && ticketCodeScore(c) >= 3) return c;
+      }
+    }
+  }
+  // 没有任何结果得到印证：取得分最高、出现次数最多的
+  const all=Object.keys(tally).sort((a,b)=> ticketCodeScore(b)-ticketCodeScore(a) || tally[b]-tally[a]);
+  return all[0]||'';
+}
+
+async function onPhotoLoaded(img){
+  cropImgNaturalW = img.naturalWidth;
+  cropImgNaturalH = img.naturalHeight;
+  lastCapturedDataUrl = img.src;
+
+  const statusEl = document.getElementById('scanCameraStatus');
+  const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
+
+  // 票名是自由文本，没有固定格式可供正则提取，直接进入框选环节
+  if(!cfg.autoExtract){
+    statusEl.className = 'status'; statusEl.textContent = '票名无法自动识别格式，请框选票名所在区域';
+    showCropTool();
+    return;
+  }
+
+  statusEl.className = 'status'; statusEl.textContent = '正在识别，请稍候…';
+  try{
+    const worker = await ensureScanWorker(workerLangFor(scanCaptureMode));
+    // 编号：先走"定位白色标签→只取最下面一行文字→语法纠错"的精确流程
+    if(scanCaptureMode === 'code'){
+      statusEl.textContent = '正在定位编号行…';
+      const smart = await recognizeCodeSmart(worker, img, (t)=>{ statusEl.textContent = t; });
+      if(smart){
+        document.getElementById(cfg.fieldId).value = smart;
+        statusEl.className = 'status ok';
+        statusEl.textContent = `✓ 自动识别成功：${smart}（如有误，可点字段旁「重新框选」手动修正）`;
+        return;
+      }
+      statusEl.textContent = '未找到标准编号行，改用常规识别…';
+    }
+    const results = [];
+
+    // 候选区域：横向一律取满宽（编号那行常贴近票面左右边缘，
+    // 之前留5%边距会把最后一段 -3 切掉，导致识别结果缺段），
+    // 纵向给两个常见位置，覆盖构图差异；策略数量精简以保证速度
+    const regions = scanCaptureMode === 'code'
+      ? [ {left:0.0,top:0.55,width:1.0,height:0.25},
+          {left:0.0,top:0.30,width:1.0,height:0.55} ]
+      : [ {left:0.05,top:0.15,width:0.90,height:0.28},
+          {left:0.0,top:0.0,width:1.0,height:0.55} ];
+
+    outer:
+    for(let i=0;i<regions.length;i++){
+      statusEl.textContent = `正在识别（${i+1}/${regions.length}）…`;
+      const base = cropToCanvas(img, regions[i], cropImgNaturalW, cropImgNaturalH, 1400);
+      // 每个区域只试2种：原图单行模式 + 增强图单行模式（够用且快）
+      for(const [cv, psm] of [[base,'7'], [enhanceForOcr(base),'7']]){
+        const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
+        if(got){
+          results.push(got);
+          // 编号模式下，若已拿到完整5段结果就立即停止，不再浪费时间试其它策略
+          if(scanCaptureMode !== 'code' || got.split('-').length >= 5) break outer;
+        }
+      }
+    }
+
+    // 前面都没结果，整图兜底试一次
+    if(!results.length){
+      statusEl.textContent = '正在识别整张照片（最后尝试）…';
+      const scale = Math.min(1, 1800 / Math.max(cropImgNaturalW, cropImgNaturalH));
+      const fullCanvas = document.createElement('canvas');
+      fullCanvas.width = Math.round(cropImgNaturalW * scale);
+      fullCanvas.height = Math.round(cropImgNaturalH * scale);
+      fullCanvas.getContext('2d').drawImage(img, 0, 0, fullCanvas.width, fullCanvas.height);
+      for(const [cv, psm] of [[fullCanvas,'11'], [enhanceForOcr(fullCanvas),'11']]){
+        const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
+        if(got){ results.push(got); break; }
+      }
+    }
+
+    // 择优：编号优先选"段数最完整"的结果（已知是5段格式，
+    // 4段的结果说明尾段被漏读，不能因为它先出现就采用），段数相同再比长度
+    const extracted = results.length
+      ? results.sort((a,b)=>{
+          const sa = a.split('-').length, sb = b.split('-').length;
+          if(sa !== sb) return sb - sa;
+          return b.length - a.length;
+        })[0]
+      : '';
+
+    if(extracted){
+      document.getElementById(cfg.fieldId).value = extracted;
+      statusEl.className = 'status ok';
+      statusEl.textContent = `✓ 自动识别成功：${extracted}（如有误，可点字段旁「重新框选」手动修正）`;
+    } else {
+      statusEl.className = 'status err';
+      statusEl.textContent = '⚠️ 未能自动识别出有效内容，请手动框选目标区域';
+      showCropTool();
+    }
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '自动识别出错：' + e.message + '，请手动框选';
+    showCropTool();
+  }
+}
+
+function showCropTool(){
+  const box = document.getElementById('cropBox');
+  const region = getDefaultCropRegion(scanCaptureMode);
+  box.style.left = (region.left*100)+'%'; box.style.top = (region.top*100)+'%';
+  box.style.width = (region.width*100)+'%'; box.style.height = (region.height*100)+'%';
+  document.getElementById('cropStage').style.display = 'block';
+  document.getElementById('cropActions').style.display = 'flex';
+  document.getElementById('cropStage').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+/* "重新框选"按钮：复用最近一次拍的照片，不用重新调起相机 */
+document.querySelectorAll('.miniCamBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    setScanMode(btn.dataset.mode);
+    if(lastCapturedDataUrl){
+      showCropTool();
+    } else {
+      document.getElementById('nativeCamInput').click();
+    }
+  });
+});
+
+/* 框选交互：拖动整个框移动位置，拖动右下角圆点调整大小 */
+(function initCropDrag(){
+  const stage = document.getElementById('cropStage');
+  const box = document.getElementById('cropBox');
+  const handle = document.getElementById('cropHandle');
+  let mode = null, startX=0, startY=0, startBox={};
+
+  function getPos(e){
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+  }
+  function boxPx(){
+    const rect = stage.getBoundingClientRect();
+    return {
+      left: parseFloat(box.style.left)/100*rect.width,
+      top: parseFloat(box.style.top)/100*rect.height,
+      width: parseFloat(box.style.width)/100*rect.width,
+      height: parseFloat(box.style.height)/100*rect.height,
+    };
+  }
+  function onDown(e, m){
+    mode = m;
+    const p = getPos(e);
+    startX = p.x; startY = p.y;
+    startBox = boxPx();
+    e.stopPropagation(); e.preventDefault();
+  }
+  function onMove(e){
+    if(!mode) return;
+    const p = getPos(e);
+    const dx = p.x - startX, dy = p.y - startY;
+    const rect = stage.getBoundingClientRect();
+    if(mode === 'move'){
+      let nl = startBox.left + dx, nt = startBox.top + dy;
+      nl = Math.max(0, Math.min(nl, rect.width - startBox.width));
+      nt = Math.max(0, Math.min(nt, rect.height - startBox.height));
+      box.style.left = (nl/rect.width*100) + '%';
+      box.style.top = (nt/rect.height*100) + '%';
+    } else if(mode === 'resize'){
+      let nw = Math.max(30, startBox.width + dx), nh = Math.max(20, startBox.height + dy);
+      nw = Math.min(nw, rect.width - startBox.left);
+      nh = Math.min(nh, rect.height - startBox.top);
+      box.style.width = (nw/rect.width*100) + '%';
+      box.style.height = (nh/rect.height*100) + '%';
+    }
+    e.preventDefault();
+  }
+  function onUp(){ mode = null; }
+
+  box.addEventListener('mousedown', e=> onDown(e,'move'));
+  box.addEventListener('touchstart', e=> onDown(e,'move'), {passive:false});
+  handle.addEventListener('mousedown', e=> onDown(e,'resize'));
+  handle.addEventListener('touchstart', e=> onDown(e,'resize'), {passive:false});
+  window.addEventListener('mousemove', onMove, {passive:false});
+  window.addEventListener('touchmove', onMove, {passive:false});
+  window.addEventListener('mouseup', onUp);
+  window.addEventListener('touchend', onUp);
+})();
+
+document.getElementById('cropCancelBtn').addEventListener('click', ()=>{
+  document.getElementById('cropStage').style.display = 'none';
+  document.getElementById('cropActions').style.display = 'none';
+});
+
+document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
+  const stage = document.getElementById('cropStage');
+  const box = document.getElementById('cropBox');
+  const statusEl = document.getElementById('scanCameraStatus');
+  const cropPreview = document.getElementById('scanCropPreview');
+  const cropImg = document.getElementById('scanCropImg');
+  const cfg = SCAN_MODE_CONFIG[scanCaptureMode];
+  const confirmBtn = document.getElementById('cropConfirmBtn');
+
+  confirmBtn.disabled = true;
+  statusEl.className = 'status'; statusEl.textContent = '正在识别框选区域…';
+
+  try{
+    const bx = parseFloat(box.style.left)/100;
+    const by = parseFloat(box.style.top)/100;
+    const bw = parseFloat(box.style.width)/100;
+    const bh = parseFloat(box.style.height)/100;
+
+    const sx = Math.round(bx * cropImgNaturalW);
+    const sy = Math.round(by * cropImgNaturalH);
+    const sw = Math.round(bw * cropImgNaturalW);
+    const sh = Math.round(bh * cropImgNaturalH);
+
+    const sourceImg = document.getElementById('cropSourceImg');
+    const canvas = document.createElement('canvas');
+    const upscale = Math.max(1, 240 / sh);
+    canvas.width = Math.round(sw * upscale);
+    canvas.height = Math.round(sh * upscale);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(sourceImg, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+    cropImg.src = canvas.toDataURL('image/png');
+    cropPreview.style.display = 'block';
+
+    const worker = await ensureScanWorker(workerLangFor(scanCaptureMode));
+    // 多策略尝试：原图/对比度增强图 × 单行/块状模式，任一策略提取成功就采用
+    let cleaned = '';
+    if(scanCaptureMode === 'code'){
+      // 框里若含条码，先切出最下面的文字行再识别；切不出就把整个框当一行
+      const lns = extractBottomTextLine(canvas);
+      for(const cv of [...lns, canvas]){
+        const gots = (await recognizeCodeLine(worker, cv)).sort((a,b)=>ticketCodeScore(b)-ticketCodeScore(a));
+        const got = gots[0] || '';
+        if(ticketCodeScore(got) >= 2){ cleaned = got; break; }
+        if(!cleaned && got) cleaned = got;
+      }
+      if(ticketCodeScore(cleaned) < 2) cleaned = '';
+    }
+    if(!cleaned && cfg.autoExtract){
+      for(const [cv, psm] of [[canvas,'7'], [enhanceForOcr(canvas),'7'], [canvas,'6'], [enhanceForOcr(canvas),'11']]){
+        const got = await tryRecognize(worker, cv, psm, '', cfg.autoExtract);
+        if(got){ cleaned = got; break; }
+      }
+    }
+    // 正则提取不到（或票名这种无固定格式的），退回用原始识别文本做基础清洗
+    if(!cleaned){
+      await worker.setParameters({
+        tessedit_char_whitelist: cfg.whitelist || '',
+        tessedit_pageseg_mode: '7',
+      });
+      const { data: { text } } = await worker.recognize(canvas);
+      cleaned = (text || '').trim();
+      if(scanCaptureMode === 'code'){
+        cleaned = cleaned.toUpperCase().replace(/[^A-Z0-9\-]/g, '');
+      } else {
+        cleaned = cleaned.replace(/\s+/g, '');
+      }
+    }
+
+    document.getElementById(cfg.fieldId).value = cleaned;
+    statusEl.className = cleaned ? 'status ok' : 'status err';
+    statusEl.textContent = cleaned
+      ? '✓ 识别完成，已填入下方对应字段，请核对是否正确'
+      : '⚠️ 未识别到有效内容，可调整框选范围重试，或直接手动填写';
+
+    stage.style.display = 'none';
+    document.getElementById('cropActions').style.display = 'none';
+  } catch(e){
+    statusEl.className = 'status err';
+    statusEl.textContent = '识别出错：' + e.message;
+  } finally{
+    confirmBtn.disabled = false;
+  }
+});
+
+
+/* ── 票名/面值短期记忆（localStorage，8小时有效；换新票点按钮清空）── */
+const SCAN_MEM_KEY='fucaiScanNameAmountMem', SCAN_MEM_TTL=8*3600*1000;
+function saveScanMemory(){
+  try{
+    const name=document.getElementById('fieldName').value.trim(), amount=document.getElementById('fieldAmount').value.trim();
+    if(!name && !amount){ localStorage.removeItem(SCAN_MEM_KEY); return; }
+    localStorage.setItem(SCAN_MEM_KEY, JSON.stringify({name,amount,t:Date.now()}));
+  }catch(e){}
+}
+function restoreScanMemory(){
+  try{
+    const m=JSON.parse(localStorage.getItem(SCAN_MEM_KEY)||'null');
+    if(!m || Date.now()-m.t>SCAN_MEM_TTL){ localStorage.removeItem(SCAN_MEM_KEY); return; }
+    const n=document.getElementById('fieldName'), a=document.getElementById('fieldAmount');
+    if(!n.value) n.value=m.name||''; if(!a.value) a.value=m.amount||'';
+  }catch(e){}
+}
+['fieldName','fieldAmount'].forEach(id=>document.getElementById(id).addEventListener('input',saveScanMemory));
+document.getElementById('scanNewTicketBtn').addEventListener('click',()=>{
+  ['fieldName','fieldAmount','fieldCode','fieldPrize'].forEach(id=>document.getElementById(id).value='');
+  try{ localStorage.removeItem(SCAN_MEM_KEY); }catch(e){}
+  const st=document.getElementById('scanFormStatus'); st.className='status ok'; st.textContent='已清空，请录入新票的票名和面值。';
+});
+restoreScanMemory();
+
+/* ── 加入清单 ── */
+document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
+  const formStatus = document.getElementById('scanFormStatus');
+  const nameVal = document.getElementById('fieldName').value.trim();
+  const amountVal = document.getElementById('fieldAmount').value.trim();
+  const codeVal = document.getElementById('fieldCode').value.trim();
+  const prizeVal = document.getElementById('fieldPrize').value.trim();
+
+  if(!nameVal && !amountVal && !codeVal && !prizeVal){
+    formStatus.className = 'status err'; formStatus.textContent = '四项均为空，无法加入清单，请至少填写编号等关键信息。';
+    return;
+  }
+
+  await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
+
+  // 票名/面值短期记忆：同一批同款彩票不用重复输入，只清编号和中奖金额
+  saveScanMemory();
+  document.getElementById('fieldCode').value = '';
+  document.getElementById('fieldPrize').value = '';
+  formStatus.className = 'status ok';
+  formStatus.textContent = '✓ 已加入清单（票名、面值已保留，换新票请点「换新票」）';
+});
+
+/* ── 清空全部 ── */
+document.getElementById('scanClearAllBtn').addEventListener('click', async ()=>{
+  if(scanRecords.length === 0) return;
+  if(confirm(`确定要清空全部 ${scanRecords.length} 条记录吗？此操作不可撤销，且会同步删除GitHub上的记录。`)){
+    scanRecords = [];
+    renderScanTable();
+    await syncScanToGithub();
+    const listStatus = document.getElementById('scanListStatus');
+    listStatus.className = 'status ok'; listStatus.textContent = '已清空全部记录。';
+  }
+});
+
+/* ── 导出Excel ── */
+document.getElementById('scanExportBtn').addEventListener('click', ()=>{
+  const listStatus = document.getElementById('scanListStatus');
+  if(scanRecords.length === 0){
+    listStatus.className = 'status err'; listStatus.textContent = '暂无记录可导出。';
+    return;
+  }
+  const rows = scanRecords.map((item, i) => {
+    // 编号按短横线拆成5段，分别占5个单元格（如 J0792-26139-0176133-100-2）
+    const parts = (item.code || '').split('-');
+    const seg = [1,2,3,4,5].map(n => parts[n-1] || '');
+    // 万一识别出超过5段，多余部分并入第5段，避免数据丢失
+    if(parts.length > 5) seg[4] = parts.slice(4).join('-');
+    return {
+      '序号': i+1, '票名': item.name||'', '面值': item.amount||'',
+      '编号1': seg[0], '编号2': seg[1], '编号3': seg[2], '编号4': seg[3], '编号5': seg[4],
+      '中奖金额': item.prize||'', '记录时间': item.time||''
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [{wch:6},{wch:16},{wch:10},{wch:8},{wch:8},{wch:10},{wch:8},{wch:6},{wch:10},{wch:14}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '扫码记录');
+  const today = new Date();
+  const fname = `扫码存档_${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}.xlsx`;
+  XLSX.writeFile(wb, fname);
+  listStatus.className = 'status ok';
+  listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}`;
+});
+
+// 初次加载：先用本地缓存快速显示，再尝试从GitHub拉取最新版本
+scanRecords = loadLocalCache();
+renderScanTable();
+</script>
+</body>
+</html>
