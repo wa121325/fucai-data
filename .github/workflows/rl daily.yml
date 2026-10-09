@@ -1,3 +1,8 @@
+# ══ 自动触发开关：改 ci/switch.env 里的 NIGHTLY_ENABLED ══
+#   true  → 每晚 21:30 由 nightly.yml 串行跑 ML→DL→RL；本文件的定时/自动接力让路
+#   false → 恢复原来的方式（本文件照旧自动运行）；nightly.yml 的定时不再运行
+# 手动点 "Run workflow"（workflow_dispatch）永远可用，不受开关影响。
+
 name: 每日 PPO 强化学习微调
 
 on:
@@ -11,9 +16,21 @@ on:
   # 手动点 workflow_dispatch 补跑一次即可。
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      nightly: ${{ steps.g.outputs.nightly }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: g
+        run: |
+          NIGHTLY_ENABLED=true
+          [ -f ci/switch.env ] && source ci/switch.env
+          echo "nightly=$NIGHTLY_ENABLED" >> "$GITHUB_OUTPUT"
+
   trigger-rl:
-    # 只有上游(ML)工作流成功才启动；crawl.yml 现在只会在"ML 真正跑完且本轮预测已写入"时才算成功。
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    needs: gate
+    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event.workflow_run.event != 'schedule' || needs.gate.outputs.nightly != 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
