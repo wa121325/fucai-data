@@ -2966,6 +2966,8 @@ SUM_BANDS = [(0, 5), (6, 9), (10, 13), (14, 17), (18, 21), (22, 27)]
 SPAN_BANDS = [(0, 2), (3, 4), (5, 6), (7, 9)]
 GROUP_N6, GROUP_N3 = 6, 2      # 组选覆盖：推荐几注组六、几注组三
 STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
+STRAT_MIN_BASE = 0.02   # 随机基准低于2%的格不参与选择（样本太小，提升倍数是噪声）
+STRAT_MIN_LIFT = 1.05   # 共识概率/随机基准 至少1.05倍才算"高于随机"
 
 
 def vote_3d(sources, rl_pos_probs, n_bets=12):
@@ -3030,8 +3032,11 @@ def vote_3d(sources, rl_pos_probs, n_bets=12):
     mass = np.zeros((len(SUM_BANDS), len(SPAN_BANDS))); cnt = np.zeros_like(mass)
     for i in range(1000):
         mass[sb[i], pb[i]] += Jc[i]; cnt[sb[i], pb[i]] += 1
-    cells = sorted([(r, c) for r in range(len(SUM_BANDS)) for c in range(len(SPAN_BANDS)) if cnt[r, c] > 0],
-                   key=lambda rc: -mass[rc])
+    # 选格规则：只看"高于随机"的格——按 提升倍数=共识概率/随机基准 排序；
+    # 随机基准太小的格(<STRAT_MIN_BASE%)噪声大不参与；提升不足 STRAT_MIN_LIFT 的格不选（宁可少选）
+    cells = sorted([(r, c) for r in range(len(SUM_BANDS)) for c in range(len(SPAN_BANDS))
+                    if cnt[r, c] / 1000.0 >= STRAT_MIN_BASE and mass[r, c] / (cnt[r, c] / 1000.0) >= STRAT_MIN_LIFT],
+                   key=lambda rc: -(mass[rc] / (cnt[rc] / 1000.0)))
     chosen, per_sb = [], {}
     for r, c in cells:
         if per_sb.get(r, 0) >= STRAT_MAX_PER_SUMBAND: continue
@@ -3042,6 +3047,7 @@ def vote_3d(sources, rl_pos_probs, n_bets=12):
         idxs = [i for i in order if sb[i] == r and pb[i] == c][:STRAT_PER_CELL]
         sl.append({'sum': f'{SUM_BANDS[r][0]}~{SUM_BANDS[r][1]}', 'span': f'{SPAN_BANDS[c][0]}~{SPAN_BANDS[c][1]}',
                    'prob': round(float(mass[r, c]) * 100, 1), 'base': round(float(cnt[r, c]) / 10.0, 1),
+                   'lift': round(float(mass[r, c]) / (float(cnt[r, c]) / 1000.0), 2),
                    'bets': [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in idxs]})
     strat = {'cells': sl,
              'sum_bands': [f'{a}~{b}' for a, b in SUM_BANDS], 'span_bands': [f'{a}~{b}' for a, b in SPAN_BANDS],
@@ -3052,19 +3058,50 @@ def vote_3d(sources, rl_pos_probs, n_bets=12):
             'group_cover': group_cover, 'stratified': strat}
 
 
-def build_consensus(game, records, ml_pred, dl_game, result):
+VOTE_DL_MAX_STALE_DRAWS = int(os.environ.get('VOTE_DL_MAX_STALE_DRAWS', '0'))   # DL之后允许新开几期仍参与投票，默认0
+VOTE_DRAW_CUTOFF_HM = (21, 30)    # 开奖结果大约几点公布（北京时间），用来判断DL运行之后有没有新开奖
+
+
+def dl_staleness(dl_updated_at, records):
+    """
+    DL每周才跑一次，它给出的概率是"DL运行那一刻的下一期"。之后每新开一期，这份概率对应的就是
+    一个已经开过的旧期号，拿来给今天投票是对不上的。这里算DL运行之后新开了几期。
+    dl_updated_at: dl_lstm_tfm.json 的 updated_at（Kaggle服务器时间=UTC，'YYYY-MM-DD HH:MM:SS'）
+    返回 (新开期数 或 None(无法判断), DL运行的北京时间字符串)
+    """
+    from datetime import timedelta
+    try:
+        run_bj = datetime.strptime(str(dl_updated_at)[:19], '%Y-%m-%d %H:%M:%S') + timedelta(hours=8)
+    except Exception:
+        return None, None
+    n_new = 0
+    for r in reversed(records):
+        try:
+            d = datetime.strptime(str(r.get('date'))[:10], '%Y-%m-%d')
+        except Exception:
+            continue
+        pub = d.replace(hour=VOTE_DRAW_CUTOFF_HM[0], minute=VOTE_DRAW_CUTOFF_HM[1])
+        if pub > run_bj: n_new += 1
+        else: break
+    return n_new, run_bj.strftime('%Y-%m-%d %H:%M')
+
+
+def build_consensus(game, records, ml_pred, dl_game, result, dl_note=None):
     """给一个游戏的RL结果挂上共识投票。result 里需要有 rl_scores(ssq/kl8) 或 rl_pos_probs(3d)。失败不影响主结果。"""
     src = vote_source_targets(game, ml_pred, dl_game)
     seed = zlib.crc32(f"{game}-{len(records)}".encode()) & 0xffffffff
     if game == '3d':
         rp = result.get('rl_pos_probs')
         c = vote_3d(src, rp)
-        if c: c['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
+        if c:
+            c['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
+            if dl_note and not (c['sources'].get('dl') or {}).get('available'): c['sources'].setdefault('dl', {})['reason'] = dl_note
         return c
     scores = result.get('rl_scores')
     lifts = vote_ball_lifts(game, src, np.array(scores, dtype=np.float64) if scores else None, seed)
     score, summary = vote_balls(game, lifts)
     summary['sources_targets'] = {k: (len(v) if v else 0) for k, v in src.items()}
+    if dl_note and not (summary['sources'].get('dl') or {}).get('available'): summary['sources'].setdefault('dl', {})['reason'] = dl_note
     if game == 'ssq':
         bets, core, pool = diverse_picks(score, 6, 6)
         blues = (result.get('ppo_groups') or [{}])[0]
@@ -3103,8 +3140,10 @@ if raw_ml:
 # 读取DL（LSTM/TFM）各目标的最新预测概率，共识投票用（每周更新；读不到就只用ML+RL投票）
 raw_dl = gh_raw('dl_lstm_tfm.json')
 dl_results_json = {}
+dl_updated_at = None
 if raw_dl:
-    try: dl_results_json = json.loads(raw_dl).get('results', {})
+    try:
+        _dlj = json.loads(raw_dl); dl_results_json = _dlj.get('results', {}); dl_updated_at = _dlj.get('updated_at')
     except Exception as e: print(f"! 解析dl_lstm_tfm.json失败: {e}，共识投票将缺少DL")
 else:
     print("! 未读到dl_lstm_tfm.json，共识投票将缺少DL")
@@ -3134,7 +3173,20 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
     if _r and (_r.get('rl_scores') or _r.get('rl_pos_probs')):
         try:
             _t0 = time.time()
-            _cons = build_consensus(game, records, ml_pred, dl_results_json.get(game), _r)
+            # DL每周才跑一次：运行之后每新开一期，它的概率对应的就是已经开过的旧期，不能拿来给今天投票
+            _dl_g = dl_results_json.get(game); _dl_note = None
+            if _dl_g:
+                _nn, _run_bj = dl_staleness(dl_updated_at, records)
+                if _nn is None:
+                    print(f"  [共识投票] {game}: 无法判断DL新旧（updated_at={dl_updated_at}），按有效处理")
+                elif _nn > VOTE_DL_MAX_STALE_DRAWS:
+                    _dl_note = f"DL已过期：上次运行 {_run_bj}（北京时间），之后已新开{_nn}期，其概率对应的是旧期，不参与投票"
+                    print(f"  [共识投票] {game}: {_dl_note}"); _dl_g = None
+                else:
+                    print(f"  [共识投票] {game}: DL有效（运行于{_run_bj}，之后新开{_nn}期）")
+            else:
+                _dl_note = "未获取到DL结果"
+            _cons = build_consensus(game, records, ml_pred, _dl_g, _r, _dl_note)
             if _cons:
                 _r['consensus'] = _cons
                 _st = {k: v.get('flat') if v.get('available') else None for k, v in _cons['sources'].items()}
