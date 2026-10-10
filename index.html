@@ -2762,19 +2762,20 @@ function renderConsensus(game, c){
     }
     const st = c.stratified;
     if(st?.matrix){
-      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（只选共识概率高于随机的格，按提升倍数取前${st.cells.length}格，每格选${st.cells[0]?.bets.length||0}注，避免全挤在同一和值/跨度；没有高于随机的格就不选）：</span></div>`;
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（按"高于随机的显著程度 z"选格：颜色越深越显著，粗框是选中的${st.cells.length}格，每格选${st.cells[0]?.bets.length||0}注；和值段/跨度段各最多2格，没有显著高于随机的格就不选）：</span></div>`;
       // 概率矩阵：行=和值段，列=跨度段，高亮被选中的格
       const chosen = new Set((st.chosen||[]).map(x=>x.join(',')));
       h += `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:3px 0;"><tr><td style="padding:2px 6px;color:#888;">和值＼跨度</td>${st.span_bands.map(b=>`<td style="padding:2px 6px;color:#888;text-align:center;">${b}</td>`).join('')}</tr>`;
       st.matrix.forEach((row,r)=>{
         h += `<tr><td style="padding:2px 6px;color:#888;">${st.sum_bands[r]}</td>` + row.map((v,cc)=>{
           const base = st.base_matrix[r][cc]; const sel = chosen.has(r+','+cc);
-          return `<td style="padding:2px 6px;text-align:center;border:1px solid #333;${sel?`background:${PUR}55;color:#fff;font-weight:700;`:''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span></td>`;
+          const z = (st.z_matrix&&st.z_matrix[r][cc])||0, a = Math.max(0, Math.min(1, z/1.5));   // z 越大颜色越深（z≥1.5 最深）
+          return `<td style="padding:2px 6px;text-align:center;border:${sel?`2px solid ${PUR}`:'1px solid #333'};${a>0.05?`background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};`:''}${sel?'color:#fff;font-weight:700;':''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span></td>`;
         }).join('') + `</tr>`;
       });
-      h += `</table></div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%；紫色为选中的格</div>`;
+      h += `</table></div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%；紫色深浅=高于随机的显著程度z（只有z≥0.5且分布均匀才会被选中，粗框）</div>`;
       st.cells.forEach(cell=>{
-        h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`概率${cell.prob}%（随机${cell.base}%，${cell.lift}×）`)}</div>`;
+        h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`概率${cell.prob}%（随机${cell.base}%，z=${cell.z}）`)}</div>`;
         cell.bets.forEach(b=>{
           h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;">${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}</div>`;
         });
