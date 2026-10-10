@@ -2966,8 +2966,9 @@ SUM_BANDS = [(0, 5), (6, 9), (10, 13), (14, 17), (18, 21), (22, 27)]
 SPAN_BANDS = [(0, 2), (3, 4), (5, 6), (7, 9)]
 GROUP_N6, GROUP_N3 = 6, 2      # 组选覆盖：推荐几注组六、几注组三
 STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
-STRAT_MIN_BASE = 0.02   # 随机基准低于2%的格不参与选择（样本太小，提升倍数是噪声）
-STRAT_MIN_LIFT = 1.05   # 共识概率/随机基准 至少1.05倍才算"高于随机"
+STRAT_N_EFF = 300        # 计算 z 时假设的"证据期数"（越大越容易显著；300≈一年的开奖期数）
+STRAT_MIN_Z = 0.5        # z 低于它的格不选（宁可少选）
+STRAT_MAX_PER_SPANBAND = 2   # 每个跨度段最多选几格
 
 
 def vote_3d(sources, rl_pos_probs, n_bets=12):
@@ -3032,27 +3033,37 @@ def vote_3d(sources, rl_pos_probs, n_bets=12):
     mass = np.zeros((len(SUM_BANDS), len(SPAN_BANDS))); cnt = np.zeros_like(mass)
     for i in range(1000):
         mass[sb[i], pb[i]] += Jc[i]; cnt[sb[i], pb[i]] += 1
-    # 选格规则：只看"高于随机"的格——按 提升倍数=共识概率/随机基准 排序；
-    # 随机基准太小的格(<STRAT_MIN_BASE%)噪声大不参与；提升不足 STRAT_MIN_LIFT 的格不选（宁可少选）
+    # 选格规则：用"高于随机的显著程度"z 打分，而不是原始概率或提升倍数——
+    #   z = (共识概率 p − 随机基准 q) / sqrt(q(1−q)/N)，N=STRAT_N_EFF（假设有这么多期"证据"时，该格出现频率的随机波动）。
+    #   原始概率最大 → 永远是中间格（基准本来就高）；提升倍数最大 → 全是基准很小的边角格（噪声）；
+    #   z 同时考虑"多出来多少"和"这个格本身有多大"，两头都不会被偏爱。
+    #   只选 z≥STRAT_MIN_Z 的格；和值段、跨度段各最多选 STRAT_MAX_PER_* 格，避免挤成一行/一列。
+    zmat = np.zeros_like(mass)
+    for r in range(len(SUM_BANDS)):
+        for c in range(len(SPAN_BANDS)):
+            q = cnt[r, c] / 1000.0
+            if q > 0:
+                zmat[r, c] = (mass[r, c] - q) / np.sqrt(q * (1 - q) / STRAT_N_EFF)
     cells = sorted([(r, c) for r in range(len(SUM_BANDS)) for c in range(len(SPAN_BANDS))
-                    if cnt[r, c] / 1000.0 >= STRAT_MIN_BASE and mass[r, c] / (cnt[r, c] / 1000.0) >= STRAT_MIN_LIFT],
-                   key=lambda rc: -(mass[rc] / (cnt[rc] / 1000.0)))
-    chosen, per_sb = [], {}
+                    if cnt[r, c] > 0 and zmat[r, c] >= STRAT_MIN_Z],
+                   key=lambda rc: -zmat[rc])
+    chosen, per_sb, per_pb = [], {}, {}
     for r, c in cells:
-        if per_sb.get(r, 0) >= STRAT_MAX_PER_SUMBAND: continue
-        chosen.append((r, c)); per_sb[r] = per_sb.get(r, 0) + 1
+        if per_sb.get(r, 0) >= STRAT_MAX_PER_SUMBAND or per_pb.get(c, 0) >= STRAT_MAX_PER_SPANBAND: continue
+        chosen.append((r, c)); per_sb[r] = per_sb.get(r, 0) + 1; per_pb[c] = per_pb.get(c, 0) + 1
         if len(chosen) >= STRAT_CELLS: break
     sl = []
     for r, c in chosen:
         idxs = [i for i in order if sb[i] == r and pb[i] == c][:STRAT_PER_CELL]
         sl.append({'sum': f'{SUM_BANDS[r][0]}~{SUM_BANDS[r][1]}', 'span': f'{SPAN_BANDS[c][0]}~{SPAN_BANDS[c][1]}',
                    'prob': round(float(mass[r, c]) * 100, 1), 'base': round(float(cnt[r, c]) / 10.0, 1),
-                   'lift': round(float(mass[r, c]) / (float(cnt[r, c]) / 1000.0), 2),
+                   'z': round(float(zmat[r, c]), 2),
                    'bets': [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in idxs]})
     strat = {'cells': sl,
              'sum_bands': [f'{a}~{b}' for a, b in SUM_BANDS], 'span_bands': [f'{a}~{b}' for a, b in SPAN_BANDS],
              'matrix': [[round(float(mass[r, c]) * 100, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
              'base_matrix': [[round(float(cnt[r, c]) / 10.0, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
+             'z_matrix': [[round(float(zmat[r, c]), 2) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
              'chosen': [[int(r), int(c)] for r, c in chosen]}
     return {'sources': info, 'active': active, 'n_active': len(active), 'pos': pos, 'bets': bets,
             'group_cover': group_cover, 'stratified': strat}
