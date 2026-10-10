@@ -2473,7 +2473,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 100000, lambda: _eval_holdout(model), '3D首训',
+            model, 200000, lambda: _eval_holdout(model), '3D首训',
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=10,
             baseline_is_real=False)
     else:
@@ -2967,8 +2967,8 @@ SPAN_BANDS = [(0, 2), (3, 4), (5, 6), (7, 9)]
 GROUP_N6, GROUP_N3 = 6, 2      # 组选覆盖：推荐几注组六、几注组三
 STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
 STRAT_N_EFF = 300        # 计算 z 时假设的"证据期数"（越大越容易显著；300≈一年的开奖期数）
-STRAT_MIN_Z = 0.5        # z 低于它的格不选（宁可少选）
-STRAT_MAX_PER_SPANBAND = 2   # 每个跨度段最多选几格
+STRAT_MIN_Z = 0.4        # z 低于它的格不选（宁可少选）
+STRAT_MAX_PER_SPANBAND = 3   # 每个跨度段最多选几格
 
 
 def vote_3d(sources, rl_pos_probs, n_bets=12):
