@@ -1285,6 +1285,12 @@
           <div class="scanFieldsForm">
             <div class="scanFieldRow">
               <div class="field">
+                <label>票种（选已有票种直接带入票名和面值，不会归错类）</label>
+                <select id="scanTypePick" style="width:100%;padding:10px;border-radius:8px;background:#2a2a2a;color:inherit;border:1px solid #555;font-size:14px;"><option value="">— 手动填写 / 新票种 —</option></select>
+              </div>
+            </div>
+            <div class="scanFieldRow">
+              <div class="field">
                 <label>① 票名</label>
                 <input type="text" id="fieldName" placeholder="例如：心想事成">
               </div>
@@ -1320,6 +1326,10 @@
         <div class="panel">
           <h2>已存档记录<span class="scanCountBadge" id="scanCountBadge">0</span></h2>
           <div class="status" id="scanSyncStatus" style="margin-bottom:8px;"></div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>从GitHub读取哪个票种</label>
+            <select id="scanTypeFilter" style="width:100%;padding:10px;border-radius:8px;background:#2a2a2a;color:inherit;border:1px solid #555;font-size:14px;"><option value="">全部票种</option></select>
+          </div>
           <div class="scanTableWrap">
             <table class="scanTable">
               <thead>
@@ -4234,6 +4244,73 @@ function getScanConfig(){
   };
 }
 
+/* ── 票种管理：归类、选择读取、相似票种提示 ── */
+let scanTypeKeys = [];                      // 仓库 scratch/ 里现有的票种（文件名去掉.json）
+let scanFilter = '';                        // ''=读取全部；否则只读取该票种
+try{ scanFilter = localStorage.getItem('fucaiScanFilter') || ''; }catch(e){}
+function scanAmtCanon(a){ return scanClean(String(a||'').replace(/[元¥￥角\s]/g,'')); }
+function scanLev(a,b){
+  const m=a.length,n=b.length; if(!m||!n) return Math.max(m,n);
+  let prev=Array.from({length:n+1},(_,j)=>j);
+  for(let i=1;i<=m;i++){ const cur=[i]; for(let j=1;j<=n;j++) cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1)); prev=cur; }
+  return prev[n];
+}
+function scanKnownTypes(){      // [{key,name,amount}]：已加载记录里的 + 仓库里只知道文件名的
+  const map={};
+  scanRecords.forEach(r=>{ const k=scanTypeKey(r); if(!map[k]) map[k]={key:k,name:r.name||'未分类',amount:r.amount||''}; });
+  scanTypeKeys.forEach(k=>{ if(!map[k]){ const i=k.lastIndexOf('_'); map[k]= i>0 ? {key:k,name:k.slice(0,i),amount:k.slice(i+1)} : {key:k,name:k,amount:''}; } });
+  return Object.values(map).sort((a,b)=>a.key.localeCompare(b.key,'zh'));
+}
+function renderScanTypeUI(){
+  const types=scanKnownTypes(), cnt={};
+  scanRecords.forEach(r=>{ const k=scanTypeKey(r); cnt[k]=(cnt[k]||0)+1; });
+  const fsel=document.getElementById('scanTypeFilter'), psel=document.getElementById('scanTypePick');
+  if(fsel){
+    fsel.innerHTML='<option value="">全部票种</option>'+types.map(t=>`<option value="${escapeHtml(t.key)}">${escapeHtml(t.name)} ${escapeHtml(t.amount)}${cnt[t.key]?`（已载入${cnt[t.key]}条）`:''}</option>`).join('');
+    fsel.value = types.some(t=>t.key===scanFilter) ? scanFilter : '';
+  }
+  if(psel){
+    const cur=psel.value;
+    psel.innerHTML='<option value="">— 手动填写 / 新票种 —</option>'+types.map(t=>`<option value="${escapeHtml(t.key)}" data-name="${escapeHtml(t.name)}" data-amount="${escapeHtml(t.amount)}">${escapeHtml(t.name)} · ${escapeHtml(t.amount)}</option>`).join('');
+    if(types.some(t=>t.key===cur)) psel.value=cur;
+  }
+}
+/* 加入清单前确认归类：票名/面值与已有票种"很像但不一样"时让你确认，避免OCR小误差把同一种票拆成两类 */
+function resolveScanType(rec){
+  const cn=scanClean(rec.name), ca=scanAmtCanon(rec.amount);
+  const types=scanKnownTypes();
+  if(!cn){
+    if(!confirm('票名是空的，这张票会归入「未分类」。确定继续吗？\n（取消后可先选择票种或填写票名）')) return null;
+    return rec;
+  }
+  const key=scanTypeKey(rec);
+  if(types.some(t=>t.key===key)) return rec;                       // 已有同票种
+  const sim = types.find(t=>{                                       // 面值相同、票名只差1个字
+    const tn=scanClean(t.name);
+    return scanAmtCanon(t.amount)===ca && tn.length>=3 && cn.length>=3 && scanLev(tn,cn)<=1;
+  });
+  if(sim){
+    const same = confirm(`票名「${rec.name}」与已有票种「${sim.name} ${sim.amount}」很像。\n\n确定 = 是同一种，归入「${sim.name} ${sim.amount}」\n取消 = 是新票种，单独建一类`);
+    if(same) return { ...rec, name: sim.name, amount: sim.amount };
+  }
+  return rec;
+}
+/* 只读取了某个票种时，要加入的票若属于另一个已存在的票种，先把那个票种的文件读进来再合并，避免覆盖 */
+async function scanEnsureLoaded(rec){
+  const key=scanTypeKey(rec), path=scanPathOf(key);
+  if(scanRemote[path] || !scanTypeKeys.includes(key)) return;
+  const { repo, token } = getScanConfig();
+  try{
+    const r=await fetch(`https://api.github.com/repos/${repo}/contents/${scanUrlPath(path)}?ref=main&t=${Date.now()}`,
+      { headers:{ ...scanHeaders(token), 'Accept':'application/vnd.github.raw' }, cache:'no-store' });
+    if(!r.ok) return;
+    const text=await r.text(); const data=JSON.parse(text);
+    const recs=Array.isArray(data)?data:(data.records||[]);
+    const have=new Set(scanRecords.map(x=>scanCodeKey(x.code)).filter(Boolean));
+    recs.forEach(x=>{ const k=scanCodeKey(x.code); if(!k||!have.has(k)) scanRecords.push(x); });
+    const sr=await ghScanSha(path); scanRemote[path]={ sha:sr, text };
+  }catch(e){}
+}
 /* ── GitHub 读写：按票种分文件存放（scratch/票名_面值.json），同类刮刮卡在同一个文件里 ── */
 const SCAN_DIR = 'scratch';
 let scanRemote = {};   // 仓库里现有文件 path -> {sha, text}，用来判断哪些文件需要更新/删除
@@ -4242,7 +4319,7 @@ function scanClean(s){
   return (s||'').trim().replace(/[\\\/:*?"<>|#%\s]+/g,'_').replace(/^_+|_+$/g,'').slice(0,30);
 }
 function scanTypeKey(r){
-  const n = scanClean(r.name) || '未分类', a = scanClean(r.amount);
+  const n = scanClean(r.name) || '未分类', a = scanAmtCanon(r.amount);
   return a ? `${n}_${a}` : n;
 }
 function scanPathOf(key){ return `${SCAN_DIR}/${key}.json`; }
@@ -4270,7 +4347,7 @@ async function ghScanFetch(){
                              { headers: scanHeaders(token), cache: 'no-store' });
     if(resp.status === 404){
       // 还没有 scratch 文件夹：读旧的 scan_records.json，下次同步时会自动拆成按票种的文件
-      scanRemote = {};
+      scanRemote = {}; scanTypeKeys = [];
       const old = await fetch(`https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`);
       if(old.status === 404) return { list: [], ok: true };
       if(!old.ok) return { list: [], ok: false, reason: `HTTP ${old.status}` };
@@ -4278,7 +4355,10 @@ async function ghScanFetch(){
       return { list: Array.isArray(arr) ? arr : [], ok: true, legacy: true };
     }
     if(!resp.ok) return { list: [], ok: false, reason: `HTTP ${resp.status}` };
-    const files = (await resp.json()).filter(f => f.type === 'file' && /\.json$/i.test(f.name));
+    const allFiles = (await resp.json()).filter(f => f.type === 'file' && /\.json$/i.test(f.name));
+    scanTypeKeys = allFiles.map(f => f.name.replace(/\.json$/i,''));
+    if(scanFilter && !scanTypeKeys.includes(scanFilter)) scanFilter = '';
+    const files = scanFilter ? allFiles.filter(f => f.name.replace(/\.json$/i,'') === scanFilter) : allFiles;
     const list = [], remote = {};
     for(const f of files){
       const r = token
@@ -4403,7 +4483,7 @@ async function loadScanFromGithub(){
     scanRecords = result.list;
     saveLocalCache(scanRecords);
     syncEl.className = 'status ok';
-    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录（${Object.keys(scanGroups(scanRecords)).length} 个票种）` + (result.legacy ? '；检测到旧的 scan_records.json，下次保存时会自动拆分到 scratch/ 文件夹' : '');
+    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录（${Object.keys(scanGroups(scanRecords)).length} 个票种）` + (scanFilter ? '；当前只读取了所选票种，去重只在已读取的记录里比对' : '') + (result.legacy ? '；检测到旧的 scan_records.json，下次保存时会自动拆分到 scratch/ 文件夹' : '');
   } else {
     scanRecords = loadLocalCache();
     syncEl.className = 'status err';
@@ -4413,6 +4493,7 @@ async function loadScanFromGithub(){
 }
 
 function renderScanTable(){
+  renderScanTypeUI();
   const body = document.getElementById('scanTableBody');
   const badge = document.getElementById('scanCountBadge');
   badge.textContent = scanRecords.length;
@@ -4449,6 +4530,10 @@ function findDupScanRecord(code){
   return scanRecords.find(r => scanCodeKey(r.code) === k) || null;
 }
 async function addScanRecord(rec){
+  const resolved = resolveScanType(rec);
+  if(!resolved) return { ok:false, cancelled:true };
+  rec = resolved;
+  await scanEnsureLoaded(rec);
   const dup = findDupScanRecord(rec.code);
   if(dup) return { ok:false, dup };            // 同编号已存在：不重复保存
   const now = new Date();
@@ -4485,6 +4570,19 @@ document.getElementById('scanSaveConfigBtn').addEventListener('click', ()=>{
 });
 
 document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFromGithub);
+document.getElementById('scanTypeFilter').addEventListener('change', e=>{
+  scanFilter = e.target.value;
+  try{ localStorage.setItem('fucaiScanFilter', scanFilter); }catch(_){}
+  loadScanFromGithub();
+});
+document.getElementById('scanTypePick').addEventListener('change', e=>{
+  const o = e.target.selectedOptions[0];
+  if(!o || !o.value) return;
+  document.getElementById('fieldName').value = o.dataset.name || '';
+  document.getElementById('fieldAmount').value = o.dataset.amount || '';
+  saveScanMemory();
+  clearScanCodeFmt();   // 换了票种：编号格式记忆重新来
+});
 
 /* ── 拍摄模式：票名/面值/编号 三选一，决定OCR白名单+自动提取用的正则规则 ── */
 const SCAN_MODE_CONFIG = {
@@ -5316,6 +5414,7 @@ document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
   }
 
   const added = await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
+  if(added && added.cancelled){ formStatus.className='status err'; formStatus.textContent='已取消，未保存。'; return; }
   if(added && added.dup){
     document.getElementById('fieldCode').value = '';
     document.getElementById('fieldPrize').value = '';
