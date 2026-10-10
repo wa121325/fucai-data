@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-10 14:23",
+  "updated_at": "2026-10-10 18:03",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8777,
-      "updated_at": "2026-10-10 14:17",
+      "updated_at": "2026-10-10 17:56",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -996,7 +996,7 @@
     },
     "ssq": {
       "data_count": 3512,
-      "updated_at": "2026-10-10 14:19",
+      "updated_at": "2026-10-10 17:59",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -1939,7 +1939,7 @@
     },
     "kl8": {
       "data_count": 2090,
-      "updated_at": "2026-10-10 14:21",
+      "updated_at": "2026-10-10 18:01",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -2982,7 +2982,7 @@
     "date": "2026-10-10",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-10-09 17:20",
+        "prediction_generated_at": "2026-10-10 14:17",
         "actual_qihao": "2026269",
         "actual_date": "2026-10-10",
         "actual": [
@@ -2994,7 +2994,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-10-09 17:23",
+        "prediction_generated_at": "2026-10-10 14:19",
         "actual_qihao": "2026115",
         "actual_date": "2026-10-08",
         "actual_red": [
@@ -3035,7 +3035,7 @@
         "best_red_hit": 3
       },
       "kl8": {
-        "prediction_generated_at": "2026-10-09 17:26",
+        "prediction_generated_at": "2026-10-10 14:21",
         "actual_qihao": "2026269",
         "actual_date": "2026-10-10",
         "actual": [
@@ -3071,18 +3071,18 @@
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 4,
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 4,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 1
           },
           "xuan5": {
             "name": "选五",
@@ -3099,7 +3099,7 @@
                 "won": false
               },
               {
-                "hit": 2,
+                "hit": 1,
                 "balls": 5,
                 "won": false
               }
@@ -3112,13 +3112,13 @@
             "balls": 5,
             "groups": [
               {
-                "hit": 5,
+                "hit": 3,
                 "balls": 5,
-                "won": true
+                "won": false
               }
             ],
-            "any_won": true,
-            "best_hit": 5
+            "any_won": false,
+            "best_hit": 3
           },
           "xuan6": {
             "name": "选六",
@@ -3130,30 +3130,30 @@
                 "won": false
               },
               {
-                "hit": 4,
+                "hit": 3,
                 "balls": 6,
                 "won": false
               },
               {
-                "hit": 4,
+                "hit": 2,
                 "balls": 6,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 4
+            "best_hit": 3
           },
           "xuan9": {
             "name": "选九",
             "balls": 9,
             "groups": [
               {
-                "hit": 4,
+                "hit": 3,
                 "balls": 9,
                 "won": false
               },
               {
-                "hit": 3,
+                "hit": 4,
                 "balls": 9,
                 "won": false
               }
@@ -3166,16 +3166,16 @@
             "balls": 10,
             "groups": [
               {
-                "hit": 2,
+                "hit": 4,
                 "balls": 10,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 2
+            "best_hit": 4
           }
         },
-        "best_hit": 5
+        "best_hit": 4
       }
     }
   },
