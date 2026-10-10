@@ -1301,6 +1301,7 @@
               <div class="field">
                 <label>③ 编号</label>
                 <input type="text" id="fieldCode" placeholder="例如：J0790-26147-0040880-135-3">
+                <div id="codeFmtHint" style="font-size:10.5px;color:var(--muted);margin-top:3px;"></div>
               </div>
               <button class="miniCamBtn" data-mode="code">重新框选</button>
             </div>
@@ -4442,12 +4443,20 @@ function renderScanTable(){
 
 // escapeHtml 复用文件前面已定义的同名函数（逻辑完全一致）
 
+function scanCodeKey(c){ return String(c||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+function findDupScanRecord(code){
+  const k = scanCodeKey(code); if(!k) return null;
+  return scanRecords.find(r => scanCodeKey(r.code) === k) || null;
+}
 async function addScanRecord(rec){
+  const dup = findDupScanRecord(rec.code);
+  if(dup) return { ok:false, dup };            // 同编号已存在：不重复保存
   const now = new Date();
   const timeStr = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
   scanRecords.push({ name: rec.name||'', amount: rec.amount||'', code: rec.code||'', prize: rec.prize||'', time: timeStr });
   renderScanTable();
   await syncScanToGithub();
+  return { ok:true };
 }
 
 /* ── GitHub 存储设置 ── */
@@ -4671,7 +4680,74 @@ async function tryRecognize(worker, canvas, psm, whitelist, autoExtract){
 function _fixDigits(s){
   return s.replace(/[OQD]/g,'0').replace(/[IL|]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/Z/g,'2').replace(/G/g,'6');
 }
+/* ═══ 编号格式短期记忆 ═══
+   同一批刮刮卡的编号"位数和横线位置"是固定的（如 J0791-26148-0756299-114-3 = LDDDD-DDDDD-DDDDDDD-DDD-D，
+   L=字母、D=数字）。加入清单成功后记住这个格式（8小时，点「换新票」清空），之后识别时：
+   按格式把OCR结果对齐（去掉首尾噪点、补回漏掉/多出的横线）、按每个位置该是字母还是数字纠错（O↔0、I↔1、S↔5、B↔8 等）。 */
+const SCAN_CODEFMT_KEY='fucaiScanCodeFmt', SCAN_CODEFMT_TTL=8*3600*1000;
+const _TO_DIGIT={O:'0',Q:'0',D:'0',I:'1',L:'1',S:'5',B:'8',Z:'2',G:'6',T:'7'};
+const _TO_LETTER={'0':'O','1':'I','5':'S','8':'B','2':'Z','6':'G','7':'T'};
+function codePattern(code){
+  const segs=String(code||'').toUpperCase().split('-');
+  if(!segs.length || segs.some(s=>!/^[A-Z0-9]+$/.test(s))) return '';
+  return segs.map(s=>s.replace(/[A-Z]/g,'L').replace(/[0-9]/g,'D')).join('-');
+}
+function getScanCodeSample(){
+  try{ const m=JSON.parse(localStorage.getItem(SCAN_CODEFMT_KEY)||'null'); return (m && m.sample) || ''; }catch(e){ return ''; }
+}
+function getScanCodeFmt(){
+  try{
+    const m=JSON.parse(localStorage.getItem(SCAN_CODEFMT_KEY)||'null');
+    if(!m || !m.pat || Date.now()-m.t>SCAN_CODEFMT_TTL){ localStorage.removeItem(SCAN_CODEFMT_KEY); return ''; }
+    return m.pat;
+  }catch(e){ return ''; }
+}
+function saveScanCodeFmt(code){
+  try{
+    const pat=codePattern(code);
+    if(pat && pat.includes('-')) localStorage.setItem(SCAN_CODEFMT_KEY, JSON.stringify({pat,sample:String(code).toUpperCase().replace(/[^A-Z0-9]/g,''),t:Date.now()}));
+  }catch(e){}
+  renderCodeFmtHint();
+}
+function clearScanCodeFmt(){ try{ localStorage.removeItem(SCAN_CODEFMT_KEY); }catch(e){} renderCodeFmtHint(); }
+function renderCodeFmtHint(){
+  const el=document.getElementById('codeFmtHint'); if(!el) return;
+  const p=getScanCodeFmt();
+  el.textContent = p ? `已记住编号格式：${p}（L=字母 D=数字），识别时按此对齐纠错；换新票会清空` : '';
+}
+function fmtRegex(pat){
+  return new RegExp('^'+pat.split('-').map(s=>s.split('').map(c=>c==='L'?'[A-Z]':'\\d').join('')).join('-')+'$');
+}
+/* 把OCR原文按记忆的格式对齐。返回对齐后的编号；对不上（太短/要改的字符太多）返回 ''，由原有逻辑兜底 */
+function fitCodeToFmt(raw, pat){
+  pat = pat || getScanCodeFmt(); if(!pat) return '';
+  const segs=pat.split('-'), classes=segs.join('').split(''), n=classes.length;
+  const s=String(raw||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const sample=getScanCodeSample();   // 同一批票的字母位（如开头的J）基本不变，字母位被读成数字时优先还原成它
+  if(s.length<n) return '';
+  let best=null;
+  for(let off=0; off+n<=s.length; off++){          // 前后多出来的噪点字符：滑窗找最合适的一段
+    let cost=0, out='';
+    for(let i=0;i<n;i++){
+      const ch=s[off+i];
+      if(classes[i]==='D'){
+        if(/\d/.test(ch)) out+=ch;
+        else if(_TO_DIGIT[ch]){ out+=_TO_DIGIT[ch]; cost+=1; }
+        else { cost+=10; out+=ch; }
+      } else {
+        if(/[A-Z]/.test(ch)) out+=ch;
+        else if(/[A-Z]/.test(sample[i]||'') && /\d/.test(ch)){ out+=sample[i]; cost+=1; }
+        else if(_TO_LETTER[ch]){ out+=_TO_LETTER[ch]; cost+=1; }
+        else { cost+=10; out+=ch; }
+      }
+    }
+    if(!best || cost<best.cost) best={cost,out};
+  }
+  if(!best || best.cost>3) return '';
+  let pos=0; return segs.map(sg=>{ const x=best.out.slice(pos,pos+sg.length); pos+=sg.length; return x; }).join('-');
+}
 function normalizeTicketCode(raw){
+  { const fitted = fitCodeToFmt(raw); if(fitted) return fitted; }   // 有记忆的格式时优先按格式对齐
   let t = String(raw||'').toUpperCase().replace(/[^A-Z0-9\-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
   const parts = t.split('-');
   if(parts.length < 2) return t;
@@ -4682,6 +4758,7 @@ function normalizeTicketCode(raw){
   return m5 ? m5[0] : joined;   // 第5段之后的多余字符（边缘噪点）直接丢弃
 }
 function ticketCodeScore(c){
+  { const pat = getScanCodeFmt(); if(pat && fmtRegex(pat).test(c)) return 4; }   // 完全符合记忆的格式：最高分
   // 3=完全符合 5段(字母+4位-5位-7位-3位-1位)；2=5段且各段全数字；1=段数≥4；0=其它
   if(/^[A-Z]\d{4}-\d{5}-\d{7}-\d{3}-\d$/.test(c)) return 3;
   if(/^[A-Z]\d{3,6}(-\d{1,8}){4}$/.test(c)) return 2;
@@ -4999,7 +5076,7 @@ async function onPhotoLoaded(img){
 
     // 择优：编号优先选"段数最完整"的结果（已知是5段格式，
     // 4段的结果说明尾段被漏读，不能因为它先出现就采用），段数相同再比长度
-    const extracted = results.length
+    let extracted = results.length
       ? results.sort((a,b)=>{
           const sa = a.split('-').length, sb = b.split('-').length;
           if(sa !== sb) return sb - sa;
@@ -5008,6 +5085,7 @@ async function onPhotoLoaded(img){
       : '';
 
     if(extracted){
+      if(scanCaptureMode === 'code'){ const ft = fitCodeToFmt(extracted); if(ft) extracted = ft; }
       document.getElementById(cfg.fieldId).value = extracted;
       statusEl.className = 'status ok';
       statusEl.textContent = `✓ 自动识别成功：${extracted}（如有误，可点字段旁「重新框选」手动修正）`;
@@ -5179,6 +5257,7 @@ document.getElementById('cropConfirmBtn').addEventListener('click', async ()=>{
       }
     }
 
+    if(scanCaptureMode === 'code' && cleaned){ const ft = fitCodeToFmt(cleaned); if(ft) cleaned = ft; }
     document.getElementById(cfg.fieldId).value = cleaned;
     statusEl.className = cleaned ? 'status ok' : 'status err';
     statusEl.textContent = cleaned
@@ -5217,9 +5296,11 @@ function restoreScanMemory(){
 document.getElementById('scanNewTicketBtn').addEventListener('click',()=>{
   ['fieldName','fieldAmount','fieldCode','fieldPrize'].forEach(id=>document.getElementById(id).value='');
   try{ localStorage.removeItem(SCAN_MEM_KEY); }catch(e){}
+  clearScanCodeFmt();
   const st=document.getElementById('scanFormStatus'); st.className='status ok'; st.textContent='已清空，请录入新票的票名和面值。';
 });
 restoreScanMemory();
+renderCodeFmtHint();
 
 /* ── 加入清单 ── */
 document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
@@ -5234,7 +5315,15 @@ document.getElementById('scanConfirmBtn').addEventListener('click', async ()=>{
     return;
   }
 
-  await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
+  const added = await addScanRecord({ name:nameVal, amount:amountVal, code:codeVal, prize:prizeVal });
+  if(added && added.dup){
+    document.getElementById('fieldCode').value = '';
+    document.getElementById('fieldPrize').value = '';
+    formStatus.className = 'status err';
+    formStatus.textContent = `⚠️ 编号 ${codeVal} 已在清单中（${added.dup.name||'未命名'} ${added.dup.amount||''}，${added.dup.time||''}），未重复保存。`;
+    return;
+  }
+  if(codeVal) saveScanCodeFmt(codeVal);   // 记住这批票的编号格式，下一张识别时用来对齐纠错
 
   // 票名/面值短期记忆：同一批同款彩票不用重复输入，只清编号和中奖金额
   saveScanMemory();
