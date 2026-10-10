@@ -4233,62 +4233,117 @@ function getScanConfig(){
   };
 }
 
-/* ── GitHub 读写 ── */
+/* ── GitHub 读写：按票种分文件存放（scratch/票名_面值.json），同类刮刮卡在同一个文件里 ── */
+const SCAN_DIR = 'scratch';
+let scanRemote = {};   // 仓库里现有文件 path -> {sha, text}，用来判断哪些文件需要更新/删除
+
+function scanClean(s){
+  return (s||'').trim().replace(/[\\\/:*?"<>|#%\s]+/g,'_').replace(/^_+|_+$/g,'').slice(0,30);
+}
+function scanTypeKey(r){
+  const n = scanClean(r.name) || '未分类', a = scanClean(r.amount);
+  return a ? `${n}_${a}` : n;
+}
+function scanPathOf(key){ return `${SCAN_DIR}/${key}.json`; }
+function scanUrlPath(p){ return p.split('/').map(encodeURIComponent).join('/'); }
+function scanGroups(list){
+  const g = {};
+  list.forEach(r=>{
+    const k = scanTypeKey(r);
+    (g[k] = g[k] || { name: r.name||'未分类', amount: r.amount||'', records: [] }).records.push(r);
+  });
+  return g;
+}
+function scanHeaders(token, json){
+  const h = { 'Accept': 'application/vnd.github.v3+json' };
+  if(token) h['Authorization'] = `token ${token}`;
+  if(json) h['Content-Type'] = 'application/json';
+  return h;
+}
+
 async function ghScanFetch(){
-  const { repo } = getScanConfig();
+  const { repo, token } = getScanConfig();
   if(!repo) return { list: [], ok: false, reason: '未配置仓库地址' };
   try{
-    const url = `https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`;
-    const resp = await fetch(url);
-    if(resp.status === 404) return { list: [], ok: true };
+    const resp = await fetch(`https://api.github.com/repos/${repo}/contents/${SCAN_DIR}?ref=main&t=${Date.now()}`,
+                             { headers: scanHeaders(token), cache: 'no-store' });
+    if(resp.status === 404){
+      // 还没有 scratch 文件夹：读旧的 scan_records.json，下次同步时会自动拆成按票种的文件
+      scanRemote = {};
+      const old = await fetch(`https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`);
+      if(old.status === 404) return { list: [], ok: true };
+      if(!old.ok) return { list: [], ok: false, reason: `HTTP ${old.status}` };
+      const arr = await old.json();
+      return { list: Array.isArray(arr) ? arr : [], ok: true, legacy: true };
+    }
     if(!resp.ok) return { list: [], ok: false, reason: `HTTP ${resp.status}` };
-    const list = await resp.json();
-    return { list: Array.isArray(list) ? list : [], ok: true };
+    const files = (await resp.json()).filter(f => f.type === 'file' && /\.json$/i.test(f.name));
+    const list = [], remote = {};
+    for(const f of files){
+      const r = token
+        ? await fetch(f.url, { headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.raw' }, cache: 'no-store' })
+        : await fetch(f.download_url + '?t=' + Date.now());
+      if(!r.ok) return { list: [], ok: false, reason: `读取 ${f.name} 失败 HTTP ${r.status}` };
+      const text = await r.text();
+      let data; try{ data = JSON.parse(text); } catch(e){ return { list: [], ok: false, reason: `${f.name} 不是合法JSON` }; }
+      const recs = Array.isArray(data) ? data : (data.records || []);
+      recs.forEach(x => list.push(x));
+      remote[f.path] = { sha: f.sha, text };
+    }
+    scanRemote = remote;
+    return { list, ok: true };
   } catch(e){
     return { list: [], ok: false, reason: e.message };
   }
 }
 
-async function ghScanGetSha(){
+async function ghScanSha(path){
   const { repo, token } = getScanConfig();
-  if(!repo || !token) return null;
-  try{
-    const url = `https://api.github.com/repos/${repo}/contents/${SCAN_FILE_PATH}`;
-    const resp = await fetch(url, {
-      headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.v3+json' }
-    });
-    if(resp.status === 404) return null;
-    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    return data.sha || null;
-  } catch(e){ return null; }
+  const r = await fetch(`https://api.github.com/repos/${repo}/contents/${scanUrlPath(path)}?ref=main&t=${Date.now()}`,
+                        { headers: scanHeaders(token), cache: 'no-store' });
+  if(r.status === 404) return null;
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  return (await r.json()).sha || null;
+}
+async function ghScanWrite(path, text, sha, del){
+  const { repo, token } = getScanConfig();
+  const url = `https://api.github.com/repos/${repo}/contents/${scanUrlPath(path)}`;
+  const body = { message: `${del?'删除':'更新'} ${path} ${new Date().toISOString()}`, branch: 'main' };
+  if(!del) body.content = btoa(unescape(encodeURIComponent(text)));
+  if(sha) body.sha = sha;
+  return fetch(url, { method: del ? 'DELETE' : 'PUT', headers: scanHeaders(token, true), body: JSON.stringify(body) });
+}
+async function ghScanOp(path, text, del){
+  let sha = scanRemote[path]?.sha || null;
+  let resp = await ghScanWrite(path, text, sha, del);
+  if(resp.status === 409 || resp.status === 422){        // sha 过期/缺失：取最新 sha 重试一次
+    sha = await ghScanSha(path);
+    if(del && !sha) return { ok: true };
+    resp = await ghScanWrite(path, text, sha, del);
+  }
+  if(!resp.ok){
+    const err = await resp.json().catch(()=>({}));
+    return { ok: false, reason: `${path}：HTTP ${resp.status} ${err.message||''}` };
+  }
+  const data = await resp.json().catch(()=>({}));
+  if(del) delete scanRemote[path]; else scanRemote[path] = { sha: data.content?.sha || null, text };
+  return { ok: true };
 }
 
 async function ghScanPush(list){
   const { repo, token } = getScanConfig();
   if(!repo || !token) return { ok:false, reason:'未配置仓库地址或Token' };
   try{
-    const sha = await ghScanGetSha();
-    const url = `https://api.github.com/repos/${repo}/contents/${SCAN_FILE_PATH}`;
-    const contentStr = JSON.stringify(list, null, 2);
-    const body = {
-      message: `扫码存档更新 ${new Date().toISOString()}`,
-      content: btoa(unescape(encodeURIComponent(contentStr))),
-      branch: 'main',
-    };
-    if(sha) body.sha = sha;
-    const resp = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `token ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify(body)
+    const want = {};
+    Object.entries(scanGroups(list)).forEach(([k, g])=>{
+      want[scanPathOf(k)] = JSON.stringify({ name: g.name, amount: g.amount, count: g.records.length, records: g.records }, null, 2);
     });
-    if(!resp.ok){
-      const err = await resp.json().catch(()=>({}));
-      return { ok:false, reason: `HTTP ${resp.status} ${err.message||''}` };
+    for(const [p, text] of Object.entries(want)){          // 只写有变化的票种文件
+      if(scanRemote[p] && scanRemote[p].text === text) continue;
+      const r = await ghScanOp(p, text, false); if(!r.ok) return r;
+    }
+    for(const p of Object.keys(scanRemote)){               // 某票种的记录删光了，就删掉对应文件
+      if(!(p in want)){ const r = await ghScanOp(p, '', true); if(!r.ok) return r; }
     }
     return { ok:true };
   } catch(e){
@@ -4321,7 +4376,7 @@ async function syncScanToGithub(){
   if(result.ok){
     saveLocalCache(scanRecords);
     syncEl.className = 'status ok';
-    syncEl.textContent = `✓ 已同步到 GitHub（${repo}/${SCAN_FILE_PATH}）`;
+    syncEl.textContent = `✓ 已同步到 GitHub（${repo}/${SCAN_DIR}/，按票种分文件）`;
     return true;
   } else {
     syncEl.className = 'status err';
@@ -4347,7 +4402,7 @@ async function loadScanFromGithub(){
     scanRecords = result.list;
     saveLocalCache(scanRecords);
     syncEl.className = 'status ok';
-    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录`;
+    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录（${Object.keys(scanGroups(scanRecords)).length} 个票种）` + (result.legacy ? '；检测到旧的 scan_records.json，下次保存时会自动拆分到 scratch/ 文件夹' : '');
   } else {
     scanRecords = loadLocalCache();
     syncEl.className = 'status err';
