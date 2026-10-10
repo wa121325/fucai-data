@@ -1112,7 +1112,7 @@
         </div>
         <div class="field">
           <label>OpenRouter API Key</label>
-          <input type="password" id="gwSecretInput" placeholder="sk-or-v1-..." value="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">
+          <input type="password" id="gwSecretInput" placeholder="sk-or-v1-...">
         </div>
         <div class="field">
           <label>模型（推荐 openrouter/free 自动路由）</label>
@@ -1970,15 +1970,16 @@ function explainGwError(status, body){
     return '请求过于频繁或今日额度已用完。OpenRouter 免费额度为每分钟20次、'
          + '每天50次（终身充值满$10后升到1000次/天）。等几分钟再试，或明天再用。';
   }
+  if(status === 401 || status === 403){
+    return '密钥无效、已被停用或没有权限（OpenRouter 对 401 常返回 "User not found"，不是模型问题）。'
+         + '请到 openrouter.ai/keys 检查该 Key 是否还在；密钥若被公开发布到 GitHub，会被自动停用，需要重新生成一个。';
+  }
   if(status === 404 || b.includes('not found') || b.includes('no endpoints')){
     return '模型不存在或已被下架。OpenRouter 的免费模型名单经常无预警轮换，'
          + '建议把模型填成 openrouter/free 让它自动路由到当前可用的免费模型。';
   }
   if(status === 402 || b.includes('insufficient') || b.includes('credit')){
     return '账户额度不足。若余额为负，连免费模型也会被拒绝，需要充值使余额回正。';
-  }
-  if(status === 401 || status === 403){
-    return '密钥无效或没有权限，请检查 Gateway Secret 是否填对、是否已过期。';
   }
   if(status >= 500){
     return '上游服务暂时不可用（免费模型在高峰期容易超时或排队），稍后重试即可。';
