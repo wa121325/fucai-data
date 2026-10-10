@@ -1330,6 +1330,10 @@
             <label>从GitHub读取哪个票种</label>
             <select id="scanTypeFilter" style="width:100%;padding:10px;border-radius:8px;background:#2a2a2a;color:inherit;border:1px solid #555;font-size:14px;"><option value="">全部票种</option></select>
           </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>读取哪个月份（每个票种按月拆分存放）</label>
+            <select id="scanMonthFilter" style="width:100%;padding:10px;border-radius:8px;background:#2a2a2a;color:inherit;border:1px solid #555;font-size:14px;"><option value="latest">最近一个月（默认，最快）</option></select>
+          </div>
           <div class="scanTableWrap">
             <table class="scanTable">
               <thead>
@@ -4269,6 +4273,12 @@ function renderScanTypeUI(){
     fsel.innerHTML='<option value="">全部票种</option>'+types.map(t=>`<option value="${escapeHtml(t.key)}">${escapeHtml(t.name)} ${escapeHtml(t.amount)}${cnt[t.key]?`（已载入${cnt[t.key]}条）`:''}</option>`).join('');
     fsel.value = types.some(t=>t.key===scanFilter) ? scanFilter : '';
   }
+  const msel=document.getElementById('scanMonthFilter');
+  if(msel){
+    const set=new Set(); (scanFilter?[scanFilter]:Object.keys(scanMonthsByType)).forEach(k=>(scanMonthsByType[k]||[]).forEach(m=>set.add(m)));
+    msel.innerHTML='<option value="latest">最近一个月（默认，最快）</option><option value="all">全部月份</option>'+[...set].sort().reverse().map(m=>`<option value="${m}">${m}</option>`).join('');
+    msel.value = (scanMonth==='latest'||scanMonth==='all'||set.has(scanMonth)) ? scanMonth : 'latest';
+  }
   if(psel){
     const cur=psel.value;
     psel.innerHTML='<option value="">— 手动填写 / 新票种 —</option>'+types.map(t=>`<option value="${escapeHtml(t.key)}" data-name="${escapeHtml(t.name)}" data-amount="${escapeHtml(t.amount)}">${escapeHtml(t.name)} · ${escapeHtml(t.amount)}</option>`).join('');
@@ -4297,19 +4307,27 @@ function resolveScanType(rec){
 }
 /* 只读取了某个票种时，要加入的票若属于另一个已存在的票种，先把那个票种的文件读进来再合并，避免覆盖 */
 async function scanEnsureLoaded(rec){
-  const key=scanTypeKey(rec), path=scanPathOf(key);
-  if(scanRemote[path] || !scanTypeKeys.includes(key)) return;
-  const { repo, token } = getScanConfig();
+  scanStamp(rec);
+  const key=scanTypeKey(rec), path=scanPathOf(key, rec.ym);
+  if(scanRemote[path] || !scanTree[path]) return;
   try{
-    const r=await fetch(`https://api.github.com/repos/${repo}/contents/${scanUrlPath(path)}?ref=main&t=${Date.now()}`,
-      { headers:{ ...scanHeaders(token), 'Accept':'application/vnd.github.raw' }, cache:'no-store' });
-    if(!r.ok) return;
-    const text=await r.text(); const data=JSON.parse(text);
-    const recs=Array.isArray(data)?data:(data.records||[]);
+    const text=await scanFetchRaw(path);
     const have=new Set(scanRecords.map(x=>scanCodeKey(x.code)).filter(Boolean));
-    recs.forEach(x=>{ const k=scanCodeKey(x.code); if(!k||!have.has(k)) scanRecords.push(x); });
-    const sr=await ghScanSha(path); scanRemote[path]={ sha:sr, text };
+    scanParseRecs(text).forEach(x=>{ scanStamp(x, rec.ym); const k=scanCodeKey(x.code); if(!k||!have.has(k)) scanRecords.push(x); });
+    scanRemote[path]={ sha:scanTree[path], text };
   }catch(e){}
+}
+/* 严格去重：新扫的编号要和"该票种所有月份"比，哪怕当前只读入了最近一个月。
+   没读入的月份文件在本次页面会话里只读一次，只取编号放进内存集合，不画到表格里。 */
+async function scanEnsureDupIndex(key){
+  if(scanDupSets[key]) return;
+  const set=new Set(); let ok=true;
+  for(const p of Object.keys(scanTree)){
+    const pp=scanParsePath(p); if(!pp||pp.key!==key||scanRemote[p]) continue;
+    try{ scanParseRecs(await scanFetchRaw(p)).forEach(x=>{ const k=scanCodeKey(x.code); if(k) set.add(k); }); }
+    catch(e){ ok=false; }
+  }
+  if(ok) scanDupSets[key]=set;
 }
 /* ── GitHub 读写：按票种分文件存放（scratch/票名_面值.json），同类刮刮卡在同一个文件里 ── */
 const SCAN_DIR = 'scratch';
@@ -4322,13 +4340,56 @@ function scanTypeKey(r){
   const n = scanClean(r.name) || '未分类', a = scanAmtCanon(r.amount);
   return a ? `${n}_${a}` : n;
 }
-function scanPathOf(key){ return `${SCAN_DIR}/${key}.json`; }
+function scanPathOf(key, ym){ return ym ? `${SCAN_DIR}/${key}/${ym}.json` : `${SCAN_DIR}/${key}.json`; }
+function scanParsePath(p){
+  const m = p.match(/^scratch\/(.+)\/(\d{4}-\d{2})\.json$/); if(m) return { key:m[1], ym:m[2] };
+  const l = p.match(/^scratch\/([^\/]+)\.json$/);            if(l) return { key:l[1], ym:null };   // 旧版：整个票种一个文件
+  return null;
+}
+/* 按月拆分：scratch/<票名_面值>/<YYYY-MM>.json。记录里固定写入 ts(毫秒时间戳) 和 ym(所属月份)，
+   一旦写入就不再重新计算，避免换时区后记录跑到别的月份文件里。旧记录只有"月/日 时:分"，按今年推算一次后固定。 */
+let scanTree = {};            // 仓库里所有 scratch/**.json：path -> sha（只列名，不读内容）
+let scanMonthsByType = {};    // 票种 -> 现有月份（新到旧）
+let scanMonth = 'latest';     // 读取哪个月：'latest'=每个票种最新一个月 | 'all' | 'YYYY-MM'
+try{ scanMonth = localStorage.getItem('fucaiScanMonth') || 'latest'; }catch(e){}
+let scanDupSets = {};         // 票种 -> Set(没读入的月份里的编号)，用来严格去重
+let scanLoadedOk = false;     // 本次打开页面后是否成功读过仓库；没读成功就不允许写，防止用旧缓存覆盖仓库
+function scanYm(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
+function scanStamp(r, fileYm){
+  if(r.ym && r.ts) return r;
+  let d = null;
+  if(r.ts) d = new Date(r.ts);
+  else if(!fileYm){
+    const m = String(r.time||'').match(/(\d+)\/(\d+)\s+(\d+):(\d+)/);
+    if(m){
+      const now = new Date(), y = now.getFullYear();
+      d = new Date(y, +m[1]-1, +m[2], +m[3], +m[4]);
+      if(d > new Date(now.getTime()+86400000)) d = new Date(y-1, +m[1]-1, +m[2], +m[3], +m[4]);
+    }
+  }
+  if(fileYm){ const [y,mo]=fileYm.split('-').map(Number); if(!d || scanYm(d)!==fileYm) d = new Date(y, mo-1, 15); }
+  if(!d || isNaN(d)) d = new Date();
+  if(!r.ts) r.ts = d.getTime();
+  if(!r.ym) r.ym = fileYm || scanYm(d);
+  return r;
+}
+async function scanFetchRaw(path){
+  const { repo, token } = getScanConfig();
+  const r = token
+    ? await fetch(`https://api.github.com/repos/${repo}/contents/${scanUrlPath(path)}?ref=main&t=${Date.now()}`,
+                  { headers: { ...scanHeaders(token), 'Accept': 'application/vnd.github.raw' }, cache: 'no-store' })
+    : await fetch(`https://raw.githubusercontent.com/${repo}/main/${scanUrlPath(path)}?t=${Date.now()}`);
+  if(!r.ok) throw new Error(`读取 ${path} 失败 HTTP ${r.status}`);
+  return r.text();
+}
+function scanParseRecs(text){ const d = JSON.parse(text); return Array.isArray(d) ? d : (d.records || []); }
 function scanUrlPath(p){ return p.split('/').map(encodeURIComponent).join('/'); }
-function scanGroups(list){
+function scanGroups(list){          // 按 票种+月份 分组：每组对应一个文件
   const g = {};
   list.forEach(r=>{
-    const k = scanTypeKey(r);
-    (g[k] = g[k] || { name: r.name||'未分类', amount: r.amount||'', records: [] }).records.push(r);
+    scanStamp(r);
+    const k = scanTypeKey(r), id = k + '|' + r.ym;
+    (g[id] = g[id] || { key:k, ym:r.ym, name: r.name||'未分类', amount: r.amount||'', records: [] }).records.push(r);
   });
   return g;
 }
@@ -4343,35 +4404,52 @@ async function ghScanFetch(){
   const { repo, token } = getScanConfig();
   if(!repo) return { list: [], ok: false, reason: '未配置仓库地址' };
   try{
-    const resp = await fetch(`https://api.github.com/repos/${repo}/contents/${SCAN_DIR}?ref=main&t=${Date.now()}`,
-                             { headers: scanHeaders(token), cache: 'no-store' });
-    if(resp.status === 404){
-      // 还没有 scratch 文件夹：读旧的 scan_records.json，下次同步时会自动拆成按票种的文件
-      scanRemote = {}; scanTypeKeys = [];
+    // 一次请求拿到整个 scratch/ 的文件清单（只有路径和sha，不读内容），再按所选票种/月份只读需要的文件
+    const tr = await fetch(`https://api.github.com/repos/${repo}/git/trees/main?recursive=1&t=${Date.now()}`,
+                           { headers: scanHeaders(token), cache: 'no-store' });
+    if(!tr.ok && tr.status !== 404 && tr.status !== 409) return { list: [], ok: false, reason: `HTTP ${tr.status}` };
+    const entries = tr.ok ? ((await tr.json()).tree || []) : [];
+    const tree = {};
+    entries.forEach(e => { if(e.type === 'blob' && e.path.startsWith(SCAN_DIR + '/') && /\.json$/i.test(e.path)) tree[e.path] = e.sha; });
+    scanDupSets = {};
+    if(!Object.keys(tree).length){
+      // 还没有 scratch 文件夹：读旧的 scan_records.json，下次同步时会自动拆成 票种/月份 文件
+      scanRemote = {}; scanTree = {}; scanTypeKeys = []; scanMonthsByType = {};
       const old = await fetch(`https://raw.githubusercontent.com/${repo}/main/${SCAN_FILE_PATH}?t=${Date.now()}`);
-      if(old.status === 404) return { list: [], ok: true };
+      if(old.status === 404){ scanLoadedOk = true; return { list: [], ok: true }; }
       if(!old.ok) return { list: [], ok: false, reason: `HTTP ${old.status}` };
       const arr = await old.json();
+      scanLoadedOk = true;
       return { list: Array.isArray(arr) ? arr : [], ok: true, legacy: true };
     }
-    if(!resp.ok) return { list: [], ok: false, reason: `HTTP ${resp.status}` };
-    const allFiles = (await resp.json()).filter(f => f.type === 'file' && /\.json$/i.test(f.name));
-    scanTypeKeys = allFiles.map(f => f.name.replace(/\.json$/i,''));
+    const months = {}, legacyKeys = new Set();
+    Object.keys(tree).forEach(p => {
+      const pp = scanParsePath(p); if(!pp) return;
+      (months[pp.key] = months[pp.key] || []);
+      if(pp.ym) months[pp.key].push(pp.ym); else legacyKeys.add(pp.key);
+    });
+    Object.values(months).forEach(a => a.sort().reverse());
+    scanTree = tree; scanMonthsByType = months; scanTypeKeys = Object.keys(months).sort();
     if(scanFilter && !scanTypeKeys.includes(scanFilter)) scanFilter = '';
-    const files = scanFilter ? allFiles.filter(f => f.name.replace(/\.json$/i,'') === scanFilter) : allFiles;
+    const paths = [];
+    (scanFilter ? [scanFilter] : scanTypeKeys).forEach(key => {
+      const ms = months[key] || [];
+      const hasLegacy = legacyKeys.has(key);
+      // 有旧版整文件的票种：连同它所有月份文件一起读，保证迁移时不会漏
+      const pick = (hasLegacy || scanMonth === 'all') ? ms : (scanMonth === 'latest' ? ms.slice(0,1) : ms.filter(m => m === scanMonth));
+      pick.forEach(m => paths.push(scanPathOf(key, m)));
+      if(hasLegacy) paths.push(scanPathOf(key, null));
+    });
     const list = [], remote = {};
-    for(const f of files){
-      const r = token
-        ? await fetch(f.url, { headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github.raw' }, cache: 'no-store' })
-        : await fetch(f.download_url + '?t=' + Date.now());
-      if(!r.ok) return { list: [], ok: false, reason: `读取 ${f.name} 失败 HTTP ${r.status}` };
-      const text = await r.text();
-      let data; try{ data = JSON.parse(text); } catch(e){ return { list: [], ok: false, reason: `${f.name} 不是合法JSON` }; }
-      const recs = Array.isArray(data) ? data : (data.records || []);
-      recs.forEach(x => list.push(x));
-      remote[f.path] = { sha: f.sha, text };
+    for(const p of paths){
+      const text = await scanFetchRaw(p);
+      let recs; try{ recs = scanParseRecs(text); } catch(e){ return { list: [], ok: false, reason: `${p} 不是合法JSON` }; }
+      const pp = scanParsePath(p);
+      recs.forEach(x => { scanStamp(x, pp.ym); list.push(x); });
+      remote[p] = { sha: tree[p], text };
     }
     scanRemote = remote;
+    scanLoadedOk = true;
     return { list, ok: true };
   } catch(e){
     return { list: [], ok: false, reason: e.message };
@@ -4407,23 +4485,32 @@ async function ghScanOp(path, text, del){
     return { ok: false, reason: `${path}：HTTP ${resp.status} ${err.message||''}` };
   }
   const data = await resp.json().catch(()=>({}));
-  if(del) delete scanRemote[path]; else scanRemote[path] = { sha: data.content?.sha || null, text };
+  if(del){ delete scanRemote[path]; delete scanTree[path]; } else { scanRemote[path] = { sha: data.content?.sha || null, text }; scanTree[path] = data.content?.sha || ''; }
   return { ok: true };
 }
 
 async function ghScanPush(list){
   const { repo, token } = getScanConfig();
   if(!repo || !token) return { ok:false, reason:'未配置仓库地址或Token' };
+  if(!scanLoadedOk) return { ok:false, reason:'这次打开页面后还没成功读取过仓库，为避免用旧缓存覆盖仓库，请先点「从GitHub刷新」' };
   try{
     const want = {};
-    Object.entries(scanGroups(list)).forEach(([k, g])=>{
-      want[scanPathOf(k)] = JSON.stringify({ name: g.name, amount: g.amount, count: g.records.length, records: g.records }, null, 2);
-    });
-    for(const [p, text] of Object.entries(want)){          // 只写有变化的票种文件
+    for(const g of Object.values(scanGroups(list))){
+      const path = scanPathOf(g.key, g.ym);
+      let recs = g.records;
+      if(!scanRemote[path] && scanTree[path]){            // 仓库里已有但这次没读入的月份：先合并，绝不覆盖
+        const remoteRecs = scanParseRecs(await scanFetchRaw(path));
+        const have = new Set(recs.map(x => scanCodeKey(x.code)).filter(Boolean));
+        recs = [...remoteRecs.filter(x => { const k = scanCodeKey(x.code); return !k || !have.has(k); }), ...recs];
+        scanRemote[path] = { sha: scanTree[path], text: '' };
+      }
+      want[path] = JSON.stringify({ name: g.name, amount: g.amount, month: g.ym, count: recs.length, records: recs }, null, 2);
+    }
+    for(const [p, text] of Object.entries(want)){          // 只写有变化的文件
       if(scanRemote[p] && scanRemote[p].text === text) continue;
       const r = await ghScanOp(p, text, false); if(!r.ok) return r;
     }
-    for(const p of Object.keys(scanRemote)){               // 某票种的记录删光了，就删掉对应文件
+    for(const p of Object.keys(scanRemote)){               // 读入过但现在没有记录了（删光/旧版整文件已拆分）：删掉
       if(!(p in want)){ const r = await ghScanOp(p, '', true); if(!r.ok) return r; }
     }
     return { ok:true };
@@ -4478,12 +4565,13 @@ async function loadScanFromGithub(){
     return;
   }
   syncEl.className = 'status'; syncEl.textContent = '正在从GitHub读取记录…';
+  scanShowLimit = SCAN_PAGE;
   const result = await ghScanFetch();
   if(result.ok){
     scanRecords = result.list;
     saveLocalCache(scanRecords);
     syncEl.className = 'status ok';
-    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录（${Object.keys(scanGroups(scanRecords)).length} 个票种）` + (scanFilter ? '；当前只读取了所选票种，去重只在已读取的记录里比对' : '') + (result.legacy ? '；检测到旧的 scan_records.json，下次保存时会自动拆分到 scratch/ 文件夹' : '');
+    syncEl.textContent = `✓ 已从 GitHub 加载 ${scanRecords.length} 条记录（${new Set(scanRecords.map(scanTypeKey)).size} 个票种，${scanMonth==='all'?'全部月份':scanMonth==='latest'?'每个票种最近一个月':scanMonth}）` + (scanMonth!=='all' ? '；去重会自动核对该票种更早月份的编号' : '') + (result.legacy ? '；检测到旧的 scan_records.json，下次保存时会自动拆分到 scratch/ 文件夹' : '');
   } else {
     scanRecords = loadLocalCache();
     syncEl.className = 'status err';
@@ -4492,6 +4580,9 @@ async function loadScanFromGithub(){
   renderScanTable();
 }
 
+/* 清单按"最新扫描的在最上面"倒序显示；记录很多时只先画最近 SCAN_PAGE 条，点"显示更多"再加（序号仍是第几张） */
+const SCAN_PAGE = 100;
+let scanShowLimit = SCAN_PAGE;
 function renderScanTable(){
   renderScanTypeUI();
   const body = document.getElementById('scanTableBody');
@@ -4501,7 +4592,11 @@ function renderScanTable(){
     body.innerHTML = '<tr class="scanEmptyRow"><td colspan="7">暂无记录，拍照或手动添加后会显示在这里</td></tr>';
     return;
   }
-  body.innerHTML = scanRecords.map((item, i) => `
+  const total = scanRecords.length, from = Math.max(0, total - scanShowLimit);
+  let rows = '';
+  for(let i = total - 1; i >= from; i--){
+    const item = scanRecords[i];
+    rows += `
     <tr>
       <td>${i+1}</td>
       <td>${escapeHtml(item.name||'')}</td>
@@ -4510,8 +4605,14 @@ function renderScanTable(){
       <td>${escapeHtml(item.prize||'')}</td>
       <td style="font-size:11.5px;color:var(--muted);">${item.time||''}</td>
       <td><button class="delBtn" data-idx="${i}" title="删除">✕</button></td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }
+  if(from > 0){
+    rows += `<tr><td colspan="7" style="text-align:center;padding:10px;"><button class="btn ghost" id="scanMoreBtn" style="width:auto;padding:6px 16px;">显示更早的记录（还有 ${from} 条，每次加载 ${SCAN_PAGE} 条）</button></td></tr>`;
+  }
+  body.innerHTML = rows;
+  const more = document.getElementById('scanMoreBtn');
+  if(more) more.addEventListener('click', ()=>{ scanShowLimit += SCAN_PAGE; renderScanTable(); });
   body.querySelectorAll('.delBtn').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const idx = parseInt(btn.dataset.idx, 10);
@@ -4525,20 +4626,26 @@ function renderScanTable(){
 // escapeHtml 复用文件前面已定义的同名函数（逻辑完全一致）
 
 function scanCodeKey(c){ return String(c||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
-function findDupScanRecord(code){
+function findDupScanRecord(code, rec){
   const k = scanCodeKey(code); if(!k) return null;
-  return scanRecords.find(r => scanCodeKey(r.code) === k) || null;
+  const hit = scanRecords.find(r => scanCodeKey(r.code) === k);
+  if(hit) return hit;
+  const set = rec && scanDupSets[scanTypeKey(rec)];
+  if(set && set.has(k)) return { name: rec.name, amount: rec.amount, time: '更早月份的记录' };
+  return null;
 }
 async function addScanRecord(rec){
   const resolved = resolveScanType(rec);
   if(!resolved) return { ok:false, cancelled:true };
   rec = resolved;
+  rec = { ...rec, ts: Date.now(), ym: scanYm(new Date()) };
   await scanEnsureLoaded(rec);
-  const dup = findDupScanRecord(rec.code);
+  await scanEnsureDupIndex(scanTypeKey(rec));
+  const dup = findDupScanRecord(rec.code, rec);
   if(dup) return { ok:false, dup };            // 同编号已存在：不重复保存
   const now = new Date();
   const timeStr = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  scanRecords.push({ name: rec.name||'', amount: rec.amount||'', code: rec.code||'', prize: rec.prize||'', time: timeStr });
+  scanRecords.push({ name: rec.name||'', amount: rec.amount||'', code: rec.code||'', prize: rec.prize||'', time: timeStr, ts: rec.ts, ym: rec.ym });
   renderScanTable();
   await syncScanToGithub();
   return { ok:true };
@@ -4573,6 +4680,11 @@ document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFrom
 document.getElementById('scanTypeFilter').addEventListener('change', e=>{
   scanFilter = e.target.value;
   try{ localStorage.setItem('fucaiScanFilter', scanFilter); }catch(_){}
+  loadScanFromGithub();
+});
+document.getElementById('scanMonthFilter').addEventListener('change', e=>{
+  scanMonth = e.target.value;
+  try{ localStorage.setItem('fucaiScanMonth', scanMonth); }catch(_){}
   loadScanFromGithub();
 });
 document.getElementById('scanTypePick').addEventListener('change', e=>{
@@ -5471,7 +5583,7 @@ document.getElementById('scanExportBtn').addEventListener('click', ()=>{
   const fname = `扫码存档_${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}.xlsx`;
   XLSX.writeFile(wb, fname);
   listStatus.className = 'status ok';
-  listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}`;
+  listStatus.textContent = `✓ 已导出 ${scanRecords.length} 条记录：${fname}` + (scanMonth!=='all' ? '（只含当前已读取的月份；要导出全部请先把「读取哪个月份」选成全部月份）' : '');
 });
 
 // 初次加载：先用本地缓存快速显示，再尝试从GitHub拉取最新版本
