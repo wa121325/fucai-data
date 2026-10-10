@@ -58,7 +58,7 @@ jobs:
     needs: [gate, ml]
     if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && github.event.inputs.run_dl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - run: pip install kaggle
@@ -70,7 +70,7 @@ jobs:
       - name: 运行 DL 并等待完成
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
-        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-lstm-tfm ./kaggle_lstm_kernel/ dl_lstm_tfm.json 90
+        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-lstm-tfm ./kaggle_lstm_kernel/ dl_lstm_tfm.json 200
       # DL 把权重存成 Kaggle Dataset 新版本，Kaggle 处理版本需要一小会儿，留点余量再启动 RL
       - name: 等 Dataset 新版本就绪
         run: sleep 60
