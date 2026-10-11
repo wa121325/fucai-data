@@ -2761,49 +2761,25 @@ function renderConsensus(game, c){
       h += `<div style="font-size:10.5px;color:#888;margin:2px 0;">${gc.n_bets}注组选合计覆盖概率 <b>${gc.prob}%</b>（随机基准${gc.base}%）；对比上面直选${gc.direct_n}注合计 ${gc.direct_prob}%。组选一注覆盖组六6个/组三3个排列，所以同样的票数覆盖面更大（奖金也相应是直选的1/6、1/3）。</div>`;
     }
     const st = c.stratified;
-    if(st?.dims){
-      // 和值/跨度：先看"整体偏向哪一段"（边际分布），把最显著的连续区间找出来，再在偏向区里选注
-      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度偏向（先看整体偏哪段，再在偏向区里选注）：</span></div>`;
-      const dimName = {sum:'和值', span:'跨度'};
-      ['sum','span'].forEach(k=>{
-        const d = st.dims[k], f0 = d.focus, av = d.avoid;
-        const inF = i => f0 && i>=f0.lo && i<=f0.hi, inA = i => av && i>=av.lo && i<=av.hi;
-        h += `<div style="font-size:11px;color:#888;margin:4px 0 2px;">${dimName[k]}：` + (f0
-          ? `<b style="color:${PUR};">偏向 ${f0.label}</b>　共识 ${f0.p}% vs 随机 ${f0.q}%（${f0.p>=f0.q?'+':''}${(f0.p-f0.q).toFixed(1)}个百分点，z=${f0.z}）`
-            + `<br><span style="color:#999;">分来源：${Object.entries(f0.by||{}).map(([s,v])=>`${srcName[s]||s} ${v}%`).join(' · ')}；${f0.agree===f0.n_use?`<b style="color:#16a34a;">${f0.agree}/${f0.n_use}方同向</b>`:`<b style="color:#c58a00;">仅${f0.agree}/${f0.n_use}方同向</b>`}`
-            + (f0.samp_n!=null ? `；RL采样${f0.samp_n}注中 <b>${f0.samp_in}</b> 注落入（随机期望${f0.samp_base}，按RL概率期望${f0.samp_exp}）` : '') + `</span>`
-          : `没有明显偏向（最强区间 ${d.best?d.best.label+' z='+d.best.z:'无'}，不够显著，不限制）`)
-          + (av ? `；<span style="color:#ef4444;">偏冷 ${av.label}（${av.p}% vs ${av.q}%）</span>` : '') + `</div>`;
-        h += `<div style="display:flex;gap:3px;margin-bottom:3px;">` + d.profile.map((p,i)=>{
-          const col = inF(i) ? PUR : (inA(i) ? '#ef4444' : '#555');
-          const w = Math.max(4, Math.min(100, p.p / Math.max(...d.profile.map(x=>Math.max(x.p,x.q)),1) * 100));
-          const wq = Math.max(0, Math.min(100, p.q / Math.max(...d.profile.map(x=>Math.max(x.p,x.q)),1) * 100));
-          return `<div style="flex:1;min-width:0;font-size:9.5px;color:#aaa;text-align:center;border:${(inF(i)||inA(i))?`1.5px solid ${col}`:'1px solid #333'};border-radius:4px;padding:2px 1px;">`
-            + `<div style="color:#888;">${p.label}</div>`
-            + `<div style="position:relative;height:26px;margin:2px 3px;"><div style="position:absolute;bottom:0;left:0;right:0;height:${w}%;background:${col}${inF(i)?'':'88'};border-radius:2px;"></div>`
-            + `<div style="position:absolute;bottom:${wq}%;left:-2px;right:-2px;border-top:1.5px dashed #fff;"></div></div>`
-            + `<div style="color:${inF(i)?'#fff':'#aaa'};font-weight:${inF(i)?700:400};">${p.p}%</div><div style="color:#777;">/${p.q}</div>`
-            + (p.samp!=null ? `<div style="color:${p.samp>0?'#f59e0b':'#555'};">采样${p.samp}</div>` : '') + `</div>`;
-        }).join('') + `</div>`;
+    if(st?.matrix){
+      h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（共识概率 × RL采样${st.n_sampled||0}注 联合找信号：颜色越深=联合越显著，粗框是选中的${st.cells.length}格，每格选${st.cells[0]?.bets.length||0}注；和值段/跨度段各最多2格，没有显著高于随机的格就不选）：</span></div>`;
+      // 概率矩阵：行=和值段，列=跨度段，高亮被选中的格
+      const chosen = new Set((st.chosen||[]).map(x=>x.join(',')));
+      h += `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:3px 0;"><tr><td style="padding:2px 6px;color:#888;">和值＼跨度</td>${st.span_bands.map((b,ci)=>`<td style="padding:2px 6px;color:#888;text-align:center;">${b}${st.samp_col?`<div style="color:#f59e0b;font-size:9px;">采样${st.samp_col[ci]}</div>`:''}</td>`).join('')}</tr>`;
+      st.matrix.forEach((row,r)=>{
+        h += `<tr><td style="padding:2px 6px;color:#888;">${st.sum_bands[r]}${st.samp_row?`<div style="color:#f59e0b;font-size:9px;">采样${st.samp_row[r]}</div>`:''}</td>` + row.map((v,cc)=>{
+          const base = st.base_matrix[r][cc]; const sel = chosen.has(r+','+cc);
+          const z = (st.z_matrix&&st.z_matrix[r][cc])||0, a = Math.max(0, Math.min(1, z/1.5));   // z 越大颜色越深（z≥1.5 最深）
+          return `<td style="padding:2px 6px;text-align:center;border:${sel?`2px solid ${PUR}`:'1px solid #333'};${a>0.05?`background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};`:''}${sel?'color:#fff;font-weight:700;':''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span>${(st.samp_matrix&&st.samp_matrix[r][cc]>0)?`<div style="color:#f59e0b;font-size:9px;font-weight:600;">采样${st.samp_matrix[r][cc]}注</div>`:''}</td>`;
+        }).join('') + `</tr>`;
       });
-      h += `<div style="font-size:9.5px;color:#777;margin-bottom:4px;">柱=共识概率，白色虚线=随机基准，橙色数字=RL采样的注里有几注落在这一段；紫框=偏向区间（z≥1），红框=偏冷区间。区间是在连续几段里挑出最显著的，挑的次数多，偏向也有一定巧合成分。</div>`;
-      if(st.sample_view?.length){
-        h += `<div style="font-size:12px;color:#666;margin:6px 0 2px;">RL 采样${st.sample_view.length}注对照（和值/跨度是否落在偏向区；✓在区内 ✗在区外 —该维度无偏向）：</div>`;
-        const mark = v => v===null ? '<span style="color:#666;">—</span>' : (v ? '<span style="color:#16a34a;">✓</span>' : '<span style="color:#ef4444;">✗</span>');
-        h += `<div style="display:flex;flex-wrap:wrap;gap:4px;">` + st.sample_view.map(b=>
-          `<div style="border:1px solid ${(b.in_sum!==false&&b.in_span!==false&&(b.in_sum||b.in_span))?PUR:'#333'};border-radius:6px;padding:2px 5px;font-size:10px;color:#aaa;white-space:nowrap;">${b.digits.map(n=>ball(n,PUR,15)).join('')} 和${b.sum}${mark(b.in_sum)} 跨${b.span}${mark(b.in_span)}</div>`).join('') + `</div>`;
-      }
-      if(st.cells?.length){
-        h += `<div style="font-size:12px;color:#666;margin:6px 0 2px;">偏向区内选出的 ${st.n_bets} 注（同一和值最多2注，同一跨度最多4注，避免扎堆）：</div>`;
-        st.cells.forEach(cell=>{
-          h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`该格 ${cell.prob}%（随机${cell.base}%）`)}</div>`;
-          cell.bets.forEach(b=>{
-            h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;">${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}${b.sampled?' <span style="color:#f59e0b;font-size:10px;">★RL采样也抽到</span>':''}</div>`;
-          });
+      h += `</table></div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%，橙色=RL采样的注里落在这格的注数；紫色深浅=共识与采样联合的显著程度z（共识高于随机、采样也偏多的格最深；只有联合z达标且分布均匀才会被选中，粗框）</div>`;
+      st.cells.forEach(cell=>{
+        h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`概率${cell.prob}%（随机${cell.base}%，采样${cell.k}注；联合z=${cell.z} ＝ 共识${cell.z_cons} 与 采样${cell.z_samp} 合并）`)}</div>`;
+        cell.bets.forEach(b=>{
+          h += `<div class="rec-group" style="white-space:nowrap;padding:3px 6px;margin:2px 0;display:block;">${b.digits.map(n=>ball(n,PUR,18)).join('')} ${note(b.prob+'%')}${b.sampled?' <span style="color:#f59e0b;font-size:10px;">★RL采样也抽到</span>':''}</div>`;
         });
-      } else {
-        h += `<div style="font-size:11px;color:#999;margin:4px 0;">和值、跨度都没有明显偏向，今天这一项不推荐（宁可不选，也不拿随机水平的区间凑数）。</div>`;
-      }
+      });
     }
   } else {
     // ssq / kl8：共识球号榜（得票 + 平均提升倍数），再给共识推荐
