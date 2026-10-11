@@ -2965,118 +2965,20 @@ def vote_3d_joints(sources, rl_pos_probs):
 SUM_BANDS = [(0, 5), (6, 9), (10, 13), (14, 17), (18, 21), (22, 27)]
 SPAN_BANDS = [(0, 2), (3, 4), (5, 6), (7, 9)]
 GROUP_N6, GROUP_N3 = 6, 2      # 组选覆盖：推荐几注组六、几注组三
+STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
 STRAT_N_EFF = 300        # 计算 z 时假设的"证据期数"（越大越容易显著；300≈一年的开奖期数）
+STRAT_MIN_Z = 0.5        # 没有采样数据时：z 低于它的格不选（宁可少选）
+STRAT_MIN_Z_COMB = 0.7   # 有RL采样时：共识×采样 联合z 低于它的格不选
+STRAT_MAX_PER_SPANBAND = 2   # 每个跨度段最多选几格
 
 
-STRAT_BETS = 12            # 和值/跨度偏向区内选几注
-STRAT_FOCUS_Z = 1.0        # 连续区间的 z 低于它 → 这个维度"没有明显偏向"，不限制
-STRAT_MAX_WIN = {'sum': 3, 'span': 2}   # 偏向区间最多连续几个段（不能是整个范围）
-STRAT_MIN_WIN_Q = 0.04     # 区间的随机基准至少 4%，太小的区间是噪声
-STRAT_CAP_PER_SUM, STRAT_CAP_PER_SPAN = 2, 4   # 同一个和值/跨度最多选几注，避免扎堆
-
-
-def _band_of(v, bands):
-    for i, (lo, hi) in enumerate(bands):
-        if lo <= v <= hi: return i
-    return len(bands) - 1
-
-
-def _scan_windows(mass, q, maxw, n_eff):
-    """在连续的几个段里找"高于随机最显著"和"低于随机最显著"的区间（z 分数）。
-    偏向区间要求区间里每一段都不低于随机（避免靠一个大段带着几个小段凑数）。"""
-    n = len(mass); best = None; worst = None
-    for lo in range(n):
-        for hi in range(lo, min(n, lo + maxw)):
-            qq = float(q[lo:hi + 1].sum()); pp = float(mass[lo:hi + 1].sum())
-            if qq < STRAT_MIN_WIN_Q or qq >= 0.999: continue
-            z = (pp - qq) / np.sqrt(qq * (1 - qq) / n_eff)
-            rec = (z, lo, hi, pp, qq)
-            if all(mass[k] >= q[k] for k in range(lo, hi + 1)) and (best is None or z > best[0] + 1e-9): best = rec
-            if all(mass[k] <= q[k] for k in range(lo, hi + 1)) and (worst is None or z < worst[0] - 1e-9): worst = rec
-    return best, worst
-
-
-def sum_span_focus(Jc, order, J=None, use=None, sampled=None):
-    """和值/跨度：不再把1000注硬切成格子比大小，而是先看"和值整体偏哪段、跨度整体偏哪段"（边际分布，
-    证据集中、比单个小格稳得多），把偏向最显著的连续区间找出来，再只在 偏向和值区间 × 偏向跨度区间 里选注。
-    参考信息：J=各来源(ml/dl/rl)的1000维联合概率，用来看"三方是否同向"；
-    sampled=RL按概率采样出的注（[[百,十,个],...]），用来看"采样是否印证"：每段有几注采样落入，
-    偏向区里的采样注优先入选并打★。"""
-    J = {k: v for k, v in (J or {}).items() if v is not None}
-    use = [k for k in (use or list(J)) if k in J]
-    samp_idx = []
-    for b in (sampled or []):
-        try: samp_idx.append(int(b[0]) * 100 + int(b[1]) * 10 + int(b[2]))
-        except Exception: pass
-    samp_set = set(samp_idx)
-    sm = _D3_ALL.sum(axis=1); sp = _D3_ALL.max(axis=1) - _D3_ALL.min(axis=1)
-    sb = np.array([_band_of(v, SUM_BANDS) for v in sm]); pb = np.array([_band_of(v, SPAN_BANDS) for v in sp])
-    dims = {}
-    for name, bi, bands in (('sum', sb, SUM_BANDS), ('span', pb, SPAN_BANDS)):
-        nb = len(bands)
-        mass = np.bincount(bi, weights=Jc, minlength=nb); q = np.bincount(bi, minlength=nb) / 1000.0
-        best, worst = _scan_windows(mass, q, STRAT_MAX_WIN[name], STRAT_N_EFF)
-        focus = best if (best and best[0] >= STRAT_FOCUS_Z) else None
-        by_mass = {sk: np.bincount(bi, weights=J[sk], minlength=nb) for sk in J}
-        samp_cnt = np.bincount(bi[samp_idx], minlength=nb) if samp_idx else np.zeros(nb, dtype=int)
-        prof = []
-        for k in range(nb):
-            z = (mass[k] - q[k]) / np.sqrt(q[k] * (1 - q[k]) / STRAT_N_EFF) if 0 < q[k] < 1 else 0.0
-            prof.append({'label': f'{bands[k][0]}~{bands[k][1]}', 'p': round(float(mass[k]) * 100, 1),
-                         'q': round(float(q[k]) * 100, 1), 'z': round(float(z), 2),
-                         'by': {sk: round(float(by_mass[sk][k]) * 100, 1) for sk in by_mass},
-                         'samp': int(samp_cnt[k]) if samp_idx else None})
-        def _w(t):
-            if t is None: return None
-            lo, hi = t[1], t[2]
-            by = {sk: round(float(by_mass[sk][lo:hi + 1].sum()) * 100, 1) for sk in by_mass}
-            r = {'lo': int(lo), 'hi': int(hi), 'z': round(float(t[0]), 2),
-                 'p': round(t[3] * 100, 1), 'q': round(t[4] * 100, 1),
-                 'label': f'{bands[lo][0]}~{bands[hi][1]}', 'by': by,
-                 # 三方同向：参与共识的来源里，有几个在这个区间的概率高于随机（偏冷区间则数低于随机的）
-                 'agree': sum(1 for sk in use if (by[sk] > t[4] * 100 + 0.05) == (t[0] > 0)), 'n_use': len(use)}
-            if samp_idx:
-                r['samp_in'] = int(samp_cnt[lo:hi + 1].sum()); r['samp_n'] = len(samp_idx)
-                r['samp_exp'] = round(len(samp_idx) * t[3], 1); r['samp_base'] = round(len(samp_idx) * t[4], 1)
-            return r
-        dims[name] = {'profile': prof, 'focus': _w(focus), 'best': _w(best), 'avoid': _w(worst if worst and worst[0] <= -STRAT_FOCUS_Z else None)}
-    fs, fp = dims['sum']['focus'], dims['span']['focus']
-    chosen_idx = []
-    if fs or fp:
-        ok = np.ones(1000, dtype=bool)
-        if fs: ok &= (sb >= fs['lo']) & (sb <= fs['hi'])
-        if fp: ok &= (pb >= fp['lo']) & (pb <= fp['hi'])
-        per_s, per_p = {}, {}
-        # 先放"RL采样命中且落在偏向区"的注（双重印证），再用共识概率最高的注补满
-        samp_in = sorted({i for i in samp_set if ok[i]}, key=lambda i: -Jc[i])
-        for i in list(samp_in) + [int(x) for x in order if ok[int(x)] and int(x) not in samp_set]:
-            if i in chosen_idx: continue
-            if per_s.get(int(sm[i]), 0) >= STRAT_CAP_PER_SUM or per_p.get(int(sp[i]), 0) >= STRAT_CAP_PER_SPAN: continue
-            chosen_idx.append(int(i)); per_s[int(sm[i])] = per_s.get(int(sm[i]), 0) + 1; per_p[int(sp[i])] = per_p.get(int(sp[i]), 0) + 1
-            if len(chosen_idx) >= STRAT_BETS: break
-    # RL采样注逐注对照：每注的和值/跨度、是否落在偏向区间里（没有偏向的维度视为"不限"=不标）
-    sample_view = []
-    for i in dict.fromkeys(samp_idx):
-        sample_view.append({'digits': [int(x) for x in _D3_ALL[i]], 'sum': int(sm[i]), 'span': int(sp[i]),
-                            'in_sum': (None if not fs else bool(fs['lo'] <= sb[i] <= fs['hi'])),
-                            'in_span': (None if not fp else bool(fp['lo'] <= pb[i] <= fp['hi'])),
-                            'prob': round(float(Jc[i]) * 100, 2)})
-    mass2 = np.zeros((len(SUM_BANDS), len(SPAN_BANDS))); cnt = np.zeros_like(mass2)
-    for i in range(1000):
-        mass2[sb[i], pb[i]] += Jc[i]; cnt[sb[i], pb[i]] += 1
-    cellmap = {}
-    for i in chosen_idx:
-        cellmap.setdefault((int(sb[i]), int(pb[i])), []).append(i)
-    sl = []
-    for (r, c), idxs in sorted(cellmap.items(), key=lambda kv: -sum(Jc[i] for i in kv[1])):
-        sl.append({'sum': f'{SUM_BANDS[r][0]}~{SUM_BANDS[r][1]}', 'span': f'{SPAN_BANDS[c][0]}~{SPAN_BANDS[c][1]}',
-                   'prob': round(float(mass2[r, c]) * 100, 1), 'base': round(float(cnt[r, c]) / 10.0, 1),
-                   'bets': [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2), 'sampled': bool(i in samp_set)} for i in idxs]})
-    return {'sample_view': sample_view, 'cells': sl, 'n_sampled_picked': sum(1 for i in chosen_idx if i in samp_set), 'n_sampled': len(samp_idx), 'n_bets': len(chosen_idx), 'dims': dims,
-            'sum_bands': [f'{a}~{b}' for a, b in SUM_BANDS], 'span_bands': [f'{a}~{b}' for a, b in SPAN_BANDS],
-            'matrix': [[round(float(mass2[r, c]) * 100, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
-            'base_matrix': [[round(float(cnt[r, c]) / 10.0, 1) for c in range(len(SPAN_BANDS))] for r in range(len(SUM_BANDS))],
-            'chosen': [[r, c] for (r, c) in cellmap]}
+def _binom_midp_z(k, n, q):
+    """n注采样里某格出现k注，相对随机概率q有多\"超出/不足\"：二项分布(mid-p)换算成z。样本小(12注)时比正态近似稳。"""
+    from math import comb
+    from statistics import NormalDist
+    pm = [comb(n, j) * q ** j * (1 - q) ** (n - j) for j in range(n + 1)]
+    p_up = sum(pm[k + 1:]) + 0.5 * pm[k]
+    return NormalDist().inv_cdf(min(max(1.0 - p_up, 1e-4), 1 - 1e-4))
 
 
 def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
@@ -3131,8 +3033,65 @@ def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
                    'base': round(cov_n / 10.0, 2),
                    'direct_prob': round(sum(b['prob'] for b in bets), 2), 'direct_n': len(bets)}
 
-    # ── 和值/跨度：先找整体偏向的区间，再在区间里选注 ──
-    strat = sum_span_focus(Jc, order, J=J, use=use, sampled=sampled)
+    # ── 和值/跨度分层：把1000注按(和值段×跨度段)分格，按概率质量选格，每格选最优的几注 ──
+    sm = _D3_ALL.sum(axis=1); sp = _D3_ALL.max(axis=1) - _D3_ALL.min(axis=1)
+    def _bi(v, bands):
+        for i, (lo, hi) in enumerate(bands):
+            if lo <= v <= hi: return i
+        return len(bands) - 1
+    sb = np.array([_bi(v, SUM_BANDS) for v in sm]); pb = np.array([_bi(v, SPAN_BANDS) for v in sp])
+    mass = np.zeros((len(SUM_BANDS), len(SPAN_BANDS))); cnt = np.zeros_like(mass)
+    for i in range(1000):
+        mass[sb[i], pb[i]] += Jc[i]; cnt[sb[i], pb[i]] += 1
+    # 选格规则：共识概率 × RL采样 联合打分（z）
+    #   z_共识 = (共识概率 p − 随机基准 q) / sqrt(q(1−q)/N)            N=STRAT_N_EFF
+    #   z_采样 = RL采样的 n 注里该格出现 k 注，相对随机概率 q 的二项 z（mid-p，小样本也稳）
+    #   联合 z = (z_共识 + z_采样)/√2（Stouffer 合并）：共识和采样同时偏向的格最亮；只有一边偏向的格会被另一边拉低。
+    #   没有采样数据时退回只用 z_共识。只选 共识概率高于随机、联合 z 达标的格；和值段、跨度段各最多选2格，避免挤成一行/一列。
+    samp_idx = []
+    for _b in (sampled or []):
+        try: samp_idx.append(int(_b[0]) * 100 + int(_b[1]) * 10 + int(_b[2]))
+        except Exception: pass
+    samp_set = set(samp_idx); n_s = len(samp_idx)
+    kmat = np.zeros_like(mass)
+    for i in samp_idx: kmat[sb[i], pb[i]] += 1
+    zc = np.zeros_like(mass); zs = np.zeros_like(mass)
+    for r in range(len(SUM_BANDS)):
+        for c in range(len(SPAN_BANDS)):
+            q = cnt[r, c] / 1000.0
+            if q > 0:
+                zc[r, c] = (mass[r, c] - q) / np.sqrt(q * (1 - q) / STRAT_N_EFF)
+                if n_s: zs[r, c] = _binom_midp_z(int(kmat[r, c]), n_s, q)
+    zmat = (zc + zs) / np.sqrt(2) if n_s else zc
+    zmin = STRAT_MIN_Z_COMB if n_s else STRAT_MIN_Z
+    cells = sorted([(r, c) for r in range(len(SUM_BANDS)) for c in range(len(SPAN_BANDS))
+                    if cnt[r, c] > 0 and mass[r, c] > cnt[r, c] / 1000.0 and zmat[r, c] >= zmin],
+                   key=lambda rc: -zmat[rc])
+    chosen, per_sb, per_pb = [], {}, {}
+    for r, c in cells:
+        if per_sb.get(r, 0) >= STRAT_MAX_PER_SUMBAND or per_pb.get(c, 0) >= STRAT_MAX_PER_SPANBAND: continue
+        chosen.append((r, c)); per_sb[r] = per_sb.get(r, 0) + 1; per_pb[c] = per_pb.get(c, 0) + 1
+        if len(chosen) >= STRAT_CELLS: break
+    sl = []
+    for r, c in chosen:
+        in_cell = [int(i) for i in order if sb[i] == r and pb[i] == c]
+        first = [i for i in in_cell if i in samp_set][:STRAT_PER_CELL]        # RL采样也抽到的注优先（★）
+        idxs = first + [i for i in in_cell if i not in first][:STRAT_PER_CELL - len(first)]
+        sl.append({'sum': f'{SUM_BANDS[r][0]}~{SUM_BANDS[r][1]}', 'span': f'{SPAN_BANDS[c][0]}~{SPAN_BANDS[c][1]}',
+                   'prob': round(float(mass[r, c]) * 100, 1), 'base': round(float(cnt[r, c]) / 10.0, 1),
+                   'k': int(kmat[r, c]), 'z_cons': round(float(zc[r, c]), 2), 'z_samp': round(float(zs[r, c]), 2),
+                   'z': round(float(zmat[r, c]), 2),
+                   'bets': [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2), 'sampled': bool(i in samp_set)} for i in idxs]})
+    _R, _C = len(SUM_BANDS), len(SPAN_BANDS)
+    strat = {'cells': sl, 'n_sampled': n_s,
+             'sum_bands': [f'{a}~{b}' for a, b in SUM_BANDS], 'span_bands': [f'{a}~{b}' for a, b in SPAN_BANDS],
+             'matrix': [[round(float(mass[r, c]) * 100, 1) for c in range(_C)] for r in range(_R)],
+             'base_matrix': [[round(float(cnt[r, c]) / 10.0, 1) for c in range(_C)] for r in range(_R)],
+             'samp_matrix': [[int(kmat[r, c]) for c in range(_C)] for r in range(_R)] if n_s else None,
+             'samp_row': [int(kmat[r].sum()) for r in range(_R)] if n_s else None,
+             'samp_col': [int(kmat[:, c].sum()) for c in range(_C)] if n_s else None,
+             'z_matrix': [[round(float(zmat[r, c]), 2) for c in range(_C)] for r in range(_R)],
+             'chosen': [[int(r), int(c)] for r, c in chosen]}
     return {'sources': info, 'active': active, 'n_active': len(active), 'pos': pos, 'bets': bets,
             'group_cover': group_cover, 'stratified': strat}
 
