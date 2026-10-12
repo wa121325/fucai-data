@@ -2722,6 +2722,47 @@ function renderKl8DrawStats(st){
   return h;
 }
 
+/* 和值/跨度表：点格子 → 显示这格包含的号码（由和数值号码分区表的组选号按和值、跨度归格；不需要改RL） */
+window._consCells = window._consCells || {};
+let _consCellSeq = 0;
+function consCellPick(td){
+  const cid = td.dataset.cid, r = +td.dataset.r, c = +td.dataset.c;
+  const ctx = window._consCells[cid]; if(!ctx) return;
+  const {st, gt} = ctx;
+  const band = b => { const a = String(b).split('~').map(Number); return a.length===2 ? a : [a[0],a[0]]; };
+  const [s0,s1] = band(st.sum_bands[r]);
+  const [k0,k1] = band(st.span_bands[c]);
+  document.querySelectorAll(`td.consCellBtn[data-cid="${cid}"]`).forEach(x=>{x.style.outline='';});
+  td.style.outline = '2px dashed #fff';
+  const box = document.getElementById(cid+'_box'); if(!box) return;
+  const PUR = '#7c3aed';
+  const title = `<div style="color:#ddd;font-weight:700;margin-bottom:3px;">和值${st.sum_bands[r]} · 跨度${st.span_bands[c]}</div>`;
+  const prob = st.matrix[r][c], base = st.base_matrix[r][c], k = st.samp_matrix ? st.samp_matrix[r][c] : 0;
+  const head = `<div style="color:#999;margin-bottom:4px;">共识概率 <b style="color:#ddd">${prob}%</b>（随机${base}%）${k>0?`　<span style="color:#f59e0b;">RL采样 ${k} 注落在这格</span>`:''}</div>`;
+  if(!gt || !gt.sections){
+    const cell = (st.cells||[]).find(x=>x.sum===st.sum_bands[r] && x.span===st.span_bands[c]);
+    let body = cell ? cell.bets.map(b=>`<span style="display:inline-block;border:1px solid ${PUR};border-radius:6px;padding:1px 6px;margin:2px;color:#ddd;"><b>${b.digits.join('')}</b> ${b.prob}%${b.sampled?' <span style="color:#f59e0b;">★采样</span>':''}</span>`).join('') : '<div>这格没被选中；完整号码列表需要RL脚本新版本（含和数值分区表）运行后才有。</div>';
+    box.innerHTML = title + head + body; return;
+  }
+  const ents = [];
+  gt.sections.forEach(sec=>sec.rows.forEach(row=>row.forEach(e=>{
+    if(!e) return;
+    const ds = e.d.split('').map(Number), span = Math.max(...ds)-Math.min(...ds);
+    if(e.sum>=s0 && e.sum<=s1 && span>=k0 && span<=k1) ents.push(e);
+  })));
+  ents.sort((a,b)=>(b.z-a.z)||(b.p-a.p));
+  const perm = e=>e.kind==='zu6'?6:(e.kind==='zu3'?3:1);
+  const nm = e=>e.kind==='zu6'?'组六':(e.kind==='zu3'?'组三':'豹子');
+  const nOf = kd => ents.filter(e=>e.kind===kd).length;
+  const totalPerm = ents.reduce((a,e)=>a+perm(e),0);
+  const stat = `<div style="color:#999;margin-bottom:4px;">这格共 <b style="color:#ddd">${ents.length}</b> 个号码（组六${nOf('zu6')} · 组三${nOf('zu3')} · 豹子${nOf('baozi')}），覆盖 ${totalPerm} 个直选排列；按联合信号从高到低排：</div>`;
+  const chips = ents.map(e=>{
+    const a = Math.max(0, Math.min(1, (e.z||0)/1.5));
+    const bg = a>0.05 ? `background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};` : '';
+    return `<span style="display:inline-block;border:${e.pk?`2px solid ${PUR}`:'1px solid #444'};${bg}border-radius:6px;padding:1px 6px;margin:2px;color:#ddd;white-space:nowrap;"><b>${e.d}</b> <span style="color:#888;font-size:9.5px;">${nm(e)} ${e.p}%</span>${e.k>0?` <span style="color:#f59e0b;font-size:9.5px;">采${e.k}</span>`:''}</span>`;
+  }).join('');
+  box.innerHTML = title + head + stat + `<div style="max-height:260px;overflow-y:auto;">${chips}</div>`;
+}
 /* 共识投票（ML·DL·RL）：数据来自RL脚本返回的 consensus 字段 */
 /* 和数值号码分区表（仿彩票上的"3D游戏和数值号码分区表"）：不分位置，横向=和值0~27，纵向=单选/组选3/组选6。
    每个号码是一格：紫色深浅=共识×RL采样的联合信号z，粗框=最可能出现的号码，橙色=RL采样里出现次数。默认折叠。 */
@@ -2797,15 +2838,18 @@ function renderConsensus(game, c){
       h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（共识概率 × RL采样${st.n_sampled||0}注 联合找信号：颜色越深=联合越显著，粗框是选中的${st.cells.length}格，每格选${st.cells[0]?.bets.length||0}注；和值段/跨度段各最多2格，没有显著高于随机的格就不选）：</span></div>`;
       // 概率矩阵：行=和值段，列=跨度段，高亮被选中的格
       const chosen = new Set((st.chosen||[]).map(x=>x.join(',')));
+      const cid = 'cc' + (++_consCellSeq);
+      window._consCells[cid] = {st, gt:c.group_table};
       h += `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:3px 0;"><tr><td style="padding:2px 6px;color:#888;">和值＼跨度</td>${st.span_bands.map((b,ci)=>`<td style="padding:2px 6px;color:#888;text-align:center;">${b}${st.samp_col?`<div style="color:#f59e0b;font-size:9px;">采样${st.samp_col[ci]}</div>`:''}</td>`).join('')}</tr>`;
       st.matrix.forEach((row,r)=>{
         h += `<tr><td style="padding:2px 6px;color:#888;">${st.sum_bands[r]}${st.samp_row?`<div style="color:#f59e0b;font-size:9px;">采样${st.samp_row[r]}</div>`:''}</td>` + row.map((v,cc)=>{
           const base = st.base_matrix[r][cc]; const sel = chosen.has(r+','+cc);
           const z = (st.z_matrix&&st.z_matrix[r][cc])||0, a = Math.max(0, Math.min(1, z/1.5));   // z 越大颜色越深（z≥1.5 最深）
-          return `<td style="padding:2px 6px;text-align:center;border:${sel?`2px solid ${PUR}`:'1px solid #333'};${a>0.05?`background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};`:''}${sel?'color:#fff;font-weight:700;':''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span>${(st.samp_matrix&&st.samp_matrix[r][cc]>0)?`<div style="color:#f59e0b;font-size:9px;font-weight:600;">采样${st.samp_matrix[r][cc]}注</div>`:''}</td>`;
+          const dead = !(base>0) && !(v>0);
+          return `<td ${dead?'':`class="consCellBtn" data-cid="${cid}" data-r="${r}" data-c="${cc}" onclick="consCellPick(this)"`} style="padding:2px 6px;text-align:center;${dead?'opacity:.35;':'cursor:pointer;'}border:${sel?`2px solid ${PUR}`:'1px solid #333'};${a>0.05?`background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};`:''}${sel?'color:#fff;font-weight:700;':''}">${v}%<span style="color:#777;font-weight:400;"> /${base}</span>${(st.samp_matrix&&st.samp_matrix[r][cc]>0)?`<div style="color:#f59e0b;font-size:9px;font-weight:600;">采样${st.samp_matrix[r][cc]}注</div>`:''}</td>`;
         }).join('') + `</tr>`;
       });
-      h += `</table></div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%，橙色=RL采样的注里落在这格的注数；紫色深浅=共识与采样联合的显著程度z（共识高于随机、采样也偏多的格最深；只有联合z达标且分布均匀才会被选中，粗框）</div>`;
+      h += `</table></div><div style="font-size:10.5px;color:#a78bfa;margin:3px 0;">👆 点任意一格（共22格可点，0%的两格不可点），下面切换显示这格包含的号码</div><div id="${cid}_box" style="border:1px dashed #555;border-radius:6px;padding:4px 8px;margin:3px 0;font-size:11px;color:#888;">还没选格子</div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%，橙色=RL采样的注里落在这格的注数；紫色深浅=共识与采样联合的显著程度z（共识高于随机、采样也偏多的格最深；只有联合z达标且分布均匀才会被选中，粗框）</div>`;
       st.cells.forEach(cell=>{
         h += `<div style="font-size:11px;color:#666;margin:3px 0 1px;">和值${cell.sum} · 跨度${cell.span}　${note(`概率${cell.prob}%（随机${cell.base}%，采样${cell.k}注；联合z=${cell.z} ＝ 共识${cell.z_cons} 与 采样${cell.z_samp} 合并）`)}</div>`;
         cell.bets.forEach(b=>{
