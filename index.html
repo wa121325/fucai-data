@@ -2723,6 +2723,38 @@ function renderKl8DrawStats(st){
 }
 
 /* 共识投票（ML·DL·RL）：数据来自RL脚本返回的 consensus 字段 */
+/* 和数值号码分区表（仿彩票上的"3D游戏和数值号码分区表"）：不分位置，横向=和值0~27，纵向=单选/组选3/组选6。
+   每个号码是一格：紫色深浅=共识×RL采样的联合信号z，粗框=最可能出现的号码，橙色=RL采样里出现次数。默认折叠。 */
+function renderGroupTable(gt){
+  if(!gt || !gt.sections) return '';
+  const PUR = '#7c3aed';
+  const cell = e => {
+    if(!e) return `<td style="border:1px solid #222;"></td>`;
+    const a = Math.max(0, Math.min(1, (e.z||0)/1.5));
+    const bg = a > 0.05 ? `background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};` : '';
+    return `<td style="padding:2px 3px;text-align:center;min-width:34px;border:${e.pk?`2px solid ${PUR}`:'1px solid #333'};${bg}${e.pk?'color:#fff;':''}">`
+      + `<div style="font-weight:700;font-size:11px;">${e.d}</div><div style="font-size:8.5px;color:#888;font-weight:400;">${e.p}</div>`
+      + (e.k>0 ? `<div style="font-size:8.5px;color:#f59e0b;font-weight:600;">采${e.k}</div>` : '') + `</td>`;
+  };
+  let t = `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:4px 0;">`;
+  t += `<tr><td style="padding:2px 6px;color:#888;white-space:nowrap;position:sticky;left:0;background:#111;">和值</td>` + Array.from({length:28},(_,i)=>`<td style="padding:2px 3px;text-align:center;color:#888;border:1px solid #222;">${i}</td>`).join('') + `</tr>`;
+  gt.sections.forEach(sec=>{
+    sec.rows.forEach((row,ri)=>{
+      t += `<tr><td style="padding:2px 6px;color:#888;white-space:nowrap;position:sticky;left:0;background:#111;">${ri===0?sec.name:''}</td>` + row.map(cell).join('') + `</tr>`;
+    });
+  });
+  t += `<tr><td style="padding:2px 6px;color:#888;white-space:nowrap;position:sticky;left:0;background:#111;">和值共识%</td>` + gt.sum_p.map((v,i)=>`<td style="text-align:center;font-size:9px;border:1px solid #222;color:${v>gt.sum_q[i]?'#c4b5fd':'#777'};">${v}<div style="color:#666;">/${gt.sum_q[i]}</div></td>`).join('') + `</tr>`;
+  if(gt.sum_k) t += `<tr><td style="padding:2px 6px;color:#f59e0b;white-space:nowrap;position:sticky;left:0;background:#111;">采样注数</td>` + gt.sum_k.map(v=>`<td style="text-align:center;font-size:9px;border:1px solid #222;color:${v>0?'#f59e0b':'#444'};">${v||''}</td>`).join('') + `</tr>`;
+  t += `</table></div>`;
+  let picks = '';
+  if(gt.picks?.length){
+    picks = `<div style="font-size:11px;color:#888;margin:4px 0 2px;">最可能出现的组选号（按联合信号排序，同一和值最多${2}个）：</div><div style="display:flex;flex-wrap:wrap;gap:4px;">`
+      + gt.picks.map(e=>`<div style="border:1px solid ${PUR};border-radius:6px;padding:2px 6px;font-size:10.5px;color:#ddd;white-space:nowrap;"><b>${e.d}</b> <span style="color:#888;">和${e.sum}·${e.kind==='zu6'?'组六':(e.kind==='zu3'?'组三':'豹子')}</span> <span style="color:#888;">${e.p}%/随机${e.q}%</span>${e.k>0?` <span style="color:#f59e0b;">采样${e.k}</span>`:''} <span style="color:#888;">z=${e.z}</span></div>`).join('') + `</div>`;
+  } else picks = `<div style="font-size:11px;color:#999;margin:4px 0;">没有共识和采样同时偏向的号码，今天不标最可能出现的号。</div>`;
+  return `<details style="margin:8px 0;border:1px solid #333;border-radius:8px;padding:4px 8px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">🧩 和数值号码分区表（组选号码 · 共识概率×RL采样${gt.n_sampled||0}注联合信号，点开查看）</summary>`
+    + `<div style="font-size:9.5px;color:#777;margin:4px 0;">每格：号码 / 共识概率%（该组选号全部排列合计）；橙色“采n”=RL采样里出现n次；紫色深浅=联合信号z；粗框=最可能出现。表可左右滑动。</div>`
+    + t + picks + `</details>`;
+}
 function renderConsensus(game, c){
   if(!c) return '';
   const p2 = x => String(x).padStart(2,'0');
@@ -2781,6 +2813,7 @@ function renderConsensus(game, c){
         });
       });
     }
+    h += renderGroupTable(c.group_table);
   } else {
     // ssq / kl8：共识球号榜（得票 + 平均提升倍数），再给共识推荐
     const tb = c.table||[];
