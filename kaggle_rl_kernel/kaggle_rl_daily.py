@@ -127,7 +127,7 @@ D3_POOL_N = 5
 # 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
 # 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
 # 改这里就行，不用碰 D3_N_BETS。
-D3_SAMPLE_N = 12
+D3_SAMPLE_N = 60
 # 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
 # D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
 D3_SAMPLE_DISPLAY_N = 12
@@ -2969,6 +2969,7 @@ STRAT_CELLS, STRAT_PER_CELL, STRAT_MAX_PER_SUMBAND = 6, 2, 2
 STRAT_N_EFF = 300        # 计算 z 时假设的"证据期数"（越大越容易显著；300≈一年的开奖期数）
 STRAT_MIN_Z = 0.5        # 没有采样数据时：z 低于它的格不选（宁可少选）
 STRAT_MIN_Z_COMB = 0.7   # 有RL采样时：共识×采样 联合z 低于它的格不选
+GT_PICKS, GT_MAX_PER_SUM = 10, 2   # 和数值分区表：最多标出几个最可能的组选号、同一和值最多标几个
 STRAT_MAX_PER_SPANBAND = 2   # 每个跨度段最多选几格
 
 
@@ -3092,8 +3093,50 @@ def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
              'samp_col': [int(kmat[:, c].sum()) for c in range(_C)] if n_s else None,
              'z_matrix': [[round(float(zmat[r, c]), 2) for c in range(_C)] for r in range(_R)],
              'chosen': [[int(r), int(c)] for r, c in chosen]}
+    # ── 和数值号码分区表（对应彩票上那张"3D游戏和数值号码分区表"：不分位置，按 和值 × 单选/组三/组六 排）──
+    # 每个号码(组选)算共识概率、随机基准、RL采样出现次数，并和上面的格子一样合并成联合信号 z
+    gt = None
+    try:
+        gp, gcnt, gk = {}, {}, {}
+        for i in range(1000):
+            key = tuple(sorted(int(x) for x in _D3_ALL[i]))
+            gp[key] = gp.get(key, 0.0) + float(Jc[i]); gcnt[key] = gcnt.get(key, 0) + 1
+        for i in samp_idx:
+            key = tuple(sorted(int(x) for x in _D3_ALL[i])); gk[key] = gk.get(key, 0) + 1
+        ents = {}
+        for key, p in gp.items():
+            q = gcnt[key] / 1000.0
+            zc_ = (p - q) / np.sqrt(q * (1 - q) / STRAT_N_EFF)
+            zs_ = _binom_midp_z(gk.get(key, 0), n_s, q) if n_s else 0.0
+            z_ = (zc_ + zs_) / np.sqrt(2) if n_s else zc_
+            ents[key] = {'d': ''.join(map(str, key)), 'sum': int(sum(key)), 'kind': {3: 'zu6', 2: 'zu3', 1: 'baozi'}[len(set(key))],
+                         'p': round(p * 100, 2), 'q': round(q * 100, 2), 'k': int(gk.get(key, 0)),
+                         'zc': round(float(zc_), 2), 'zs': round(float(zs_), 2), 'z': round(float(z_), 2), 'pk': False, '_above': p > q}
+        zmin_g = STRAT_MIN_Z_COMB if n_s else STRAT_MIN_Z
+        picks, per_sum = [], {}
+        for key in sorted(ents, key=lambda k_: -ents[k_]['z']):
+            e = ents[key]
+            if not e['_above'] or e['z'] < zmin_g: continue
+            if per_sum.get(e['sum'], 0) >= GT_MAX_PER_SUM: continue
+            e['pk'] = True; per_sum[e['sum']] = per_sum.get(e['sum'], 0) + 1; picks.append(e)
+            if len(picks) >= GT_PICKS: break
+        secs = []
+        for kind, name in (('baozi', '单选'), ('zu3', '组选3'), ('zu6', '组选6')):
+            cols = {sv: sorted([e for e in ents.values() if e['kind'] == kind and e['sum'] == sv], key=lambda e: e['d']) for sv in range(28)}
+            nrow = max(len(v) for v in cols.values())
+            rows = [[({k_: v for k_, v in cols[sv][r].items() if k_ != '_above'} if r < len(cols[sv]) else None) for sv in range(28)] for r in range(nrow)]
+            secs.append({'name': name, 'kind': kind, 'rows': rows})
+        sum_p = np.bincount(_D3_ALL.sum(axis=1), weights=Jc, minlength=28)
+        sum_q = np.bincount(_D3_ALL.sum(axis=1), minlength=28) / 1000.0
+        sum_k = np.bincount(_D3_ALL[samp_idx].sum(axis=1), minlength=28) if n_s else None
+        gt = {'sections': secs, 'n_sampled': n_s,
+              'sum_p': [round(float(x) * 100, 1) for x in sum_p], 'sum_q': [round(float(x) * 100, 1) for x in sum_q],
+              'sum_k': [int(x) for x in sum_k] if n_s else None,
+              'picks': [{k_: v for k_, v in e.items() if k_ != '_above'} for e in picks]}
+    except Exception as _e:
+        print(f"  [共识·和数值分区表] 计算失败: {_e}")
     return {'sources': info, 'active': active, 'n_active': len(active), 'pos': pos, 'bets': bets,
-            'group_cover': group_cover, 'stratified': strat}
+            'group_cover': group_cover, 'stratified': strat, 'group_table': gt}
 
 
 VOTE_DL_MAX_STALE_DRAWS = int(os.environ.get('VOTE_DL_MAX_STALE_DRAWS', '0'))   # DL之后允许新开几期仍参与投票，默认0
