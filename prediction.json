@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-13 14:26",
+  "updated_at": "2026-10-13 20:04",
   "source": "kaggle",
   "models_used": {
     "rf": true,
@@ -12,7 +12,7 @@
   "predictions": {
     "3d": {
       "data_count": 8780,
-      "updated_at": "2026-10-13 14:20",
+      "updated_at": "2026-10-13 19:56",
       "models": {
         "sum_grp": {
           "target": "3d_sum_grp",
@@ -996,7 +996,7 @@
     },
     "ssq": {
       "data_count": 3514,
-      "updated_at": "2026-10-13 14:22",
+      "updated_at": "2026-10-13 19:59",
       "models": {
         "odd": {
           "target": "ssq_odd",
@@ -1939,7 +1939,7 @@
     },
     "kl8": {
       "data_count": 2093,
-      "updated_at": "2026-10-13 14:24",
+      "updated_at": "2026-10-13 20:02",
       "models": {
         "odd_grp": {
           "target": "kl8_odd_grp",
@@ -2982,7 +2982,7 @@
     "date": "2026-10-13",
     "games": {
       "3d": {
-        "prediction_generated_at": "2026-10-12 22:20",
+        "prediction_generated_at": "2026-10-13 14:20",
         "actual_qihao": "2026272",
         "actual_date": "2026-10-13",
         "actual": [
@@ -2994,7 +2994,7 @@
         "partial_count": 0
       },
       "ssq": {
-        "prediction_generated_at": "2026-10-12 22:23",
+        "prediction_generated_at": "2026-10-13 14:22",
         "actual_qihao": "2026117",
         "actual_date": "2026-10-13",
         "actual_red": [
@@ -3008,7 +3008,15 @@
         "actual_blue": 4,
         "group_results": [
           {
-            "red_hit": 0,
+            "red_hit": 2,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 3,
+            "blue_hit": 0
+          },
+          {
+            "red_hit": 2,
             "blue_hit": 0
           },
           {
@@ -3016,26 +3024,18 @@
             "blue_hit": 1
           },
           {
-            "red_hit": 2,
+            "red_hit": 3,
             "blue_hit": 0
           },
           {
-            "red_hit": 2,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 2,
-            "blue_hit": 0
-          },
-          {
-            "red_hit": 0,
+            "red_hit": 1,
             "blue_hit": 0
           }
         ],
-        "best_red_hit": 2
+        "best_red_hit": 3
       },
       "kl8": {
-        "prediction_generated_at": "2026-10-12 22:26",
+        "prediction_generated_at": "2026-10-13 14:24",
         "actual_qihao": "2026272",
         "actual_date": "2026-10-13",
         "actual": [
@@ -3148,34 +3148,34 @@
             "balls": 9,
             "groups": [
               {
-                "hit": 0,
+                "hit": 1,
                 "balls": 9,
                 "won": false
               },
               {
-                "hit": 0,
+                "hit": 1,
                 "balls": 9,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 0
+            "best_hit": 1
           },
           "xuan10": {
             "name": "选十",
             "balls": 10,
             "groups": [
               {
-                "hit": 0,
+                "hit": 1,
                 "balls": 10,
                 "won": false
               }
             ],
             "any_won": false,
-            "best_hit": 0
+            "best_hit": 1
           }
         },
-        "best_hit": 0
+        "best_hit": 1
       }
     }
   },
