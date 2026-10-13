@@ -2755,13 +2755,20 @@ function consCellPick(td){
   const nm = e=>e.kind==='zu6'?'组六':(e.kind==='zu3'?'组三':'豹子');
   const nOf = kd => ents.filter(e=>e.kind===kd).length;
   const totalPerm = ents.reduce((a,e)=>a+perm(e),0);
-  const stat = `<div style="color:#999;margin-bottom:4px;">这格共 <b style="color:#ddd">${ents.length}</b> 个号码（组六${nOf('zu6')} · 组三${nOf('zu3')} · 豹子${nOf('baozi')}），覆盖 ${totalPerm} 个直选排列；按联合信号从高到低排：</div>`;
-  const chips = ents.map(e=>{
+  const stat = `<div style="color:#999;margin-bottom:4px;">这格共 <b style="color:#ddd">${ents.length}</b> 个号码（组六${nOf('zu6')} · 组三${nOf('zu3')} · 豹子${nOf('baozi')}），覆盖 ${totalPerm} 个直选排列；按和值分开列（每个和值内按联合信号从高到低）：</div>`;
+  const chip = e=>{
     const a = Math.max(0, Math.min(1, (e.z||0)/1.5));
     const bg = a>0.05 ? `background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};` : '';
     return `<span style="display:inline-block;border:${e.pk?`2px solid ${PUR}`:'1px solid #444'};${bg}border-radius:6px;padding:1px 6px;margin:2px;color:#ddd;white-space:nowrap;"><b>${e.d}</b> <span style="color:#888;font-size:9.5px;">${nm(e)} ${e.p}%</span>${e.k>0?` <span style="color:#f59e0b;font-size:9.5px;">采${e.k}</span>`:''}</span>`;
+  };
+  const sums = [...new Set(ents.map(e=>e.sum))].sort((x,y)=>x-y);
+  const chips = sums.map(sm=>{
+    const list = ents.filter(e=>e.sum===sm);
+    const sp = gt.sum_p ? gt.sum_p[sm] : null, sq = gt.sum_q ? gt.sum_q[sm] : null, sk = gt.sum_k ? gt.sum_k[sm] : 0;
+    const hot = sp!=null && sq!=null && sp>sq;
+    return `<div style="margin:5px 0;padding:3px 0;border-top:1px solid #333;"><div style="margin-bottom:1px;"><b style="color:#ddd;font-size:12px;">和值${sm}</b> <span style="color:#888;font-size:10px;">${list.length}个号码${sp!=null?` · 和值共识 <span style="color:${hot?'#c4b5fd':'#888'};">${sp}%</span>（随机${sq}%）`:''}${sk>0?` · <span style="color:#f59e0b;">采样${sk}注</span>`:''}</span></div>${list.map(chip).join('')}</div>`;
   }).join('');
-  box.innerHTML = title + head + stat + `<div style="max-height:260px;overflow-y:auto;">${chips}</div>`;
+  box.innerHTML = title + head + stat + `<div style="max-height:360px;overflow-y:auto;">${chips}</div>`;
 }
 /* 共识投票（ML·DL·RL）：数据来自RL脚本返回的 consensus 字段 */
 /* 和数值号码分区表（仿彩票上的"3D游戏和数值号码分区表"）：不分位置，横向=和值0~27，纵向=单选/组选3/组选6。
