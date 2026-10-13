@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-10-13 00:04:43",
+  "updated_at": "2026-10-13 16:06:34",
   "models": "LSTM + Transformer（每周全量训练）",
   "seq_len": 20,
   "device": "cpu",
@@ -11,11 +11,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 57.2,
+        "confidence": 60.6,
         "probs": {
-          "0": 21.1,
-          "1": 57.2,
-          "2": 21.7
+          "0": 18.1,
+          "1": 60.6,
+          "2": 21.3
         }
       },
       "group_type": {
@@ -24,11 +24,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 2,
-        "confidence": 76.9,
+        "confidence": 75.0,
         "probs": {
-          "0": 1.0,
-          "1": 22.2,
-          "2": 76.9
+          "0": 0.8,
+          "1": 24.2,
+          "2": 75.0
         }
       },
       "odd": {
@@ -37,12 +37,12 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 40.2,
+        "confidence": 37.8,
         "probs": {
-          "0": 12.8,
-          "1": 40.2,
-          "2": 35.4,
-          "3": 11.7
+          "0": 13.6,
+          "1": 37.8,
+          "2": 36.4,
+          "3": 12.3
         }
       },
       "big": {
@@ -51,12 +51,12 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 2,
-        "confidence": 36.9,
+        "confidence": 39.2,
         "probs": {
-          "0": 12.9,
-          "1": 35.7,
-          "2": 36.9,
-          "3": 14.5
+          "0": 13.8,
+          "1": 32.9,
+          "2": 39.2,
+          "3": 14.1
         }
       },
       "span_grp": {
@@ -65,11 +65,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 43.5,
+        "confidence": 44.3,
         "probs": {
-          "0": 27.0,
-          "1": 43.5,
-          "2": 29.5
+          "0": 29.2,
+          "1": 44.3,
+          "2": 26.5
         }
       },
       "road_dom": {
@@ -78,11 +78,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 0,
-        "confidence": 60.1,
+        "confidence": 57.3,
         "probs": {
-          "0": 60.1,
-          "1": 20.9,
-          "2": 19.1
+          "0": 57.3,
+          "1": 21.9,
+          "2": 20.8
         }
       },
       "arith": {
@@ -91,10 +91,10 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 0,
-        "confidence": 88.1,
+        "confidence": 89.4,
         "probs": {
-          "0": 88.1,
-          "1": 11.9
+          "0": 89.4,
+          "1": 10.6
         }
       }
     },
@@ -105,15 +105,15 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 3,
-        "confidence": 38.8,
+        "confidence": 39.4,
         "probs": {
-          "0": 1.6,
-          "1": 5.4,
-          "2": 19.2,
-          "3": 38.8,
-          "4": 24.8,
-          "5": 8.1,
-          "6": 2.1
+          "0": 1.0,
+          "1": 6.4,
+          "2": 23.0,
+          "3": 39.4,
+          "4": 22.2,
+          "5": 6.6,
+          "6": 1.4
         }
       },
       "sum_grp": {
@@ -122,11 +122,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 2,
-        "confidence": 54.7,
+        "confidence": 56.9,
         "probs": {
-          "0": 7.4,
-          "1": 37.9,
-          "2": 54.7
+          "0": 6.9,
+          "1": 36.2,
+          "2": 56.9
         }
       },
       "ac_grp": {
@@ -135,11 +135,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 2,
-        "confidence": 90.4,
+        "confidence": 88.5,
         "probs": {
-          "0": 0.5,
-          "1": 9.1,
-          "2": 90.4
+          "0": 0.2,
+          "1": 11.3,
+          "2": 88.5
         }
       },
       "red_zone_dom": {
@@ -148,11 +148,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 0,
-        "confidence": 46.1,
+        "confidence": 50.5,
         "probs": {
-          "0": 46.1,
-          "1": 25.8,
-          "2": 28.1
+          "0": 50.5,
+          "1": 26.2,
+          "2": 23.2
         }
       },
       "gap_grp": {
@@ -161,11 +161,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 54.5,
+        "confidence": 51.4,
         "probs": {
-          "0": 4.6,
-          "1": 54.5,
-          "2": 41.0
+          "0": 5.9,
+          "1": 51.4,
+          "2": 42.7
         }
       },
       "big": {
@@ -174,15 +174,15 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 3,
-        "confidence": 37.4,
+        "confidence": 34.6,
         "probs": {
           "0": 0.9,
-          "1": 7.4,
-          "2": 21.3,
-          "3": 37.4,
-          "4": 23.7,
-          "5": 7.8,
-          "6": 1.5
+          "1": 5.1,
+          "2": 24.2,
+          "3": 34.6,
+          "4": 25.5,
+          "5": 8.7,
+          "6": 1.0
         }
       },
       "consec": {
@@ -191,13 +191,13 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 44.0,
+        "confidence": 47.6,
         "probs": {
-          "0": 33.3,
-          "1": 44.0,
-          "2": 19.3,
-          "3": 2.6,
-          "4": 0.8
+          "0": 33.0,
+          "1": 47.6,
+          "2": 15.4,
+          "3": 3.6,
+          "4": 0.5
         }
       }
     },
@@ -208,11 +208,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 66.1,
+        "confidence": 66.8,
         "probs": {
-          "0": 18.7,
-          "1": 66.1,
-          "2": 15.1
+          "0": 16.8,
+          "1": 66.8,
+          "2": 16.4
         }
       },
       "zone_dom": {
@@ -221,12 +221,12 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 0,
-        "confidence": 42.3,
+        "confidence": 37.5,
         "probs": {
-          "0": 42.3,
-          "1": 20.5,
-          "2": 18.1,
-          "3": 19.1
+          "0": 37.5,
+          "1": 22.0,
+          "2": 23.9,
+          "3": 16.7
         }
       },
       "tot_grp": {
@@ -235,11 +235,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 60.9,
+        "confidence": 56.6,
         "probs": {
-          "0": 1.7,
-          "1": 60.9,
-          "2": 37.4
+          "0": 2.3,
+          "1": 56.6,
+          "2": 41.2
         }
       },
       "big_grp": {
@@ -248,11 +248,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 1,
-        "confidence": 66.9,
+        "confidence": 60.7,
         "probs": {
-          "0": 14.2,
-          "1": 66.9,
-          "2": 18.9
+          "0": 22.0,
+          "1": 60.7,
+          "2": 17.3
         }
       },
       "five_dom": {
@@ -261,13 +261,13 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 0,
-        "confidence": 32.1,
+        "confidence": 27.9,
         "probs": {
-          "0": 32.1,
-          "1": 23.6,
-          "2": 17.2,
-          "3": 14.3,
-          "4": 12.9
+          "0": 27.9,
+          "1": 22.4,
+          "2": 21.3,
+          "3": 13.3,
+          "4": 15.2
         }
       },
       "consec_grp": {
@@ -276,11 +276,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 2,
-        "confidence": 90.7,
+        "confidence": 76.6,
         "probs": {
-          "0": 0.6,
-          "1": 8.7,
-          "2": 90.7
+          "0": 0.5,
+          "1": 22.9,
+          "2": 76.6
         }
       },
       "range_grp": {
@@ -289,11 +289,11 @@
         "lstm_baseline": null,
         "tfm_baseline": null,
         "ensemble_pred": 2,
-        "confidence": 85.4,
+        "confidence": 85.1,
         "probs": {
-          "0": 1.1,
-          "1": 13.5,
-          "2": 85.4
+          "0": 0.6,
+          "1": 14.3,
+          "2": 85.1
         }
       }
     }
