@@ -5836,10 +5836,36 @@ function scanComputeStats(recs, opt){
   // —— 批次/组 ——
   const grpAgg = f=>{ const m={}; books.forEach(b=>{ const k=f(b); (m[k]=m[k]||{key:k,n:0,k:0,sum:0,books:0}); const x=m[k]; x.n+=b.n; x.k+=b.k; x.sum+=b.sum; x.books++; }); return Object.values(m).sort((a,b)=>b.books-a.books).map(x=>({key:x.key,n:x.n,k:x.k,rate:x.n?x.k/x.n:0,sum:x.sum,rtp:(x.n&&amount)?x.sum/(x.n*amount):0,books:x.books})); };
   S.byBatch = grpAgg(b=>b.batch); S.byGrp = grpAgg(b=>b.grp);
+  S.bookAmt = statsBookAmounts(S);
   // —— 时间：每天扫了几张中奖票、奖金多少（不含没中，不算回报率） ——
   const dm = {}; data.forEach(o=>{ const d=(o.time.split(' ')[0])||'未知'; (dm[d]=dm[d]||{day:d,n:0,sum:0}); dm[d].n++; dm[d].sum+=o.prize; });
   S.byDay = Object.values(dm);
   return S;
+}
+function statsT(df){ const t=[12.71,4.30,3.18,2.78,2.57,2.45,2.36,2.31,2.26,2.23,2.20,2.18,2.16,2.14,2.13,2.12,2.11,2.10,2.09,2.09,2.08,2.07,2.07,2.06,2.06,2.06,2.05,2.05,2.04,2.04]; return df>=30?1.96:(t[Math.max(0,df-1)]||12.71); }
+/* 每本总金额（用金额不用张数）：历史各本总奖金的均值/波动；是否像“每张独立”；已刮部分与剩余部分的关系 */
+function statsBookAmounts(S){
+  const books=S.books, size=S.size, amount=S.amount, n=books.length; if(!n) return null;
+  const T=books.map(b=>b.sum), mean=statsMean(T), sd=statsSd(T), tq=statsT(n-1);
+  const se=sd/Math.sqrt(n), pred=tq*sd*Math.sqrt(1+1/n), full=size*amount;
+  const A={n, T, mean, median:statsMedian(T), sd, cv:mean?sd/mean:0, min:Math.min(...T), max:Math.max(...T), ciLo:Math.max(0,mean-tq*se), ciHi:mean+tq*se,
+    predLo:Math.max(0,mean-pred), predHi:mean+pred, full, rtp:full?mean/full:0, rtpLo:full?Math.max(0,mean-tq*se)/full:0, rtpHi:full?(mean+tq*se)/full:0, perTicket:size?mean/size:0};
+  // 每张独立时，一本总额的方差 = 张数 × 单张奖金方差（单张含没中的）
+  const tk=S.ov.n, m1=S.ov.avgPrize; let sq=0; books.forEach(b=>b.wins.forEach(q=>{ const x=b.st.get(q); sq+=x*x; }));
+  const var1=tk>1?Math.max(0,(sq-tk*m1*m1)/(tk-1)):0, varInd=size*var1, varObs=sd*sd;
+  A.sdInd=Math.sqrt(varInd); A.ratio=varInd?varObs/varInd:null;
+  if(n>=3 && varInd>0){ const st=(n-1)*A.ratio, lo=1-statsChiP(st,n-1), up=statsChiP(st,n-1); A.pVar=Math.min(1,2*Math.min(lo,up)); }
+  // 已刮前 s 张的累计奖金 S_s 与剩余 R_s = T - S_s 的回归：R = a + b*S（b≈0 独立；b≈-1 总额固定）
+  const cum=books.map(b=>{ const c=[0]; for(let q=S.pStart;q<S.pStart+size;q++) c.push(c[c.length-1]+(b.st.get(q)||0)); return c; });
+  A.slope={};
+  for(let k=1;k<size;k++){
+    if(n<5) break;
+    const xs=cum.map(c=>c[k]), ys=cum.map((c,i)=>T[i]-c[k]); const mx=statsMean(xs), my=statsMean(ys);
+    let sxx=0,sxy=0,syy=0; for(let i=0;i<n;i++){ sxx+=(xs[i]-mx)**2; sxy+=(xs[i]-mx)*(ys[i]-my); syy+=(ys[i]-my)**2; }
+    if(!sxx) continue; const b=sxy/sxx, a=my-b*mx; let sse=0; for(let i=0;i<n;i++) sse+=(ys[i]-a-b*xs[i])**2;
+    A.slope[k]={k,a,b,se:n>2?Math.sqrt(sse/(n-2)/sxx):null,mx,my,n};
+  }
+  A.cum=cum; return A;
 }
 function statsDiff(a,b){ if(a.length!==b.length) return 99; let d=0; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) d++; return d; }
 
@@ -5877,6 +5903,34 @@ function renderScanStats(S){
     + kv('最大奖', statsMoney(o.maxPrize)+'元') + kv('回本(奖金≥面值)', `${o.breakeven}张`, statsPct(o.breakevenRate)) + `</div>`;
   if(o.official) ov += `<div style="font-size:12px;margin-top:6px;">官方返奖率 ${o.official}%：实测 ${statsPct(o.rtp)}，${o.rtp>=o.official/100?'高':'低'}${(Math.abs(o.rtp-o.official/100)*100).toFixed(1)}个百分点（${statsPtxt(o.offP)}）${statsVerdict(o.offP,'，差异显著','，与官方差异在随机波动范围内')}</div>`;
   h += sec('📌 总览', ov, true);
+  // 每本总金额
+  const BA=S.bookAmt;
+  if(BA){
+    let b1=`<div style="display:flex;flex-wrap:wrap;gap:6px;">`
+      + kv('每本总奖金均值', statsMoney(BA.mean)+'元', `${BA.n}本；95%区间 ${statsMoney(BA.ciLo)}~${statsMoney(BA.ciHi)}`)
+      + kv('每本回报率', statsPct(BA.rtp), `${statsPct(BA.rtpLo)}~${statsPct(BA.rtpHi)}（每本成本${statsMoney(BA.full)}元）`)
+      + kv('每张票平均', statsMoney(BA.perTicket)+'元', `面值${S.amount}元`)
+      + kv('下一本预测区间', `${statsMoney(BA.predLo)}~${statsMoney(BA.predHi)}`, '95%，一本可能拿到的总奖金')
+      + kv('各本波动', `标准差 ${statsMoney(BA.sd)}`, `最低 ${statsMoney(BA.min)}、中位 ${statsMoney(BA.median)}、最高 ${statsMoney(BA.max)}`) + `</div>`;
+    b1 += `<div style="font-size:12px;margin-top:8px;">各本总额：${S.books.map(b=>`<span style="white-space:nowrap;margin-right:8px;">${b.no.slice(-4)}号 <b>${statsMoney(b.sum)}</b></span>`).join('')}</div>`;
+    // 是否像每张独立
+    let t1='';
+    if(BA.ratio!=null){
+      const r=BA.ratio; const lab = BA.n<10 ? '<span style="color:#f59e0b;">（本数太少，只能参考，建议攒到20本以上）</span>' : '';
+      const verdict = BA.pVar!=null && BA.pVar<0.05 ? (r<1 ? '实际波动明显小于“每张独立”→ 每本总额有收敛（可能有固定结构）' : '实际波动明显大于“每张独立”→ 各本“浓淡”不一') : '和“每张独立”无显著差别 → 基本可以当作每张独立';
+      t1 += `<div style="margin-top:8px;font-size:12.5px;"><b>① 每本总额的波动</b>：实际标准差 ${statsMoney(BA.sd)}，若每张独立应约 ${statsMoney(BA.sdInd)}，比值 ${r.toFixed(2)}${BA.pVar!=null?`（${statsPtxt(BA.pVar)}）`:''}。${verdict} ${lab}</div>`;
+    }
+    const ks=Object.keys(BA.slope).map(Number); 
+    if(ks.length){
+      const pick=[...new Set([Math.round(S.size*0.25),Math.round(S.size*0.5),Math.round(S.size*0.75)])].filter(k=>BA.slope[k]);
+      t1 += `<div style="margin-top:6px;font-size:12.5px;"><b>② 已刮部分对剩余部分的影响</b>（斜率：0=互不影响；−1=每本总额固定，刮得多剩得少）：</div>` + tbl(['已刮张数','斜率 b','误差','解读'], pick.map(k=>{ const c=BA.slope[k]; const z0=c.se?c.b/c.se:0, z1=c.se?(c.b+1)/c.se:0; const rd = c.se==null?'':(Math.abs(z0)<2?'与0无差别（独立）':(Math.abs(z1)<2?'接近−1（总额固定）':(c.b<0?'为负，介于两者之间':'为正，刮得多的本后面也多'))); return tr([k, c.b.toFixed(2), c.se==null?'':'±'+c.se.toFixed(2), rd]); }));
+    } else t1 += `<div style="margin-top:6px;font-size:12px;color:var(--muted);">本数不足5本，暂时算不了“已刮对剩余”的关系。</div>`;
+    // 计算器
+    const calc=`<div style="margin-top:10px;padding:8px;border:1px dashed #555;border-radius:8px;"><div style="font-size:12.5px;font-weight:700;margin-bottom:6px;">🧮 剩余奖金估算</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;"><div class="field" style="flex:1 1 110px;margin:0;"><label>这本已刮张数</label><input type="number" id="statCalcK" min="0" max="${S.size-1}" placeholder="如 10"></div>
+      <div class="field" style="flex:1 1 110px;margin:0;"><label>已刮出的奖金合计（元）</label><input type="number" id="statCalcS" min="0" placeholder="如 90"></div></div><div id="statCalcOut" style="font-size:12.5px;margin-top:6px;color:var(--muted);">填入后自动计算</div></div>`;
+    h += sec('💰 每本总金额（按金额算，不依赖张数）', `<div style="font-size:11.5px;color:var(--muted);margin-bottom:6px;">每本总奖金 = 这本所有中奖票奖金之和；没中的是 0 元，所以只要中奖票扫全就算得准。均值来自上面 ${BA.n} 本的历史数据。</div>` + b1 + t1 + calc, true);
+  }
   // 2 奖金分布
   const mx = Math.max(...S.dist.map(d=>d.n));
   h += sec('🎯 奖金分布', tbl(['奖金','张数','占比','','奖金合计','占总奖金'], S.dist.map(d=>tr([d.prize?statsMoney(d.prize)+'元':'未中', d.n, statsPct(d.share), bar(d.n,mx,d.prize?PUR:'#555'), statsMoney(d.sum), statsPct(d.sumShare)]))), true);
@@ -5921,6 +5975,17 @@ function renderScanStats(S){
     box.innerHTML = tbl(['本（编号1-2-3）','中奖张号','中奖','中奖率','奖金','回报率','最大奖','没中的张号'], list.slice(0,lim).map(b=>tr([b.book, b.wins.map(q=>q).join(',')+(b.dup?`<span style="color:#f59e0b;">(重${b.dup})</span>`:'')+(b.out?`<span style="color:#ef4444;">(范围外${b.out})</span>`:''), `${b.k}/${b.n}`, statsPct(b.rate), statsMoney(b.sum), statsPct(b.rtp), statsMoney(b.max), (S.winnersOnly? b.loses : b.loses.concat(b.unk.map(q=>q+'?'))).join(',')])), {min:600})
       + (list.length>lim?`<div style="font-size:11px;color:var(--muted);margin-top:4px;">仅显示前${lim}本，共${list.length}本；完整列表请“导出统计Excel”。</div>`:'');
   };
+  const calcRun = ()=>{
+    const out=document.getElementById('statCalcOut'), BA=S.bookAmt; if(!out||!BA) return;
+    const k=parseInt(document.getElementById('statCalcK').value,10), Sx=parseFloat(document.getElementById('statCalcS').value);
+    if(!(k>=0) || !(Sx>=0) || k>=S.size){ out.textContent='填入已刮张数（0~'+(S.size-1)+'）和已刮出的奖金合计。'; return; }
+    const left=S.size-k, indep=left*BA.perTicket, fixed=Math.max(0,BA.mean-Sx);
+    let reg=null, c=null; for(let d=0; d<S.size && !c; d++){ c=BA.slope[k+d]||BA.slope[k-d]||null; if(c && Math.abs(c.k-k)>2) c=null; }
+    if(c && c.se!=null){ reg=Math.max(0,c.a+c.b*Sx); }
+    const row=(name,v,note)=>`<div style="margin:2px 0;color:#ddd;">${name}：剩余期望 <b>${statsMoney(v)}元</b>，平均每张 ${statsMoney(v/left)}元，回报率 ${statsPct(v/(left*S.amount))} <span style="color:var(--muted);font-size:11px;">${note||''}</span></div>`;
+    out.innerHTML = row('若每张独立', indep, '剩 '+left+' 张 × 历史每张均值') + row('若每本总额固定', fixed, '= 历史均值 '+statsMoney(BA.mean)+' − 已刮 '+statsMoney(Sx)) + (reg!=null? row(BA.n>=20?'按历史数据回归（推荐）':'按历史数据回归（本数少，仅参考）', reg, `斜率 ${c.b.toFixed(2)}±${c.se.toFixed(2)}；${BA.n}本`) : '<div style="color:var(--muted);font-size:11.5px;">本数不足5本，暂不能给出按历史回归的估计。</div>');
+  };
+  ['statCalcK','statCalcS'].forEach(id=>{ const e=document.getElementById(id); if(e) e.addEventListener('input', calcRun); });
   const ss = document.getElementById('statBookSort'); if(ss){ ss.addEventListener('change', drawBooks); drawBooks(); }
 }
 function runScanStats(){
@@ -5940,6 +6005,7 @@ function exportScanStats(){
   add('总览', [['用了记录条数',S.n],['总票数',o.n],['每本张数',S.size],['面值',S.amount],['总成本',o.cost],['总奖金',o.total],['净盈亏',o.net],['回报率',o.rtp],['回报率95%下限',o.rtpLo],['回报率95%上限',o.rtpHi],['中奖张数',o.nWin],['中奖率',o.winRate],['平均每张奖金',o.avgPrize],['平均每中奖张',o.avgWinPrize],['最大奖',o.maxPrize],['回本张数',o.breakeven],['本数',o.nBooks]].map(([k,v])=>({指标:k,数值:v})));
   add('奖金分布', S.dist.map(d=>({奖金:d.prize,张数:d.n,占比:d.share,奖金合计:d.sum,占总奖金:d.sumShare})));
   add('按本', S.books.map(b=>({本:b.book,批次:b.batch,组:b.grp,本号:b.no,中奖张数:b.k,总张数:b.n,中奖率:b.rate,奖金合计:b.sum,回报率:b.rtp,最大奖:b.max,中奖张号:b.wins.join(','),没中张号:b.loses.join(','),重复:b.dup,范围外:b.out})));
+  if(S.bookAmt) add('每本总金额', S.books.map((b,i)=>({本:b.book,总奖金:b.sum,回报率:b.rtp})).concat([{本:'均值',总奖金:S.bookAmt.mean,回报率:S.bookAmt.rtp},{本:'标准差',总奖金:S.bookAmt.sd,回报率:''},{本:'独立假设下标准差',总奖金:S.bookAmt.sdInd,回报率:''}]));
   add('按张号', S.positions.map(x=>({张号:x.pos,已扫张数:x.n,中奖张数:x.k,中奖率:x.rate,中奖率区间下限:x.ci[0],中奖率区间上限:x.ci[1],平均奖金:x.avg,回报率:x.rtp})));
   add('按批次', S.byBatch.map(x=>({批次:x.key,张数:x.n,本数:x.books,中奖率:x.rate,奖金合计:x.sum,回报率:x.rtp})));
   add('按组', S.byGrp.map(x=>({组:x.key,张数:x.n,本数:x.books,中奖率:x.rate,奖金合计:x.sum,回报率:x.rtp})));
