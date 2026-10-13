@@ -5716,6 +5716,11 @@ function scanComputeStats(recs, opt){
   const modeVal0 = statsMode(all.map(o=>o.s[0])), modeVal1 = statsMode(all.map(o=>o.s[1]));
   const cnt0 = {}, cnt1 = {}; all.forEach(o=>{ cnt0[o.s[0]]=(cnt0[o.s[0]]||0)+1; cnt1[o.s[1]]=(cnt1[o.s[1]]||0)+1; });
   const rareMax = Math.max(2, Math.floor(all.length*0.02));
+  // 每本的张号范围：优先用你填的“每本张数/起始张号”，否则按已见张号自动（取位数正常的张号的最小~最大）
+  const okPos = all.filter(o=>o.s[3] && o.s[3].length===modeLen[3] && isFinite(o.pos)).map(o=>o.pos);
+  const autoStart = okPos.length ? Math.min(...okPos) : 0, autoSize = okPos.length ? Math.max(...okPos)-autoStart+1 : 0;
+  const pStart0 = (opt.start!=null && opt.start!=='' && isFinite(opt.start)) ? +opt.start : autoStart;
+  const size0 = opt.size>0 ? opt.size : autoSize;
   const bookCnt = {}; all.forEach(o=>{ if(o.s[2]) bookCnt[o.book]=(bookCnt[o.book]||0)+1; });
   const bookNos = [...new Set(all.map(o=>o.s[2]).filter(x=>/^\d+$/.test(x)).map(Number))].sort((a,b)=>a-b);
   all.forEach(o=>{
@@ -5730,6 +5735,7 @@ function scanComputeStats(recs, opt){
         if(near>200) why.push(`本号${o.s[2]}孤立（离最近的本号差${near}）`);
       }
       if(o.s[3].length!==modeLen[3] || !isFinite(o.pos)) why.push(`张号(${o.s[3]})位数异常`);
+      else if(size0 && (o.pos<pStart0 || o.pos>=pStart0+size0)) why.push(`张号${o.pos}超出本内范围(${pStart0}~${pStart0+size0-1})`);
     }
     o.bad = why;
   });
@@ -5758,8 +5764,7 @@ function scanComputeStats(recs, opt){
   // —— 按本 ——
   const pos = data.filter(o=>isFinite(o.pos)).map(o=>o.pos);
   const pMin = pos.length? Math.min(...pos):0, pMax = pos.length? Math.max(...pos):0;
-  const size = opt.size>0 ? opt.size : (pos.length ? pMax-pMin+1 : 0);
-  const pStart = opt.start!=null && opt.start!=='' && isFinite(opt.start) ? +opt.start : pMin;
+  const size = size0, pStart = pStart0;
   S.size=size; S.pStart=pStart;
   const bm = {};
   data.forEach(o=>{ (bm[o.book]=bm[o.book]||{book:o.book, batch:o.batch, grp:o.grp, no:o.s[2], list:[]}).list.push(o); });
@@ -5783,7 +5788,8 @@ function scanComputeStats(recs, opt){
   S.winHist = {books: fullish.length, bins:Object.keys(hist).map(Number).sort((a,b)=>a-b).map(k=>({k, n:hist[k]}))};
   // —— 按张号 ——
   const pm = {}; data.forEach(o=>{ if(!isFinite(o.pos)) return; (pm[o.pos]=pm[o.pos]||{pos:o.pos,n:0,k:0,sum:0,cost:0}); const x=pm[o.pos]; x.n++; if(o.win)x.k++; x.sum+=o.prize; x.cost+=o.amount; });
-  S.positions = Object.values(pm).sort((a,b)=>a.pos-b.pos).map(x=>({...x, rate:x.k/x.n, avg:x.sum/x.n, rtp:x.cost?x.sum/x.cost:0}));
+  if(size) for(let q=pStart;q<pStart+size;q++) if(!pm[q]) pm[q]={pos:q,n:0,k:0,sum:0,cost:0};
+  S.positions = Object.values(pm).sort((a,b)=>a.pos-b.pos).map(x=>({...x, rate:x.n?x.k/x.n:0, avg:x.n?x.sum/x.n:0, rtp:x.cost?x.sum/x.cost:0, ci:statsWilson(x.k,x.n)}));
   // 张号过稀（过长异常位置）不进卡方：只取在合理范围 [pStart, pStart+size)
   const inRange = S.positions.filter(x=>!size || (x.pos>=pStart && x.pos<pStart+size));
   S.posHomog = statsHomog(inRange.map(x=>({n:x.n,k:x.k})));
@@ -5867,8 +5873,11 @@ function renderScanStats(S){
   if(S.posSpear) posBody += `<div style="margin-bottom:4px;">张号与奖金大小的相关（Spearman）：ρ=${S.posSpear.rho.toFixed(3)}，${statsPtxt(S.posSpear.p)} ${statsVerdict(S.posSpear.p, S.posSpear.rho>0?'张号越靠后奖金越大':'张号越靠前奖金越大','无明显趋势')}</div>`;
   if(S.halves){ const hv=S.halves; posBody += `<div style="font-size:12px;color:var(--muted);margin-bottom:6px;">前半本(${hv.first.n}张)中奖率 ${statsPct(hv.first.rate)}/回报 ${statsPct(hv.first.rtp)}；后半本(${hv.second.n}张) ${statsPct(hv.second.rate)}/${statsPct(hv.second.rtp)}；奇数张(${hv.odd.n}) ${statsPct(hv.odd.rate)}/${statsPct(hv.odd.rtp)}；偶数张(${hv.even.n}) ${statsPct(hv.even.rate)}/${statsPct(hv.even.rtp)}</div>`; }
   const pmx = Math.max(...S.positions.map(x=>x.rate), 0.0001);
-  posBody += tbl(['张号','张数','中奖','中奖率','','平均奖金','回报率'], S.positions.map(x=>tr([x.pos, x.n, x.k, statsPct(x.rate), bar(x.rate,pmx), statsMoney(x.avg), statsPct(x.rtp)])));
-  h += sec('🔢 按张号（编号4=本内页号）', posBody);
+  const ranked = S.positions.filter(x=>x.n>=3);
+  if(ranked.length>=2){ const byR=[...ranked].sort((a,b)=>b.rate-a.rate||b.avg-a.avg), byA=[...ranked].sort((a,b)=>b.avg-a.avg);
+    posBody += `<div style="font-size:12px;margin-bottom:6px;">（只比较≥3张的张号）中奖率最高：${byR.slice(0,3).map(x=>`<b>${x.pos}号</b> ${statsPct(x.rate)}（${x.k}/${x.n}）`).join('、')}${byR[0].rate===byR[byR.length-1].rate?'（所有张号中奖率一样）':'；最低：'+byR.filter(x=>!byR.slice(0,3).includes(x)).slice(-3).reverse().map(x=>`<b>${x.pos}号</b> ${statsPct(x.rate)}（${x.k}/${x.n}）`).join('、')}；平均奖金最高：${byA.slice(0,3).map(x=>`<b>${x.pos}号</b> ${statsMoney(x.avg)}元`).join('、')}</div>`; }
+  posBody += tbl(['张号','已扫','中奖','中奖率','','95%区间','平均奖金','回报率'], S.positions.map(x=>tr([`<b>${x.pos}</b>`+(S.size&&(x.pos<S.pStart||x.pos>=S.pStart+S.size)?'<span style="color:#ef4444;font-size:10px;">范围外</span>':''), x.n, x.k, x.n? `<b>${statsPct(x.rate)}</b>`+(x.n<3?'<span style="color:#f59e0b;font-size:10px;">样本少</span>':'') : '<span style="color:#888;">未扫</span>', bar(x.rate,pmx), x.n? `${statsPct(x.ci[0],0)}~${statsPct(x.ci[1],0)}`:'', x.n?statsMoney(x.avg):'', x.n?statsPct(x.rtp):''])));
+  h += sec(`🔢 各张号（编号4）中奖率${S.size?`：${S.pStart}~${S.pStart+S.size-1}号，每本${S.size}张`:''}`, posBody, true);
   // 5 本内规律
   const ad=S.adj; let rule = '';
   rule += `<div>相邻张（同一本里张号连续的两张）共 ${ad.pairs} 对：`;
@@ -5917,7 +5926,7 @@ function exportScanStats(){
   add('总览', [['统计张数',S.n],['总成本',o.cost],['总奖金',o.total],['净盈亏',o.net],['回报率',o.rtp],['回报率95%下限',o.rtpLo],['回报率95%上限',o.rtpHi],['中奖张数',o.nWin],['中奖率',o.winRate],['平均每张奖金',o.avgPrize],['平均每中奖张',o.avgWinPrize],['最大奖',o.maxPrize],['回本张数',o.breakeven],['本数',o.books]].map(([k,v])=>({指标:k,数值:v})));
   add('奖金分布', S.dist.map(d=>({奖金:d.prize,张数:d.n,占比:d.share,奖金合计:d.sum,占总奖金:d.sumShare})));
   add('按本', S.books.map(b=>({本:b.book,批次:b.batch,组:b.grp,本号:b.no,已扫张数:b.n,最小张号:b.pMin,最大张号:b.pMax,完整度:b.complete,重复张号数:b.dup,中奖张数:b.k,中奖率:b.rate,奖金合计:b.sum,回报率:b.rtp,最大奖:b.max,缺的张号:b.missing.join(',')})));
-  add('按张号', S.positions.map(x=>({张号:x.pos,张数:x.n,中奖张数:x.k,中奖率:x.rate,平均奖金:x.avg,回报率:x.rtp})));
+  add('按张号', S.positions.map(x=>({张号:x.pos,已扫张数:x.n,中奖张数:x.k,中奖率:x.rate,中奖率区间下限:x.ci[0],中奖率区间上限:x.ci[1],平均奖金:x.avg,回报率:x.rtp})));
   add('按批次', S.byBatch.map(x=>({批次:x.key,张数:x.n,本数:x.books,中奖率:x.rate,奖金合计:x.sum,回报率:x.rtp})));
   add('按组', S.byGrp.map(x=>({组:x.key,张数:x.n,本数:x.books,中奖率:x.rate,奖金合计:x.sum,回报率:x.rtp})));
   add('按日期', S.byDay.map(x=>({日期:x.day,张数:x.n,中奖张数:x.k,中奖率:x.rate,奖金:x.sum,回报率:x.rtp})));
