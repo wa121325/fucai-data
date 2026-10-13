@@ -112,6 +112,12 @@ RL_DATASET_SLUG = 'fucai-rl-cache'
 RL_DATASET_ID   = f'megskfdbbskeb/{RL_DATASET_SLUG}'
 RL_LOCAL_DIR    = '/kaggle/working/rl_cache'
 RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
+# ── 开关：是否把 RL 模型保存到 Kaggle Dataset(fucai-rl-cache) ──
+#   True（默认）= 每次运行后推送，保留/累积模型；False = 不推送，不保留（每次从头训练）
+#   也可用环境变量 FUCAI_RL_SAVE_CACHE=0/false 临时关闭，不用改代码
+RL_SAVE_CACHE = False
+if os.environ.get('FUCAI_RL_SAVE_CACHE', '').strip().lower() in ('0', 'false', 'off', 'no'):
+    RL_SAVE_CACHE = False
 WINDOW = 50; SEQ_LEN = 20
 
 # 3D推荐注数。候选池是每位Top3，最多能组合出 3×3×3=27 种，
@@ -127,7 +133,7 @@ D3_POOL_N = 5
 # 按概率采样的注数。之前跟 D3_N_BETS(确定性推荐注数)共用一个数字，
 # 想让采样生成得比网页显示的多(比如生成30注、只显示12注自己再参考剩下的)，
 # 改这里就行，不用碰 D3_N_BETS。
-D3_SAMPLE_N = 30
+D3_SAMPLE_N = 12
 # 网页上实际展示的采样注数（固定跟左边确定性推荐对齐显示12注）。
 # D3_SAMPLE_N 可以设得比这个大，多出来的会打印在日志里，不会显示在网页。
 D3_SAMPLE_DISPLAY_N = 12
@@ -3283,7 +3289,9 @@ print(f"\n{'='*50}\n保存PPO模型…\n{'='*50}")
 # carry_over_result 会在结果里标 skipped=True；只要有一个游戏真的训练过，
 # 就不算"全部跳过"，因为那个游戏确实产生了要保存的新内容。
 _all_skipped = bool(rl_results) and all(r.get('skipped') for r in rl_results.values())
-if _all_skipped:
+if not RL_SAVE_CACHE:
+    print("  [开关] RL_SAVE_CACHE=False：不保存RL模型到Kaggle Dataset，本次不推送。")
+elif _all_skipped:
     print("  本次全部游戏都无新数据、跳过了训练，本地也没有产生任何新的模型文件，"
           "跳过推送——不做无意义的Dataset版本更新，也避免用不完整的本地目录覆盖已保存的内容。")
 else:
