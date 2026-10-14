@@ -745,7 +745,10 @@ configs = {
                     'big':lambda r:sum(1 for x in r['digits'] if x>=5),
                     'span_grp':lambda r:_3d_span_grp(r['digits']),
                     'road_dom':lambda r:_3d_road_dom(r['digits']),
-                    'arith':lambda r:_3d_arith(r['digits'])}),
+                    'arith':lambda r:_3d_arith(r['digits']),
+                    # 细分目标：放在最后——第一个目标(sum_grp)才是保存给RL的主权重，顺序不能变
+                    'sum_exact':lambda r:sum(r['digits']),
+                    'span_exact':lambda r:max(r['digits'])-min(r['digits'])}),
     'ssq': (fssq, {'odd':lambda r:sum(1 for x in r['red'] if x%2!=0),
                     'sum_grp':lambda r:0 if sum(r['red'])<70 else(1 if sum(r['red'])<100 else 2),
                     'ac_grp':lambda r:_ssq_ac_grp(r['red']),
