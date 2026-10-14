@@ -3177,7 +3177,7 @@ def dl_staleness(dl_updated_at, records):
 # ══════════════════════════════════════════════════════
 #  和值/跨度加权的 12 注推荐
 #   原来：每位取候选，按"三位各自概率的乘积"(联合概率)给号码打分，挑出 12 注。
-#   现在：打分再乘上两个维度——号码的和值倾向、跨度倾向（来自 ML、DL 的精确和值/精确跨度预测），
+#   现在：打分再乘上两个维度——号码的和值倾向、跨度倾向，
 #        得分最高的排第 1 注，依次往下。其余逻辑（候选池、轮转保证每个候选露面、凑满12注）不变。
 #   倾向 = ML/DL 给该和值(跨度)的概率 ÷ 随机概率，限制在 [LIFT_LO, LIFT_HI] 避免个别罕见值的噪声概率把号码带偏；
 #   ML、DL 都没有和值/跨度预测时，原样保留原来的 12 注。
@@ -3190,7 +3190,7 @@ _SS_QSPAN = np.bincount(_SS_SPAN, minlength=10) / 1000.0
 _SS_BANDS = {'sum': [(0, 9), (10, 17), (18, 27)], 'span': [(0, 3), (4, 6), (7, 9)]}
 
 
-def _ss_vec(kind, n, q, ml_pred, dl_game):
+def _ss_vec(kind, n, q, ml_pred, dl_game, rl_vec=None):
     """ML、DL 各自给出的和值(跨度)概率向量，取平均；精确预测优先，没有就用 3 档预测按档内随机比例展开。返回 (向量或None, 来源列表)"""
     vs, used = [], []
     for src, name in (('ml', 'ML'), ('dl', 'DL')):
@@ -3203,14 +3203,20 @@ def _ss_vec(kind, n, q, ml_pred, dl_game):
             v = np.zeros(n)
             for b, (lo, hi) in enumerate(_SS_BANDS[kind]): v[lo:hi + 1] = c[b] * q[lo:hi + 1] / q[lo:hi + 1].sum()
         vs.append(v / v.sum()); used.append(name)
+    if rl_vec is not None: vs.append(rl_vec / rl_vec.sum()); used.append('RL')
     return (np.mean(vs, axis=0), used) if vs else (None, [])
 
 
 def rerank_3d_by_sum_span(result, ml_pred, dl_game):
     pp = result.get('rl_pos_probs')
     if not pp or not result.get('ppo_groups'): return
-    pv_sum, u1 = _ss_vec('sum', 28, _SS_QSUM, ml_pred, dl_game)
-    pv_span, u2 = _ss_vec('span', 10, _SS_QSPAN, ml_pred, dl_game)
+    # RL 自己学到的逐位概率 → 推出它对各和值/跨度的概率（1000 个组合的联合概率按和值/跨度汇总）
+    _pp = [np.asarray(p, dtype=np.float64) for p in pp]
+    _J = _pp[0][_D3_ALL[:, 0]] * _pp[1][_D3_ALL[:, 1]] * _pp[2][_D3_ALL[:, 2]]
+    rl_sum = np.bincount(_SS_SUM, weights=_J, minlength=28)
+    rl_span = np.bincount(_SS_SPAN, weights=_J, minlength=10)
+    pv_sum, u1 = _ss_vec('sum', 28, _SS_QSUM, ml_pred, dl_game, rl_sum)
+    pv_span, u2 = _ss_vec('span', 10, _SS_QSPAN, ml_pred, dl_game, rl_span)
     if pv_sum is None and pv_span is None: return
     lift_sum = np.clip(pv_sum / _SS_QSUM, SUMSPAN_LIFT_LO, SUMSPAN_LIFT_HI) if pv_sum is not None else np.ones(28)
     lift_span = np.clip(pv_span / _SS_QSPAN, SUMSPAN_LIFT_LO, SUMSPAN_LIFT_HI) if pv_span is not None else np.ones(10)
