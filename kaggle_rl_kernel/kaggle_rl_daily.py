@@ -115,7 +115,7 @@ RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
 # ── 开关：是否把 RL 模型保存到 Kaggle Dataset(fucai-rl-cache) ──
 #   True（默认）= 每次运行后推送，保留/累积模型；False = 不推送，不保留（每次从头训练）
 #   也可用环境变量 FUCAI_RL_SAVE_CACHE=0/false 临时关闭，不用改代码
-RL_SAVE_CACHE = False
+RL_SAVE_CACHE = True
 if os.environ.get('FUCAI_RL_SAVE_CACHE', '').strip().lower() in ('0', 'false', 'off', 'no'):
     RL_SAVE_CACHE = False
 WINDOW = 50; SEQ_LEN = 20
@@ -2479,7 +2479,7 @@ def run_3d_daily(records, ml_pred, prev_result=None):
                     target_kl=0.03,
                     verbose=0, device='cpu')
         model, _best, _hist = train_with_early_stop(
-            model, 200000, lambda: _eval_holdout(model), '3D首训',
+            model, 100000, lambda: _eval_holdout(model), '3D首训',
             n_chunks=16, patience=6, reset_timesteps=True, warmup_chunks=10,
             baseline_is_real=False)
     else:
@@ -3173,6 +3173,68 @@ def dl_staleness(dl_updated_at, records):
     return n_new, run_bj.strftime('%Y-%m-%d %H:%M')
 
 
+
+# ══════════════════════════════════════════════════════
+#  和值/跨度加权的 12 注推荐
+#   原来：每位取候选，按"三位各自概率的乘积"(联合概率)给号码打分，挑出 12 注。
+#   现在：打分再乘上两个维度——号码的和值倾向、跨度倾向（来自 ML、DL 的精确和值/精确跨度预测），
+#        得分最高的排第 1 注，依次往下。其余逻辑（候选池、轮转保证每个候选露面、凑满12注）不变。
+#   倾向 = ML/DL 给该和值(跨度)的概率 ÷ 随机概率，限制在 [LIFT_LO, LIFT_HI] 避免个别罕见值的噪声概率把号码带偏；
+#   ML、DL 都没有和值/跨度预测时，原样保留原来的 12 注。
+# ══════════════════════════════════════════════════════
+SUMSPAN_LIFT_LO, SUMSPAN_LIFT_HI = 0.5, 2.0
+_SS_SUM = _D3_ALL.sum(axis=1)
+_SS_SPAN = _D3_ALL.max(axis=1) - _D3_ALL.min(axis=1)
+_SS_QSUM = np.bincount(_SS_SUM, minlength=28) / 1000.0
+_SS_QSPAN = np.bincount(_SS_SPAN, minlength=10) / 1000.0
+_SS_BANDS = {'sum': [(0, 9), (10, 17), (18, 27)], 'span': [(0, 3), (4, 6), (7, 9)]}
+
+
+def _ss_vec(kind, n, q, ml_pred, dl_game):
+    """ML、DL 各自给出的和值(跨度)概率向量，取平均；精确预测优先，没有就用 3 档预测按档内随机比例展开。返回 (向量或None, 来源列表)"""
+    vs, used = [], []
+    for src, name in (('ml', 'ML'), ('dl', 'DL')):
+        if src == 'ml': mm = (ml_pred or {}).get('models', {}) or {}; get = lambda k: ((mm.get(k) or {}).get('prediction') or {}).get('probs')
+        else: get = lambda k: ((dl_game or {}).get(k) or {}).get('probs')
+        v = _vote_probs(get(kind + '_exact'), n)
+        if v is None:
+            c = _vote_probs(get(kind + '_grp'), 3)
+            if c is None: continue
+            v = np.zeros(n)
+            for b, (lo, hi) in enumerate(_SS_BANDS[kind]): v[lo:hi + 1] = c[b] * q[lo:hi + 1] / q[lo:hi + 1].sum()
+        vs.append(v / v.sum()); used.append(name)
+    return (np.mean(vs, axis=0), used) if vs else (None, [])
+
+
+def rerank_3d_by_sum_span(result, ml_pred, dl_game):
+    pp = result.get('rl_pos_probs')
+    if not pp or not result.get('ppo_groups'): return
+    pv_sum, u1 = _ss_vec('sum', 28, _SS_QSUM, ml_pred, dl_game)
+    pv_span, u2 = _ss_vec('span', 10, _SS_QSPAN, ml_pred, dl_game)
+    if pv_sum is None and pv_span is None: return
+    lift_sum = np.clip(pv_sum / _SS_QSUM, SUMSPAN_LIFT_LO, SUMSPAN_LIFT_HI) if pv_sum is not None else np.ones(28)
+    lift_span = np.clip(pv_span / _SS_QSPAN, SUMSPAN_LIFT_LO, SUMSPAN_LIFT_HI) if pv_span is not None else np.ones(10)
+    pos_probs = [np.asarray(p, dtype=np.float64) for p in pp]
+    def score(c):
+        return pos_probs[0][c[0]] * pos_probs[1][c[1]] * pos_probs[2][c[2]] * lift_sum[sum(c)] * lift_span[max(c) - min(c)]
+    pool = [[(int(d), float(p[d])) for d in np.argsort(p)[::-1][:D3_POOL_N]] for p in pos_probs]
+    picked, seen = [], set()
+    for i in range(D3_POOL_N):          # 轮转：保证每位的候选都至少露面一次（原逻辑）
+        c = [pool[0][i][0], pool[1][i][0], pool[2][i][0]]
+        picked.append((c, score(c))); seen.add(tuple(c))
+    allc = sorted((([b, s, g], score([b, s, g])) for b, _ in pool[0] for s, _ in pool[1] for g, _ in pool[2]), key=lambda x: -x[1])
+    for c, sc in allc:
+        if len(picked) >= D3_N_BETS: break
+        if tuple(c) not in seen: picked.append((c, sc)); seen.add(tuple(c))
+    picked.sort(key=lambda x: -x[1])
+    groups = [c for c, _ in picked]
+    result['ppo_groups'] = groups; result['ppo_pred'] = groups[0]
+    top_s = [int(i) for i in np.argsort(-lift_sum, kind='stable')[:3]]; top_k = [int(i) for i in np.argsort(-lift_span, kind='stable')[:3]]
+    _txt = (f"；12注已按和值/跨度加权排序（{'+'.join(sorted(set(u1 + u2)))}的精确和值/跨度预测；"
+            f"和值倾向{top_s}、跨度倾向{top_k}），第1注得分最高")
+    if '已按和值/跨度加权排序' not in (result.get('note') or ''): result['note'] = (result.get('note') or '') + _txt
+    print(f"  [和值/跨度加权] RL推荐12注按和值/跨度加权重排：{groups}  和值倾向{top_s} 跨度倾向{top_k}（来源 {'+'.join(sorted(set(u1+u2)))}）")
+
 def build_consensus(game, records, ml_pred, dl_game, result, dl_note=None):
     """给一个游戏的RL结果挂上共识投票。result 里需要有 rl_scores(ssq/kl8) 或 rl_pos_probs(3d)。失败不影响主结果。"""
     src = vote_source_targets(game, ml_pred, dl_game)
@@ -3273,6 +3335,9 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
                     print(f"  [共识投票] {game}: DL有效（运行于{_run_bj}，之后新开{_nn}期）")
             else:
                 _dl_note = "未获取到DL结果"
+            if game == '3d':
+                try: rerank_3d_by_sum_span(_r, ml_pred, _dl_g)
+                except Exception as _e: print(f"  [和值/跨度加权] 失败，保留原12注: {_e}")
             _cons = build_consensus(game, records, ml_pred, _dl_g, _r, _dl_note)
             if _cons:
                 _r['consensus'] = _cons
