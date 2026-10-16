@@ -202,6 +202,73 @@ def _repeat_neighbor(cur, prev):
 
 
 # ══════════════════════════════════════════════════════
+#  快乐8：近期热点 / 重号 / 斜连（ML、DL、RL 三个脚本共用，务必保持完全一致）
+#   重号 = 本期号码里，上期也开出的球数
+#   斜连 = 本期号码里，是上期号码±1邻号（且上期没开出）的球数（走势图上的斜连线）
+#   热点 = 本期号码里，落在"近30期出现次数最多的20个球"里的球数
+# ══════════════════════════════════════════════════════
+def _kl8_nb(prev):
+    """上期号码的±1邻号（上期开出的球本身除外）= 本期"斜连"候选球"""
+    nb = set()
+    for x in prev:
+        if x > 1: nb.add(x - 1)
+        if x < 80: nb.add(x + 1)
+    return nb - set(prev)
+
+def _kl8_hot_top(draws, k=20):
+    """给定若干期开奖，返回出现次数最多的k个球（次数相同取小号，保证确定性）"""
+    cnt = Counter(n for r in draws for n in r['numbers'])
+    return set(n for n, _ in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:k])
+
+def _kl8_grp_rep(x):  return 0 if x <= 4 else (1 if x <= 5 else 2)    # 重号个数：≤4 / 5 / ≥6（三档各约40%/23%/37%）
+def _kl8_grp_diag(x): return 0 if x <= 5 else (1 if x <= 7 else 2)    # 斜连个数：≤5 / 6-7 / ≥8（约29%/38%/33%）
+def _kl8_grp_hot(x):  return 0 if x <= 4 else (1 if x <= 5 else 2)    # 热点命中：≤4 / 5 / ≥6（约40%/24%/36%）
+
+def _kl8_ctx_targets(records, t):
+    """第t期开奖的 重号/斜连/热点 三个分档目标（只用 records[:t] 的信息）。t<1 返回 None"""
+    if t < 1 or t >= len(records): return None
+    prev = set(records[t-1]['numbers']); cur = set(records[t]['numbers'])
+    hot = _kl8_hot_top(records[max(0, t-30):t])
+    return {'repeat_grp': _kl8_grp_rep(len(cur & prev)),
+            'diag_grp':   _kl8_grp_diag(len(cur & _kl8_nb(prev))),
+            'hot_grp':    _kl8_grp_hot(len(cur & hot))}
+
+def _kl8_extra_feats(w):
+    """快乐8 重号/斜连/热点 特征。w = 截止到上一期的窗口（最后一条是已开出的最新一期）"""
+    f = {}
+    n = len(w)
+    sets = [set(x['numbers']) for x in w]
+    reps, dgs = [], []
+    for i in range(1, n):
+        reps.append(len(sets[i] & sets[i-1])); dgs.append(len(sets[i] & _kl8_nb(sets[i-1])))
+    for k in (3, 5, 10, 20, 50):
+        f[f'rep_m{k}'] = float(np.mean(reps[-k:])) if reps else 5.0
+        f[f'dg_m{k}']  = float(np.mean(dgs[-k:]))  if dgs  else 6.6
+    f['rep_last'] = float(reps[-1]) if reps else 5.0
+    f['dg_last']  = float(dgs[-1])  if dgs  else 6.6
+    f['rep_trend'] = f['rep_m5'] - f['rep_m20']
+    f['dg_trend']  = f['dg_m5']  - f['dg_m20']
+    prev = sets[-1] if sets else set()
+    top30 = _kl8_hot_top(w[-30:])
+    f['hot_prev_in30']     = float(len(prev & top30))               # 上期开出的球里有几个是近30期热点
+    f['hot_diagcand_in30'] = float(len(_kl8_nb(prev) & top30))      # 斜连候选球里有几个是热点
+    hh = []
+    for t in range(max(30, n - 10), n):                              # 最近10期，每期各自"当时的热点"命中几个
+        hh.append(len(sets[t] & _kl8_hot_top(w[t-30:t])))
+    f['hot_hit_m10'] = float(np.mean(hh)) if hh else 5.0
+    f['hot_hit_m5']  = float(np.mean(hh[-5:])) if hh else 5.0
+    cnt30 = Counter(x for r in w[-30:] for x in r['numbers'])
+    arr = np.array([cnt30.get(b, 0) for b in range(1, 81)], dtype=np.float64)
+    f['hot_top10_share'] = float(np.sort(arr)[-10:].sum() / max(arr.sum(), 1.0))   # 前10热球占全部出现次数的比例
+    f['hot_cnt_std'] = float(arr.std())
+    f['hot_cnt_max'] = float(arr.max())
+    cnt5 = Counter(x for r in w[-5:] for x in r['numbers'])
+    f['hot5_ge3']     = float(sum(1 for v in cnt5.values() if v >= 3))                     # 近5期出现≥3次的"超热球"个数
+    f['hot5_in_prev'] = float(sum(1 for b, v in cnt5.items() if v >= 2 and b in prev))      # 近5期出现≥2次且上期又开出的球
+    return f
+
+
+# ══════════════════════════════════════════════════════
 #  GitHub 工具
 # ══════════════════════════════════════════════════════
 def gh_raw(path):
@@ -447,6 +514,8 @@ def fkl8(records, idx):
     prev = w[-1]['numbers'] if w else []
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
+    # 重号/斜连/近期热点 特征（三个脚本共用同一份 _kl8_extra_feats）
+    f.update(_kl8_extra_feats(w))
 
     return f
 
@@ -473,16 +542,25 @@ def build_predict_seq(records, feat_fn, seq_len=SEQ_LEN):
     return np.array([seq], dtype=np.float32)
 
 
+_FEAT_ROW_CACHE = {}   # 同一个游戏的每个目标都要重算一遍同样的特征，缓存后只算一次（快乐8目标变多了，避免训练时间翻倍）
+
+def _feat_row(feat_fn, records, j):
+    key = (feat_fn.__name__, id(records), len(records), j)
+    if key not in _FEAT_ROW_CACHE:
+        feat = feat_fn(records, j)
+        _FEAT_ROW_CACHE[key] = None if feat is None else list(feat.values())
+    return _FEAT_ROW_CACHE[key]
+
 def build_seq_dataset(records, feat_fn, target_fn, seq_len=SEQ_LEN):
     X_list, y_list = [], []
     for i in range(seq_len, len(records)):
         seq = []; valid = True
         for j in range(i-seq_len, i):
-            feat = feat_fn(records, j)
+            feat = _feat_row(feat_fn, records, j)
             if feat is None: valid=False; break
-            seq.append(list(feat.values()))
+            seq.append(feat)
         if not valid: continue
-        tgt = target_fn(records[i])
+        tgt = target_fn(records[i], records, i) if getattr(target_fn, 'needs_ctx', False) else target_fn(records[i])
         if tgt is None: continue
         X_list.append(seq); y_list.append(tgt)
     if not X_list: return None, None
@@ -738,6 +816,14 @@ def _kl8_range_grp(nums):
     sn=sorted(nums); rng=sn[-1]-sn[0]
     return 0 if rng<60 else(1 if rng<70 else 2)
 
+def _kl8_ctx_target(name):
+    """取 _kl8_ctx_targets 里的某一项，做成 (r, records, t) 形式的标签函数"""
+    def fn(r, records, t):
+        c = _kl8_ctx_targets(records, t)
+        return None if c is None else c[name]
+    fn.needs_ctx = True
+    return fn
+
 configs = {
     '3d':  (f3d,  {'sum_grp':lambda r:0 if sum(r['digits'])<=9 else(1 if sum(r['digits'])<=17 else 2),
                     'group_type':lambda r:_3d_group_type(r['digits']),
@@ -762,7 +848,11 @@ configs = {
                     'big_grp':lambda r:_kl8_big_grp(r['numbers']),
                     'five_dom':lambda r:_kl8_five_dom(r['numbers']),
                     'consec_grp':lambda r:_kl8_consec_grp(r['numbers']),
-                    'range_grp':lambda r:_kl8_range_grp(r['numbers'])}),
+                    'range_grp':lambda r:_kl8_range_grp(r['numbers']),
+                    # 新增：重号个数 / 斜连个数 / 近期热点命中个数——放在最后，第一个目标(odd_grp)才是保存给RL的主权重
+                    'repeat_grp':_kl8_ctx_target('repeat_grp'),
+                    'diag_grp':_kl8_ctx_target('diag_grp'),
+                    'hot_grp':_kl8_ctx_target('hot_grp')}),
 }
 
 for game, (feat_fn, targets) in configs.items():
