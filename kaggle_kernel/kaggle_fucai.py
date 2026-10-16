@@ -337,6 +337,73 @@ def _repeat_neighbor(cur, prev):
     nb = sum(1 for n in cur if (n-1 in ps or n+1 in ps) and n not in ps)
     return rep, nb
 
+
+# ══════════════════════════════════════════════════════
+#  快乐8：近期热点 / 重号 / 斜连（ML、DL、RL 三个脚本共用，务必保持完全一致）
+#   重号 = 本期号码里，上期也开出的球数
+#   斜连 = 本期号码里，是上期号码±1邻号（且上期没开出）的球数（走势图上的斜连线）
+#   热点 = 本期号码里，落在"近30期出现次数最多的20个球"里的球数
+# ══════════════════════════════════════════════════════
+def _kl8_nb(prev):
+    """上期号码的±1邻号（上期开出的球本身除外）= 本期"斜连"候选球"""
+    nb = set()
+    for x in prev:
+        if x > 1: nb.add(x - 1)
+        if x < 80: nb.add(x + 1)
+    return nb - set(prev)
+
+def _kl8_hot_top(draws, k=20):
+    """给定若干期开奖，返回出现次数最多的k个球（次数相同取小号，保证确定性）"""
+    cnt = Counter(n for r in draws for n in r['numbers'])
+    return set(n for n, _ in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:k])
+
+def _kl8_grp_rep(x):  return 0 if x <= 4 else (1 if x <= 5 else 2)    # 重号个数：≤4 / 5 / ≥6（三档各约40%/23%/37%）
+def _kl8_grp_diag(x): return 0 if x <= 5 else (1 if x <= 7 else 2)    # 斜连个数：≤5 / 6-7 / ≥8（约29%/38%/33%）
+def _kl8_grp_hot(x):  return 0 if x <= 4 else (1 if x <= 5 else 2)    # 热点命中：≤4 / 5 / ≥6（约40%/24%/36%）
+
+def _kl8_ctx_targets(records, t):
+    """第t期开奖的 重号/斜连/热点 三个分档目标（只用 records[:t] 的信息）。t<1 返回 None"""
+    if t < 1 or t >= len(records): return None
+    prev = set(records[t-1]['numbers']); cur = set(records[t]['numbers'])
+    hot = _kl8_hot_top(records[max(0, t-30):t])
+    return {'repeat_grp': _kl8_grp_rep(len(cur & prev)),
+            'diag_grp':   _kl8_grp_diag(len(cur & _kl8_nb(prev))),
+            'hot_grp':    _kl8_grp_hot(len(cur & hot))}
+
+def _kl8_extra_feats(w):
+    """快乐8 重号/斜连/热点 特征。w = 截止到上一期的窗口（最后一条是已开出的最新一期）"""
+    f = {}
+    n = len(w)
+    sets = [set(x['numbers']) for x in w]
+    reps, dgs = [], []
+    for i in range(1, n):
+        reps.append(len(sets[i] & sets[i-1])); dgs.append(len(sets[i] & _kl8_nb(sets[i-1])))
+    for k in (3, 5, 10, 20, 50):
+        f[f'rep_m{k}'] = float(np.mean(reps[-k:])) if reps else 5.0
+        f[f'dg_m{k}']  = float(np.mean(dgs[-k:]))  if dgs  else 6.6
+    f['rep_last'] = float(reps[-1]) if reps else 5.0
+    f['dg_last']  = float(dgs[-1])  if dgs  else 6.6
+    f['rep_trend'] = f['rep_m5'] - f['rep_m20']
+    f['dg_trend']  = f['dg_m5']  - f['dg_m20']
+    prev = sets[-1] if sets else set()
+    top30 = _kl8_hot_top(w[-30:])
+    f['hot_prev_in30']     = float(len(prev & top30))               # 上期开出的球里有几个是近30期热点
+    f['hot_diagcand_in30'] = float(len(_kl8_nb(prev) & top30))      # 斜连候选球里有几个是热点
+    hh = []
+    for t in range(max(30, n - 10), n):                              # 最近10期，每期各自"当时的热点"命中几个
+        hh.append(len(sets[t] & _kl8_hot_top(w[t-30:t])))
+    f['hot_hit_m10'] = float(np.mean(hh)) if hh else 5.0
+    f['hot_hit_m5']  = float(np.mean(hh[-5:])) if hh else 5.0
+    cnt30 = Counter(x for r in w[-30:] for x in r['numbers'])
+    arr = np.array([cnt30.get(b, 0) for b in range(1, 81)], dtype=np.float64)
+    f['hot_top10_share'] = float(np.sort(arr)[-10:].sum() / max(arr.sum(), 1.0))   # 前10热球占全部出现次数的比例
+    f['hot_cnt_std'] = float(arr.std())
+    f['hot_cnt_max'] = float(arr.max())
+    cnt5 = Counter(x for r in w[-5:] for x in r['numbers'])
+    f['hot5_ge3']     = float(sum(1 for v in cnt5.values() if v >= 3))                     # 近5期出现≥3次的"超热球"个数
+    f['hot5_in_prev'] = float(sum(1 for b, v in cnt5.items() if v >= 2 and b in prev))      # 近5期出现≥2次且上期又开出的球
+    return f
+
 def _feat_window(w):
     return w
 
@@ -559,6 +626,8 @@ def fkl8(records, idx):
     prev = w[-1]['numbers'] if w else []
     for zi,(lo,hi) in enumerate([(1,20),(21,40),(41,60),(61,80)]):
         f[f'prev_z{zi}'] = float(sum(1 for n in prev if lo<=n<=hi))
+    # 重号/斜连/近期热点 特征（三个脚本共用同一份 _kl8_extra_feats）
+    f.update(_kl8_extra_feats(w))
 
     return f
 
@@ -580,7 +649,8 @@ def build_dataset(records, feat_fn, tgt_fn, keys):
         if feat is None:
             continue
         # 目标：第i+1期的真实值（未来，模型未见过）
-        tgt = tgt_fn(records[i + 1])
+        tgt = tgt_fn(records[i + 1], records, i + 1) if getattr(tgt_fn, 'needs_ctx', False) else tgt_fn(records[i + 1])
+        if tgt is None: continue
         # ★关键检查：特征里绝对不能包含第i+1期的号码
         # feat_fn(records, i+1) 内部用 records[max(0,i+1-WINDOW):i+1]
         # 即窗口是 [i+1-WINDOW, i+1)，最后一条是records[i]，正确！
@@ -913,7 +983,7 @@ def tgtssq(r):
             'gap_grp':0 if max_gap<=5 else(1 if max_gap<=10 else 2),
             'big':sum(1 for x in r['red'] if x>16),
             'consec':consec}
-def tgtkl8(r):
+def tgtkl8(r, records=None, t=None):
     nums = sorted(r['numbers'])
     odd=sum(1 for x in r['numbers'] if x%2!=0)
     big=sum(1 for x in r['numbers'] if x>40)
@@ -926,13 +996,20 @@ def tgtkl8(r):
             if not inc: cg+=1; inc=True
         else: inc=False
     rng = nums[-1]-nums[0]
-    return {'odd_grp':0 if odd<9 else(1 if odd<=11 else 2),
+    out = {'odd_grp':0 if odd<9 else(1 if odd<=11 else 2),
             'zone_dom':int(np.argmax(zn)),
             'tot_grp':0 if tt<640 else(1 if tt<820 else 2),
             'big_grp':0 if big<9 else(1 if big<=11 else 2),
             'five_dom':int(np.argmax(five)),
             'consec_grp':0 if cg==0 else(1 if cg<=2 else 2),
             'range_grp':0 if rng<60 else(1 if rng<70 else 2)}
+    # 新增三个目标：重号个数 / 斜连个数 / 热点命中个数（需要上期和近30期做参照，所以要传历史和期序号）
+    if records is not None and t is not None:
+        c = _kl8_ctx_targets(records, t)
+        if c is None: return None
+        out.update(c)
+    return out
+tgtkl8.needs_ctx = True
 
 # 目标变量（单条记录）
 MARKOV_WINDOW = 200   # 马尔可夫只看最近N期
@@ -1308,6 +1385,166 @@ def recssq(records, ml, om):
     }
 
 
+
+# ══════════════════════════════════════════════════════
+#  快乐8 逐球出现概率模型（ML 新增）
+#   上面的7+3个目标都是"整期开奖的某个形状"（奇偶、区间、重号个数…），回答不了"具体哪个球"。
+#   这里换一个角度：每期每个球是一行，预测"这个球下一期会不会开出"。
+#   特征全是每个球自己的走势信息：近5/10/30/100期出现率、遗漏、是否上期开出（重号候选）、
+#   是否上期±1邻号（斜连候选）、近10期重号/斜连次数、近30期热度排名。
+#   故意不放球号和所在区：快乐8每个球机会均等，放了只会让模型死记某几个号。
+#   输出80个概率（和归一到20），后面用来给每个球打分、选号。
+# ══════════════════════════════════════════════════════
+KL8_BALL_TRAIN_N = 1500    # 用最近多少期做训练样本（每期80行）
+KL8_BALL_EVAL_N = 100      # 留出最近多少期做样本外评估
+
+def _kl8_ball_matrix(records):
+    M = np.zeros((len(records), 80), dtype=np.float32)
+    for t, r in enumerate(records):
+        for b in r['numbers']: M[t, b - 1] = 1.0
+    return M
+
+def _kl8_ball_feature_cube(M):
+    """返回 F[t] = 第t期开奖前（只用M[:t]）每个球的特征，形状 (N+1, 80, d)。t=N 即"下一期"。"""
+    N = M.shape[0]
+    z = np.zeros((1, 80), dtype=np.float32)
+    C = np.concatenate([z, np.cumsum(M, axis=0)], axis=0)                  # C[t]=前t期各球出现次数
+    left = np.zeros_like(M); right = np.zeros_like(M)
+    left[:, 1:] = M[:, :-1]; right[:, :-1] = M[:, 1:]                       # 球b的左/右邻号上期是否开出
+    nbc = left + right
+    prevM = np.vstack([z, M[:-1]])                                          # prevM[s]=第s-1期
+    REP = M * prevM                                                         # REP[s,b]：第s期该球是重号
+    DGC = ((np.vstack([z, nbc[:-1]]) > 0) & (prevM == 0)).astype(np.float32)  # 第s期该球是否为斜连候选
+    DG = M * DGC                                                            # 第s期该球是斜连
+    CR = np.concatenate([z, np.cumsum(REP, axis=0)], axis=0)
+    CD = np.concatenate([z, np.cumsum(DG, axis=0)], axis=0)
+    last = np.full(80, -1.0, dtype=np.float32)
+    d = 15
+    F = np.zeros((N + 1, 80, d), dtype=np.float32)
+    for t in range(N + 1):
+        for j, k in enumerate((5, 10, 30, 100)):
+            F[t, :, j] = (C[t] - C[max(0, t - k)]) / float(max(min(k, t), 1))
+        omit = np.where(last >= 0, t - 1 - last, float(t)); F[t, :, 4] = np.minimum(omit, 100.0) / 4.0   # 遗漏（以平均间隔4期为单位）
+        F[t, :, 5] = M[t - 1] if t >= 1 else 0.0                              # 上期开出：重号候选
+        F[t, :, 6] = M[t - 2] if t >= 2 else 0.0
+        F[t, :, 7] = nbc[t - 1] if t >= 1 else 0.0                            # 上期邻号个数(0~2)
+        F[t, :, 8] = DGC[t] if t < N else (((nbc[N - 1] > 0) & (M[N - 1] == 0)).astype(np.float32))   # 斜连候选
+        F[t, :, 9] = (CR[t] - CR[max(0, t - 10)]) / 10.0                      # 近10期重号次数
+        F[t, :, 10] = (CD[t] - CD[max(0, t - 10)]) / 10.0                     # 近10期斜连次数
+        rate30 = F[t, :, 2]
+        F[t, :, 11] = (np.argsort(np.argsort(-rate30, kind='stable'), kind='stable')) / 80.0   # 近30期热度排名(0最热)
+        F[t, :, 12] = float(REP[t - 1].sum()) / 20.0 if t >= 1 else 0.25       # 上期重号个数
+        F[t, :, 13] = float(DG[t - 1].sum()) / 20.0 if t >= 1 else 0.33        # 上期斜连个数
+        F[t, :, 14] = F[t, :, 0] - F[t, :, 3]                                 # 近5期比近100期热多少
+        if t < N: last = np.where(M[t] > 0, float(t), last)
+    return F
+
+def _kl8_make_ball_clf():
+    if HAS_LGB:
+        return lgb.LGBMClassifier(n_estimators=150, learning_rate=0.03, num_leaves=15, min_child_samples=500,
+                                  subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=5.0,
+                                  random_state=42, verbose=-1)
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    return HistGradientBoostingClassifier(max_depth=4, learning_rate=0.05, max_iter=200, min_samples_leaf=300, random_state=42)
+
+def kl8_ball_model(records):
+    """训练逐球模型并预测下一期。返回 dict：probs(80个球的出现概率，和=20)、eval(样本外评估)、importance。数据不足返回 None。"""
+    N = len(records)
+    if N < 200: return None
+    M = _kl8_ball_matrix(records)
+    F = _kl8_ball_feature_cube(M)
+    names = ['近5期率','近10期率','近30期率','近100期率','遗漏','上期开出(重号候选)','上上期开出','上期邻号数','斜连候选',
+             '近10期重号次','近10期斜连次','近30期热度排名','上期重号个数','上期斜连个数','近5比近100热度']
+    t_first = max(100, N - KL8_BALL_TRAIN_N)
+    def rows(ts): return (F[ts].reshape(-1, F.shape[2]), M[ts].reshape(-1))
+    # 样本外评估：留出最近EVAL期，之前的期数训练
+    ev = {}
+    if N - KL8_BALL_EVAL_N - t_first > 300:
+        tr = np.arange(t_first, N - KL8_BALL_EVAL_N); te = np.arange(N - KL8_BALL_EVAL_N, N)
+        Xtr, ytr = rows(tr); clf = _kl8_make_ball_clf(); clf.fit(Xtr, ytr)
+        h6 = h10 = r6 = r10 = 0.0; ll = ll0 = 0.0; base = float(ytr.mean())
+        for t in te:
+            p = clf.predict_proba(F[t])[:, 1]; y = M[t]
+            order = np.argsort(-p)
+            h6 += y[order[:6]].sum(); h10 += y[order[:10]].sum()
+            pp = np.clip(p, 1e-6, 1 - 1e-6); ll += -np.mean(y * np.log(pp) + (1 - y) * np.log(1 - pp))
+            ll0 += -np.mean(y * np.log(base) + (1 - y) * np.log(1 - base))
+        n = len(te)
+        ev = {'draws': int(n), 'top6_hit': round(float(h6) / n, 3), 'top6_random': 1.5, 'top10_hit': round(float(h10) / n, 3), 'top10_random': 2.5,
+              'logloss': round(float(ll) / n, 5), 'logloss_base': round(float(ll0) / n, 5)}
+    tr_all = np.arange(t_first, N)
+    Xa, ya = rows(tr_all); clf = _kl8_make_ball_clf(); clf.fit(Xa, ya)
+    p = clf.predict_proba(F[N])[:, 1].astype(np.float64)
+    p = np.clip(p / p.sum() * 20.0, 1e-4, 0.999)
+    imp = getattr(clf, 'feature_importances_', None)
+    imp_out = []
+    if imp is not None:
+        tot = float(np.sum(imp)) or 1.0
+        imp_out = [{'name': names[i], 'score': round(float(imp[i]) / tot, 4)} for i in np.argsort(-np.asarray(imp))[:5]]
+    return {'probs': [round(float(x), 5) for x in p], 'eval': ev, 'importance': imp_out, 'n_train_draws': int(len(tr_all))}
+
+
+# ══════════════════════════════════════════════════════
+#  快乐8：把 ML 所有信息合成"每个球的分数"
+#   信息来源：①逐球模型的80个概率（热点/遗漏/重号候选/斜连候选/走势）
+#            ②10个目标的预测概率（奇偶、区间、和值、大小、五行、连号、极差、重号个数、斜连个数、热点命中个数）
+#   做法：按逐球概率随机生成一大批"下一期20球"，每批按"它的10个形状与ML预测有多吻合"加权，
+#        再统计每个球在加权样本里出现的比例——比例越高，说明ML的全部信息合起来越看好这个球。
+# ══════════════════════════════════════════════════════
+KL8_ML_NSAMP = 80000
+KL8_ML_ALPHA = 1.0            # 似然比指数（<1 对ML预测的形状判断打折）
+_KL8_ML_TARGETS = [('odd_grp', 3), ('zone_dom', 4), ('tot_grp', 3), ('big_grp', 3), ('five_dom', 5), ('consec_grp', 3), ('range_grp', 3),
+                   ('repeat_grp', 3), ('diag_grp', 3), ('hot_grp', 3)]
+
+def _kl8_shape_feats(S, prev, hot):
+    """S:(N,20) 已排序的开奖球(1..80)；prev/hot 为上期号码集合/近30期热点集合。返回10个目标的分档数组（定义与 tgtkl8 一致）"""
+    sm = S.sum(axis=1); odd = (S % 2 != 0).sum(axis=1); big = (S > 40).sum(axis=1)
+    zone = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 20), (21, 40), (41, 60), (61, 80)]], axis=1)
+    five = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 16), (17, 32), (33, 48), (49, 64), (65, 80)]], axis=1)
+    adj = (np.diff(S, axis=1) == 1)
+    runs = adj[:, 0].astype(np.int64) + (adj[:, 1:] & ~adj[:, :-1]).sum(axis=1)
+    rng_ = S[:, -1] - S[:, 0]
+    pm = np.zeros(81, dtype=bool); pm[list(prev)] = True
+    dm = np.zeros(81, dtype=bool); dm[list(_kl8_nb(prev))] = True
+    hm = np.zeros(81, dtype=bool); hm[list(hot)] = True
+    rep = pm[S].sum(axis=1); dg = dm[S].sum(axis=1); ht = hm[S].sum(axis=1)
+    return {'odd_grp': np.where(odd < 9, 0, np.where(odd <= 11, 1, 2)), 'zone_dom': zone.argmax(axis=1),
+            'tot_grp': np.where(sm < 640, 0, np.where(sm < 820, 1, 2)),
+            'big_grp': np.where(big < 9, 0, np.where(big <= 11, 1, 2)), 'five_dom': five.argmax(axis=1),
+            'consec_grp': np.where(runs == 0, 0, np.where(runs <= 2, 1, 2)),
+            'range_grp': np.where(rng_ < 60, 0, np.where(rng_ < 70, 1, 2)),
+            'repeat_grp': np.where(rep <= 4, 0, np.where(rep <= 5, 1, 2)),
+            'diag_grp': np.where(dg <= 5, 0, np.where(dg <= 7, 1, 2)),
+            'hot_grp': np.where(ht <= 4, 0, np.where(ht <= 5, 1, 2))}
+
+def kl8_ml_ball_scores(records, models, ball_probs=None, seed=20260416):
+    """返回 (scores{球号:分数}, info)。分数=该球在"按ML全部预测加权后的下一期"里出现的概率（随机基准0.25）。"""
+    rng = np.random.default_rng(seed)
+    p = np.asarray(ball_probs if ball_probs is not None else np.full(80, 0.25), dtype=np.float64)
+    p = np.clip(p, 1e-4, None)
+    g = -np.log(-np.log(rng.random((KL8_ML_NSAMP, 80))))                  # Gumbel-top-k：按概率不放回抽20个球
+    keys = np.log(p)[None, :] + g
+    S = (np.argpartition(-keys, 20, axis=1)[:, :20] + 1).astype(np.int64); S.sort(axis=1)
+    prev = set(records[-1]['numbers']); hot = _kl8_hot_top(records[-30:])
+    feats = _kl8_shape_feats(S, prev, hot)
+    logw = np.zeros(S.shape[0]); used = []
+    for name, nc in _KL8_ML_TARGETS:
+        pr = ((models.get(name) or {}).get('prediction') or {}).get('probs')
+        if not isinstance(pr, dict) or not pr: continue
+        q = np.array([float(pr.get(str(i), 0.0)) for i in range(nc)], dtype=np.float64) / 100.0
+        if q.sum() <= 0: continue
+        q = q / q.sum()
+        emp = np.bincount(feats[name], minlength=nc)[:nc] / S.shape[0] + 1e-6
+        ratio = np.clip((q + 1e-4) / emp, 0.05, 20.0)
+        logw += KL8_ML_ALPHA * np.log(ratio[np.minimum(feats[name], nc - 1)]); used.append(name)
+    w = np.exp(logw - logw.max()); w /= w.sum()
+    inc = np.zeros(80)
+    for c in range(20): inc += np.bincount(S[:, c] - 1, weights=w, minlength=80)
+    ess = float(1.0 / np.sum(w ** 2))
+    scores = {b + 1: float(inc[b]) for b in range(80)}
+    return scores, {'targets_used': used, 'ess': round(ess, 0), 'n_samp': int(S.shape[0])}
+
+
 def score_balls(pool_max, records, ml, zone_defs, zone_key, five_defs=None, five_key=None,
                 get_nums=lambda r: r['numbers'], recent_n=30):
     """
@@ -1450,7 +1687,7 @@ def picks_from_scores(scores, n_pick, n_bets, pool_mult=2.2, core_ratio=0.34):
     return bets, sorted(core), sorted(pool)
 
 
-def reckl8(records, ml, om):
+def reckl8(records, ml, om, ball=None):
     """
     快乐8多玩法推荐：
     选四3注/选五3注/选五复式1注/选六3注/选九2注/选十1注（共13注）
@@ -1499,15 +1736,22 @@ def reckl8(records, ml, om):
     # 注：原来这里有个"热号+遗漏+随机补齐"的候选池，供 random.sample 抽号用。
     # 现在选号改为按 score_balls 打分排序，该候选池已无用，一并移除。
 
-    # 给80个球逐个打分（ML区间概率+五行概率+热度+遗漏），号码从此有据可查
-    kl8_scores = score_balls(
-        80, records, ml,
-        zone_defs=[(1,20),(21,40),(41,60),(61,80)], zone_key='zone_dom',
-        five_defs=[(1,16),(17,32),(33,48),(49,64),(65,80)], five_key='five_dom',
-        get_nums=lambda r: r['numbers'])
-    # ── 条件筛选：把ML训练出的7个目标全部变成选号条件 ──
-    # 之前 big_grp/consec_grp/range_grp/odd_grp 这几个预测只用来生成展示文案，
-    # 完全没参与选号，等于白训练。现在它们都成为筛选依据。
+    # 给80个球逐个打分：把ML的全部信息合在一起——逐球模型(热点/遗漏/重号/斜连等走势)的80个概率，
+    # 再按10个目标的预测（奇偶/区间/和值/大小/五行/连号/极差/重号个数/斜连个数/热点命中个数）加权
+    _bp = (ball or {}).get('probs') if ball else None
+    try:
+        kl8_scores, _sc_info = kl8_ml_ball_scores(records, ml, _bp)
+        print(f"    [快乐8打分] 逐球模型{'已用' if _bp else '无(退回均匀)'}；参与加权的ML目标{len(_sc_info['targets_used'])}个={_sc_info['targets_used']}；有效样本{_sc_info['ess']:.0f}/{_sc_info['n_samp']}")
+    except Exception as _e:
+        print(f"    [快乐8打分] 新打分失败({_e})，退回旧的热度+遗漏+区间打分")
+        kl8_scores = score_balls(
+            80, records, ml,
+            zone_defs=[(1,20),(21,40),(41,60),(61,80)], zone_key='zone_dom',
+            five_defs=[(1,16),(17,32),(33,48),(49,64),(65,80)], five_key='five_dom',
+            get_nums=lambda r: r['numbers'])
+    _prev_set = set(records[-1]['numbers']); _hot_set = _kl8_hot_top(records[-30:])
+    _prev_nb = _kl8_nb(_prev_set)
+    # ── 条件筛选：把ML训练出的10个目标全部变成选号条件 ──
     def _kl8_feats(c):
         cs = sorted(c)
         odd = sum(1 for x in c if x % 2 != 0)
@@ -1534,10 +1778,14 @@ def reckl8(records, ml, om):
             'five_dom':   int(max(range(5), key=lambda i: fv[i])),
             'consec_grp': 0 if cg == 0 else (1 if cg <= 2 else 2),
             'range_grp':  0 if rng < 60 else (1 if rng < 70 else 2),
+            # 重号/斜连/热点：同样按占比折算回20球口径再分档
+            'repeat_grp': _kl8_grp_rep(int(round(len(set(c) & _prev_set) * k))),
+            'diag_grp':   _kl8_grp_diag(int(round(len(set(c) & _prev_nb) * k))),
+            'hot_grp':    _kl8_grp_hot(int(round(len(set(c) & _hot_set) * k))),
         }
 
     _kl8_conds = {}
-    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']:
+    for _k in ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','repeat_grp','diag_grp','hot_grp']:
         _m = ml.get(_k, {})
         _p = _m.get('prediction', {}) if _m else {}
         if _p.get('value') is not None:
@@ -1588,6 +1836,12 @@ def reckl8(records, ml, om):
         'consec_pred':        consec_label,
         'range_pred':         range_label,
         'hot_nums':  [int(x) for x in hot[:15]],
+        'repeat_pred': {0:'重号少(≤4个)',1:'重号适中(5个)',2:'重号多(≥6个)'}.get(((ml.get('repeat_grp') or {}).get('prediction') or {}).get('value'), '—'),
+        'diag_pred':   {0:'斜连少(≤5个)',1:'斜连适中(6-7个)',2:'斜连多(≥8个)'}.get(((ml.get('diag_grp') or {}).get('prediction') or {}).get('value'), '—'),
+        'hot_hit_pred':{0:'热点命中少(≤4个)',1:'热点命中适中(5个)',2:'热点命中多(≥6个)'}.get(((ml.get('hot_grp') or {}).get('prediction') or {}).get('value'), '—'),
+        'repeat_cand': sorted(int(x) for x in _prev_set),
+        'diag_cand':   sorted(int(x) for x in _prev_nb),
+        'ball_scores': [round(float(kl8_scores.get(b, 0.0)), 4) for b in range(1, 81)],
         'cold_nums': [int(x) for x in [x[0] for x in freq30.most_common()[-10:]]],
         'overdue':   [int(x) for x in overdue[:10]],
         'note': '综合ML区间预测(区间/五行/大数/连续/极差)+遗漏分析+区间均衡，选四3注/选五3注/复式1注/选六3注/选九2注/选十1注，仅供娱乐。'
@@ -1643,7 +1897,7 @@ def run_ml(history):
     cfg=[
         ('3d',  f3d,   tgt3d,  ['sum_grp','odd','group_type','big','span_grp','road_dom','arith']),
         ('ssq', fssq,  tgtssq, ['odd','sum_grp','ac_grp','red_zone_dom','gap_grp','big','consec']),
-        ('kl8', fkl8,  tgtkl8, ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp']),
+        ('kl8', fkl8,  tgtkl8, ['odd_grp','zone_dom','tot_grp','big_grp','five_dom','consec_grp','range_grp','repeat_grp','diag_grp','hot_grp']),
     ]
     predictions={}
     for game,feat_fn,tgt_fn,tkeys in cfg:
@@ -1682,11 +1936,21 @@ def run_ml(history):
                     'ac_pred':ac_label,'red_zone_dom_pred':zd_label,'max_gap_pred':gap_label}
         else:
             mk=None; om=omitkl8(records)
-            rec=reckl8(records,ml_res['models'],om)
+            ball=None
+            try:
+                ball=kl8_ball_model(records)
+            except Exception as _e:
+                print(f"    [逐球模型] 训练失败，跳过: {_e}")
+            if ball:
+                ml_res['ball_model']={'probs':ball['probs'],'eval':ball['eval'],'importance':ball['importance'],'n_train_draws':ball['n_train_draws']}
+                _ev=ball.get('eval') or {}
+                if _ev: print(f"    [逐球模型] 样本外最近{_ev['draws']}期：Top6命中{_ev['top6_hit']}(随机1.5) Top10命中{_ev['top10_hit']}(随机2.5) 对数损失{_ev['logloss']}(基线{_ev['logloss_base']})")
+            rec=reckl8(records,ml_res['models'],om,ball)
             ai_ctx={'game':'快乐8','data_count':len(records),'latest_date':records[-1]['date'],
                     'zone_pred':rec.get('zone_dominant_pred',''),'total_pred':rec.get('total_range_pred',''),
                     'five_pred':rec.get('five_dominant_pred',''),'big_pred':rec.get('big_count_pred',''),
                     'consec_pred':rec.get('consec_pred',''),'range_pred':rec.get('range_pred',''),
+                    'repeat_pred':rec.get('repeat_pred',''),'diag_pred':rec.get('diag_pred',''),'hot_hit_pred':rec.get('hot_hit_pred',''),
                     'overdue':rec.get('overdue',[]),'hot_nums':rec.get('hot_nums',[])}
         predictions[game]={**ml_res,'recommendation':rec,'ai_context':ai_ctx}
         print(f"  ✓ {game} 完成")
