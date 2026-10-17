@@ -115,7 +115,7 @@ RL_MOUNTED      = f'/kaggle/input/{RL_DATASET_SLUG}'
 # ── 开关：是否把 RL 模型保存到 Kaggle Dataset(fucai-rl-cache) ──
 #   True（默认）= 每次运行后推送，保留/累积模型；False = 不推送，不保留（每次从头训练）
 #   也可用环境变量 FUCAI_RL_SAVE_CACHE=0/false 临时关闭，不用改代码
-RL_SAVE_CACHE = True
+RL_SAVE_CACHE = False
 if os.environ.get('FUCAI_RL_SAVE_CACHE', '').strip().lower() in ('0', 'false', 'off', 'no'):
     RL_SAVE_CACHE = False
 WINDOW = 50; SEQ_LEN = 20
