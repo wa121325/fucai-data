@@ -3468,7 +3468,7 @@ def build_consensus(game, records, ml_pred, dl_game, result, dl_note=None):
 #  dl_rl.json 本身仍然只放"最新一版"，网页默认读它，行为不变。
 # ══════════════════════════════════════════════════════
 RL_ARCHIVE_ENABLED = os.environ.get('RL_ARCHIVE_ENABLED', '1') != '0'
-RL_ARCHIVE_KEEP_DAYS = max(1, int(os.environ.get('RL_ARCHIVE_KEEP_DAYS', '1')))   # 只保留最近几天（北京日期）的归档，默认1=只留当天，之前的自动删除
+RL_ARCHIVE_KEEP_DAYS = max(1, int(os.environ.get('RL_ARCHIVE_KEEP_DAYS', '2')))   # 只保留最近几天（北京日期）的归档，默认1=只留当天，之前的自动删除
 
 def _gh_api(method, path, payload=None):
     url = f'https://api.github.com/repos/{GH_REPO}/contents/{path}'
