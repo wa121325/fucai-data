@@ -80,7 +80,7 @@ jobs:
     # ML 成功就跑 RL；DL 失败不拦截（共识投票会自动把过期的 DL 排除）
     if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && github.event.inputs.run_rl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - run: pip install kaggle
@@ -92,4 +92,4 @@ jobs:
       - name: 运行 RL 并等待完成
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_TOKEN }}
-        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-rl-daily ./kaggle_rl_kernel/ dl_rl.json 60
+        run: bash ci/run_kernel.sh megskfdbbskeb/fucai-rl-daily ./kaggle_rl_kernel/ dl_rl.json 150
