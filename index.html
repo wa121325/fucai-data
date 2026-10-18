@@ -1185,6 +1185,7 @@
           <div class="panel" style="border:2px solid #9b59b6;">
             <h2>🧠 深度学习 + 强化学习（LSTM · Transformer · PPO）</h2>
             <div style="font-size:12px;color:#888;margin-bottom:10px;" id="dlResultMeta"></div>
+            <div id="rlVersionBar" style="display:none;margin-bottom:12px;padding:8px 10px;border:1px dashed #b9a3d6;border-radius:8px;font-size:12px;"></div>
             <div id="dlResultContent"></div>
           </div>
         </div>
@@ -2587,6 +2588,7 @@ async function loadPrediction(){
     safe('双色球', () => renderGamePredict('ssq', combined.predictions?.ssq));
     safe('快乐8',  () => renderGamePredict('kl8', combined.predictions?.kl8));
     safe('DL/RL', () => { if(combined.dl_result) renderDLResult(combined.dl_result); });
+    safe('RL版本', () => { initRlVersions(repo); });
 
     document.getElementById('predictContent').style.display='block';
     try{ attachBlockDownloads(); }catch(e){ console.error('下载按钮', e); }
@@ -2894,6 +2896,55 @@ function renderConsensus(game, c){
   h += `<div style="font-size:9.5px;color:#999;margin-top:4px;">说明：ML/DL给的是和值区、奇偶个数等特征目标的概率，已合成为号码级概率；某一方几乎没有倾向时不投票，避免把噪声当共识。各方信号都接近随机时，共识也只是结构上的参考，不代表更容易中。</div>`;
   h += `</div>`;
   return h;
+}
+
+/* ── RL 历史版本：同一天跑多次也都留着，可随时切换查看（版本清单来自仓库 rl_archive/index.json，由 RL 脚本每次运行时写入）── */
+let _rlLatest=null, _rlRepo='';
+async function initRlVersions(repo){
+  const bar=document.getElementById('rlVersionBar'); if(!bar) return;
+  _rlRepo=repo; _rlLatest=window._lastPrediction?.dl_result?.rl||null;
+  let vs=[];
+  try{
+    const r=await fetch(`https://raw.githubusercontent.com/${repo}/main/rl_archive/index.json?t=${Date.now()}`);
+    if(r.ok){ vs=(await r.json()).versions||[]; }
+  }catch(e){ console.error('RL版本清单', e); }
+  if(!vs.length){ bar.style.display='none'; return; }   // RL脚本更新后第一次跑完才会有归档
+  const gn={'3d':'3D','ssq':'双色球','kl8':'快乐8'};
+  const label=v=>{
+    const tr=[],ca=[];
+    for(const [g,i] of Object.entries(v.games||{})) (i&&i.skipped?ca:tr).push(gn[g]||g);
+    return `${v.time.slice(5,16)}　${tr.length?'训练:'+tr.join('/'):''}${ca.length?(tr.length?'　':'')+'沿用:'+ca.join('/'):''}`;
+  };
+  const days=[...new Set(vs.map(v=>v.date))];
+  let h=`<div style="margin-bottom:6px;"><b>📚 RL历史版本</b>（共${vs.length}个，北京时间）：</div>
+    <select id="rlVersionSel" style="max-width:100%;padding:4px 6px;font-size:12px;">
+      <option value="">最新版（默认）</option>`;
+  for(const d of days){
+    h+=`<optgroup label="${d}（${vs.filter(v=>v.date===d).length}次）">`;
+    for(const v of vs.filter(v=>v.date===d)) h+=`<option value="${v.file}">${label(v)}</option>`;
+    h+=`</optgroup>`;
+  }
+  h+=`</select> <span id="rlVersionNote" style="color:#888;"></span>`;
+  bar.innerHTML=h; bar.style.display='block';
+  document.getElementById('rlVersionSel').addEventListener('change', e=>switchRlVersion(e.target.value));
+}
+async function switchRlVersion(file){
+  const note=document.getElementById('rlVersionNote'); const pred=window._lastPrediction;
+  if(!pred||!pred.dl_result) return;
+  try{
+    let data;
+    if(!file){ data=_rlLatest; if(note) note.textContent=''; }
+    else{
+      if(note) note.textContent='加载中…';
+      const r=await fetch(`https://raw.githubusercontent.com/${_rlRepo}/main/rl_archive/${file}?t=${Date.now()}`);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      data=await r.json();
+      if(note) note.textContent=`⏪ 正在查看历史版本（${data.version_time_bj||file}），其中的 ML/DL 概率和开奖数据是当时的`;
+    }
+    if(!data) throw new Error('没有可显示的数据');
+    pred.dl_result.rl=data;
+    renderDLResult(pred.dl_result);
+  }catch(e){ if(note) note.textContent='⚠ 加载失败：'+e.message; }
 }
 
 function renderDLResult(dlResult){
