@@ -14,7 +14,7 @@ kaggle_rl_daily.py
 Kaggle Secrets: GH_TOKEN, GH_REPO, KAGGLE_TOKEN
 Kaggle 设置: 不需要GPU（PPO在CPU训练也很快），Internet开启
 """
-import zlib, os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy, math
+import re, zlib, os, json, sys, time, warnings, base64, urllib.request, random, shutil, subprocess, copy, math
 from datetime import datetime, date
 from collections import Counter, defaultdict
 from itertools import combinations
@@ -3462,6 +3462,66 @@ def build_consensus(game, records, ml_pred, dl_game, result, dl_note=None):
 
 
 # ══════════════════════════════════════════════════════
+#  RL 历史版本归档：每次运行都把完整结果另存一份，同一天跑多少次都不会被覆盖
+#   rl_archive/YYYY-MM-DD/HH-MM-SS.json   当次完整的 dl_rl.json（文件名是北京时间）
+#   rl_archive/index.json                 版本清单（新的在前），网页用它列出所有版本
+#  dl_rl.json 本身仍然只放"最新一版"，网页默认读它，行为不变。
+# ══════════════════════════════════════════════════════
+RL_ARCHIVE_ENABLED = os.environ.get('RL_ARCHIVE_ENABLED', '1') != '0'
+RL_ARCHIVE_KEEP_DAYS = max(1, int(os.environ.get('RL_ARCHIVE_KEEP_DAYS', '1')))   # 只保留最近几天（北京日期）的归档，默认1=只留当天，之前的自动删除
+
+def _gh_api(method, path, payload=None):
+    url = f'https://api.github.com/repos/{GH_REPO}/contents/{path}'
+    req = urllib.request.Request(url, data=(json.dumps(payload).encode() if payload is not None else None), method=method, headers={
+        'Authorization': f'token {GH_TOKEN}', 'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'rl-bot'})
+    with urllib.request.urlopen(req, timeout=30) as r: return json.loads(r.read())
+
+def _prune_rl_archive(today_bj):
+    """删除 rl_archive/ 下早于保留范围的日期文件夹（GitHub没有删文件夹的接口，逐个删里面的文件，文件夹随之消失）"""
+    from datetime import timedelta
+    cutoff = (datetime.strptime(today_bj, '%Y-%m-%d') - timedelta(days=RL_ARCHIVE_KEEP_DAYS - 1)).strftime('%Y-%m-%d')
+    n_del = 0
+    for d in _gh_api('GET', 'rl_archive'):
+        if d.get('type') != 'dir' or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', d.get('name', '')) or d['name'] >= cutoff: continue
+        for f in _gh_api('GET', f"rl_archive/{d['name']}"):
+            if f.get('type') == 'file':
+                _gh_api('DELETE', f['path'], {'message': f"RL归档清理 {f['path']}", 'sha': f['sha'], 'branch': 'main'}); n_del += 1
+    return cutoff, n_del
+
+def archive_rl_version(out):
+    from datetime import timezone, timedelta
+    bj = datetime.now(timezone.utc) + timedelta(hours=8)          # 北京时间，与Kaggle机器时区无关
+    day, hms = bj.strftime('%Y-%m-%d'), bj.strftime('%H-%M-%S')
+    rel = f'{day}/{hms}.json'
+    doc = dict(out); doc['version_time_bj'] = bj.strftime('%Y-%m-%d %H:%M:%S')
+    body = json.dumps(doc, ensure_ascii=False, separators=(',', ':'))
+    gh_put(f'rl_archive/{rel}', body, f"RL归档 {day} {hms}")
+    entry = {'file': rel, 'time': doc['version_time_bj'], 'date': day, 'size_kb': round(len(body.encode()) / 1024, 1),
+             'games': {g: {'base_qihao': (r or {}).get('base_qihao'), 'skipped': bool((r or {}).get('skipped'))}
+                       for g, r in (out.get('results') or {}).items()}}
+    raw_idx = gh_raw('rl_archive/index.json')
+    versions = []
+    if raw_idx:
+        try: versions = json.loads(raw_idx).get('versions', [])
+        except Exception as e:
+            print(f"  ! rl_archive/index.json 解析失败，本次不更新清单（归档文件已保存: {rel}）: {e}"); return rel
+    versions = [v for v in versions if v.get('file') != rel]
+    versions.insert(0, entry)
+    # 清理过期：只保留 RL_ARCHIVE_KEEP_DAYS 天内的版本（默认只留当天）。清理失败不影响本次归档。
+    try:
+        cutoff, n_del = _prune_rl_archive(day)
+        versions = [v for v in versions if v.get('date', '') >= cutoff]
+        if n_del: print(f"  已清理 {cutoff} 之前的旧归档文件 {n_del} 个")
+    except Exception as e:
+        print(f"  ! 清理旧归档失败（不影响本次）: {e}")
+    gh_put('rl_archive/index.json', json.dumps({'updated_at': doc['version_time_bj'], 'versions': versions},
+                                               ensure_ascii=False, separators=(',', ':')), f"RL归档清单 {day} {hms}")
+    print(f"  ✓ 已归档 rl_archive/{rel}（共{len(versions)}个版本）")
+    return rel
+
+
+# ══════════════════════════════════════════════════════
 #  主流程
 # ══════════════════════════════════════════════════════
 print(f"\n{'#'*55}\nPPO 强化学习 每日增量微调  {datetime.now().strftime('%Y-%m-%d %H:%M')}\n{'#'*55}")
@@ -3512,6 +3572,9 @@ for game, run_fn in [('3d', run_3d_daily), ('kl8', run_kl8_daily), ('ssq', run_s
         print(f"{game} 失败: {e}")
     # ── 共识投票（ML+DL+RL）：失败不影响RL本身的结果。无新数据沿用上次结果时，也用最新的ML/DL概率重算 ──
     _r = rl_results.get(game)
+    if _r is not None:
+        # 记录这份预测是基于哪一期开奖生成的（即预测的是它的下一期）；沿用上次结果时保留原值
+        _r.setdefault('base_qihao', records[-1].get('qihao')); _r.setdefault('base_date', records[-1].get('date'))
     if _r and (_r.get('rl_scores') or _r.get('rl_pos_probs')):
         try:
             _t0 = time.time()
@@ -3576,5 +3639,8 @@ else:
     print("\n推送 dl_rl.json…")
     gh_put('dl_rl.json', out_json, f"PPO每日微调 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("✓ 完成")
+    if RL_ARCHIVE_ENABLED:
+        try: archive_rl_version(out)
+        except Exception as _e: print(f"  ! RL历史版本归档失败（不影响 dl_rl.json）: {_e}")
 
 print(f"\n✅ 全部完成！{datetime.now().strftime('%Y-%m-%d %H:%M')}")
