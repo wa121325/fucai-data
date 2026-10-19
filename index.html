@@ -2993,7 +2993,8 @@ function renderDLResult(dlResult){
   const tLabels={'bai':'百位','shi':'十位','ge':'个位','sum_grp':'和值区','blue':'蓝球','group_type':'组型','span_grp':'跨度区间','road_dom':'012路主力','arith':'斜连(等差)','big':'大数个数','consec':'连号数',
                  'odd':'奇数','zone_dom':'主落区','tot_grp':'总和区','odd_grp':'奇数区',
                  'red_zone_dom':'红球主力区','ac_grp':'AC值区间','gap_grp':'最大间距区间',
-                 'big_grp':'大数个数区','five_dom':'五行主力段','consec_grp':'连续号组区','range_grp':'极差区'};
+                 'big_grp':'大数个数区','five_dom':'五行主力段','consec_grp':'连续号组区','range_grp':'极差区',
+                 'sum_exact':'和值精确','span_exact':'跨度精确','repeat_grp':'重号数','diag_grp':'斜连数','hot_grp':'热点命中'};
   let html='';
 
   // ── LSTM+Transformer 各目标准确率（每周） ──
@@ -3010,7 +3011,7 @@ function renderDLResult(dlResult){
         const baselineNote = lstmLift!=null ? `（基线${tm.lstm_baseline}%${lstmLift>0?' +'+lstmLift.toFixed(1)+'%':''}）` : '';
         html += `<span class="pred-acc-badge" style="background:#6b3a9b;font-size:11px;">
           ${la}${tm.lstm_acc!=null?` LSTM${tm.lstm_acc}% TFM${tm.tfm_acc??'—'}%${baselineNote}`:''}
-          → <b>${tm.ensemble_pred??'—'}</b>(${tm.confidence??'—'}%)
+          → <b>${tgtValLabel(tname, tm.ensemble_pred)}</b>(${tm.confidence??'—'}%)
         </span>`;
       }
       html += '</div></div>';
@@ -3259,6 +3260,10 @@ function renderDLResult(dlResult){
   el.innerHTML = html || '<div class="status">暂无DL/RL结果（请先运行 kaggle_lstm_tfm.py 和 kaggle_rl_daily.py）</div>';
 }
 
+/* 目标值的人话说明：重号/斜连/热点三个分档目标，0/1/2 看不出含义，这里翻成个数范围 */
+const TGT_VAL_TEXT={repeat_grp:{0:'≤4个',1:'5个',2:'≥6个'}, diag_grp:{0:'≤5个',1:'6-7个',2:'≥8个'}, hot_grp:{0:'≤4个',1:'5个',2:'≥6个'}};
+function tgtValLabel(name,v){ if(v==null) return '—'; const m=TGT_VAL_TEXT[name]; return (m&&m[v]!==undefined)?m[v]:v; }
+
 function renderGamePredict(game, data){
   const panelIds={'3d':'gamePredict3d','ssq':'gamePredictSSQ','kl8':'gamePredictKL8'};
   const contentIds={'3d':'predict3dContent','ssq':'predictSSQContent','kl8':'predictKL8Content'};
@@ -3269,11 +3274,20 @@ function renderGamePredict(game, data){
   const modelLabels={bai:'百位数字',shi:'十位数字',ge:'个位数字',sum_grp:'和值区间',odd:'奇数个数',group_type:'组型',span_grp:'跨度区间',road_dom:'012路主力',arith:'斜连(等差)',big:'大数个数',consec:'连号数',
     blue:'蓝球号码',odd_grp:'奇数区间',zone_dom:'主落区',tot_grp:'总和区间',
     red_zone_dom:'红球主力区',ac_grp:'AC值区间',gap_grp:'最大间距区间',
-    big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间'};
+    big_grp:'大数个数区间',five_dom:'五行主力段',consec_grp:'连续号组区间',range_grp:'极差区间',
+    sum_exact:'和值精确',span_exact:'跨度精确',repeat_grp:'重号数',diag_grp:'斜连数',hot_grp:'热点命中'};
   let html=`<div style="font-size:12px;color:#888;margin-bottom:12px;">近${data.data_count||'—'}期数据 · 更新：${data.updated_at||'—'}</div>`;
+  let mlChips='', mlDetail='';
+  const _html0=html; html='';
   for(const [mname,mdata] of Object.entries(data.models)){
     if(!mdata||!mdata.accuracy) continue;
     const acc=mdata.accuracy; const pred=mdata.prediction||{};
+    {
+      // 精简行：目标 → 预测值(置信度)；集成没超过基线的用灰色，一眼看出哪些目标没有实际预测力
+      const _lift = acc.baseline!==undefined ? (acc.lift_over_baseline ?? (acc.ensemble-acc.baseline)) : null;
+      const _weak = _lift!==null && _lift<=0;
+      mlChips+=`<span class="pred-acc-badge" style="background:${_weak?'#555':'#1a3a8b'};font-size:11px;${_weak?'opacity:.75;':''}" title="${_lift!==null?('集成'+acc.ensemble+'% · 基线'+acc.baseline+'% · '+(_lift>0?'+':'')+(+_lift).toFixed(1)+'%'):''}">${modelLabels[mname]||mname} → <b>${tgtValLabel(mname,pred.value)}</b>(${pred.confidence??'—'}%)</span>`;
+    }
     html+=`<div class="pred-model-card">`;
     html+=`<div class="pred-model-title">目标：${modelLabels[mname]||mname}</div>`;
     html+=`<div class="pred-acc-row">`;
@@ -3316,6 +3330,13 @@ function renderGamePredict(game, data){
       html+=`</div>`;
     }
     html+=`</div>`;
+  }
+  mlDetail=html; html=_html0;
+  if(mlChips){
+    html+=`<div class="sectionTitle" style="font-size:13px;">🤖 传统ML 各目标预测（XGBoost+LightGBM+随机森林集成）</div>`;
+    html+=`<div style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px;">${mlChips}</div>`;
+    html+=`<div style="font-size:10px;color:#888;margin-bottom:6px;">灰色 = 集成准确率没超过「永远猜多数类」的基线，没有实际预测力。</div>`;
+    html+=`<details style="margin:6px 0 8px;"><summary style="cursor:pointer;font-size:12px;color:#888;">展开详细（各模型准确率 · 概率分布 · 关键特征 · 近期回测）</summary>${mlDetail}</details>`;
   }
   // 推荐号码
   const rec=data.recommendation||{};
