@@ -982,6 +982,7 @@
       <div class="mainTab" data-tab="trend">📊 走势图</div>
       <div class="mainTab" data-tab="predict">🤖 ML预测报告</div>
       <div class="mainTab" data-tab="chat">💬 AI文案助手</div>
+      <div class="mainTab" data-tab="settings">⚙️ 设置</div>
       <div class="mainTab" data-tab="scan">📷 扫码存档</div>
     </div>
 
@@ -1019,47 +1020,12 @@
 
     <div class="panel">
       <h2>数据来源</h2>
-
-      <div class="field">
-        <label>GitHub 仓库地址（推荐配置，配置后每天全自动更新）</label>
-        <input type="text" id="githubRepoInput" placeholder="用户名/仓库名，例如：zhangsan/fucai-data" style="font-family:monospace;">
-      </div>
-      <div class="status" style="margin-top:-6px;margin-bottom:10px;">
-        填好仓库地址后，工具每次点「一键获取」会直接读取 GitHub 上自动爬取好的 JSON 数据，<b>无需任何 API Key，每天22点自动更新</b>。<br>
-        没有仓库？见下方"如何配置"指引，5分钟完成，一次配置永久生效。
-      </div>
-
+      <div class="status" style="margin-bottom:10px;">仓库地址、GitHub Token、各类 API Key 都统一在「⚙️ 设置」页签里填写保存，这里只负责获取。</div>
       <button class="btn secondary" id="fetchBtn" style="margin-bottom:10px;">⚡ 一键获取最新开奖号码</button>
       <div class="status" id="fetchStatus">
         获取顺序：①GitHub自动数据 → ②直连官方API → ③Claude API中转（需Key）
       </div>
 
-      <details style="margin-top:14px;">
-        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ Claude API Key（直连失败时备用）</summary>
-        <div style="margin-top:10px;">
-          <div class="field">
-            <label>Anthropic API Key</label>
-            <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
-          </div>
-          <div class="status" style="margin-top:-4px;">Key 只存内存，刷新即清。填好后再点获取按钮使用。</div>
-        </div>
-      </details>
-
-      <details style="margin-top:10px;">
-        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ 如何配置 GitHub 自动抓取（5分钟，一次配置永久生效）</summary>
-        <div style="margin-top:10px;font-size:13px;line-height:1.8;color:var(--ink);">
-          <b>第一步：</b>注册 <a href="https://github.com" target="_blank">github.com</a> 账号（免费）<br>
-          <b>第二步：</b>创建新仓库，命名为 <code>fucai-data</code>（设为 Public 公开）<br>
-          <b>第三步：</b>将下方两个文件上传到仓库根目录（从本工具的下载区获取）：<br>
-          &nbsp;&nbsp;• <code>lottery_crawler.py</code> — 爬虫脚本<br>
-          &nbsp;&nbsp;• <code>.github/workflows/crawl.yml</code> — 自动执行计划<br>
-          <b>第四步：</b>仓库 Settings → Actions → General → 勾选 "Allow GitHub Actions to create and approve pull requests" 并保存<br>
-          <b>第五步：</b>回到本工具，上方填入 <code>你的用户名/fucai-data</code>，点「保存仓库地址」<br>
-          <b>之后：</b>每天北京时间22:00 GitHub 自动跑爬虫，结果存到 latest.json，本工具直接读取。
-        </div>
-      </details>
-
-      <button class="btn ghost" id="saveRepoBtn" style="margin-top:12px;">保存仓库地址</button>
     </div>
 
     <div class="panel" id="formPanel">
@@ -1090,7 +1056,7 @@
 
     <!-- 走势图Tab内容 -->
     <div id="tabTrend" class="tabContent">
-      <p class="appSub">数据来自 GitHub 仓库历史记录，近50期走势。需先在「数据来源」里配置好仓库地址。</p>
+      <p class="appSub">数据来自 GitHub 仓库历史记录，近50期走势。需先在「⚙️ 设置」里配置好仓库地址。</p>
       <div class="panel">
         <h2>选择彩种</h2>
         <div class="pillrow" id="trendTypeRow">
@@ -1106,22 +1072,7 @@
       <!-- AI专家解读面板 -->
       <div class="panel" id="aiPanel" style="margin-top:18px;display:none;">
         <h2>🤖 AI 专家解读</h2>
-        <div class="field">
-          <label>API 地址（直连 OpenRouter，也可填自建 Gateway）</label>
-          <input type="text" id="gwUrlInput" placeholder="https://openrouter.ai/api" value="https://openrouter.ai/api" style="font-family:monospace;font-size:12px;">
-        </div>
-        <div class="field">
-          <label>OpenRouter API Key</label>
-          <input type="password" id="gwSecretInput" placeholder="sk-or-v1-...">
-        </div>
-        <div class="field">
-          <label>模型（推荐 openrouter/free 自动路由）</label>
-          <input type="text" id="gwModelInput" placeholder="openrouter/free" value="openrouter/free" style="font-family:monospace;font-size:12px;">
-        </div>
-        <div class="status" style="margin-bottom:10px;">
-        密钥只保存在本机浏览器，不会上传任何服务器。到 <b>openrouter.ai/keys</b> 免费注册即可获取（无需信用卡）。<br>
-        免费模型名单经常无预警轮换，写死单个模型ID容易突然失效；填 <code>openrouter/free</code> 会自动路由到当前可用的免费模型。<br>
-        免费额度：每分钟20次、每天50次（一次性充值满$10后升到1000次/天，额度永久有效）。</div>
+        <div class="status" style="margin-bottom:10px;">AI 的 API 地址、Key、模型在「⚙️ 设置」页签里填写（与「AI文案助手」共用）。</div>
         <button class="btn secondary" id="aiReadBtn">✨ 生成今日专家解读</button>
         <div class="status" id="aiStatus" style="margin-top:8px;"></div>
 
@@ -1172,17 +1123,7 @@
         </div>
         <div class="status" id="plStatus" style="margin-top:8px;"></div>
         <div id="plJobs" style="margin-top:6px;font-size:12px;line-height:1.8;"></div>
-        <details style="margin-top:10px;font-size:12px;">
-          <summary style="cursor:pointer;color:#666;">⚙ 设置（只需填一次，保存在本机浏览器）</summary>
-          <div style="margin-top:8px;">
-            <div style="margin-bottom:6px;">工作流所在仓库（放 .github/workflows/nightly.yml 的那个，格式 用户名/仓库名）：</div>
-            <input id="plRepo" type="text" placeholder="例如 wa121325/xxxx" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;">
-            <div style="margin-bottom:6px;">GitHub Token（需要对该仓库有 Actions 读写权限）：</div>
-            <input id="plToken" type="password" placeholder="github_pat_…" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;">
-            <button class="btn secondary" id="plSaveBtn">保存设置</button>
-            <div style="color:#888;margin-top:8px;">建议用 Fine-grained token：只选这一个仓库，权限只开 Actions → Read and write，并设置过期时间。Token 只存在这台设备的浏览器里，不会写进页面代码。</div>
-          </div>
-        </details>
+        <div style="font-size:11px;color:#888;margin-top:8px;">使用「⚙️ 设置」里保存的 GitHub Token；工作流仓库默认自动识别：<span id="plRepoShow">—</span></div>
       </div>
       <div class="panel">
         <h2>加载预测报告</h2>
@@ -1228,7 +1169,7 @@
       <div class="card">
         <div class="cardTitle">⚙️ AI通道设置</div>
         <div class="status" style="margin-bottom:10px;" id="chatGwHint">
-          与走势图AI解读共用同一份 API 配置，若尚未填写请先在「走势图」页签设置一次。
+          与走势图AI解读共用同一份 API 配置，若尚未填写请先在「⚙️ 设置」页签填写一次。
         </div>
       </div>
 
@@ -1262,24 +1203,93 @@
       </div>
     </div><!-- end tabChat -->
 
+    <!-- ═══════════ 设置 Tab：所有需要保存的信息统一在这里 ═══════════ -->
+    <div id="tabSettings" class="tabContent">
+      <p class="appSub">所有需要保存的信息都集中在这一页，填一次，各个页签共用。内容只保存在这台设备的浏览器里，不会上传到任何服务器。</p>
+
+      <div class="panel">
+        <h2>🔗 GitHub（读取数据 · 扫码存档 · 启动流水线）</h2>
+      <div class="field">
+        <label>GitHub 仓库地址（推荐配置，配置后每天全自动更新）</label>
+        <input type="text" id="githubRepoInput" placeholder="用户名/仓库名，例如：zhangsan/fucai-data" style="font-family:monospace;">
+      </div>
+      <div class="status" style="margin-top:-6px;margin-bottom:10px;">
+        填好仓库地址后，工具每次点「一键获取」会直接读取 GitHub 上自动爬取好的 JSON 数据，<b>无需任何 API Key，每天22点自动更新</b>。<br>
+        没有仓库？见下方"如何配置"指引，5分钟完成，一次配置永久生效。
+      </div>
+
+        <div class="field">
+          <label>GitHub Token（扫码存档需要 Contents 读写；网页启动流水线需要 Actions 读写，仅保存在本机浏览器）</label>
+          <input type="password" id="scanTokenInput" placeholder="github_pat_… 或 ghp_…">
+        </div>
+        <details style="margin-bottom:10px;">
+          <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ 高级：工作流所在仓库（默认自动识别，一般不用填）</summary>
+          <div class="field" style="margin-top:8px;">
+            <label>放 .github/workflows/nightly.yml 的仓库（用户名/仓库名）</label>
+            <input type="text" id="plRepo" placeholder="" style="font-family:monospace;">
+          </div>
+        </details>
+        <button class="btn secondary" id="saveRepoBtn">保存设置</button>
+        <div class="status" id="settingsStatus"></div>
+      </div>
+
+      <div class="panel">
+        <h2>🤖 AI 通道（走势图解读 · AI文案助手共用）</h2>
+        <div class="field">
+          <label>API 地址（直连 OpenRouter，也可填自建 Gateway）</label>
+          <input type="text" id="gwUrlInput" placeholder="https://openrouter.ai/api" value="https://openrouter.ai/api" style="font-family:monospace;font-size:12px;">
+        </div>
+        <div class="field">
+          <label>OpenRouter API Key</label>
+          <input type="password" id="gwSecretInput" placeholder="sk-or-v1-...">
+        </div>
+        <div class="field">
+          <label>模型（推荐 openrouter/free 自动路由）</label>
+          <input type="text" id="gwModelInput" placeholder="openrouter/free" value="openrouter/free" style="font-family:monospace;font-size:12px;">
+        </div>
+        <div class="status" style="margin-bottom:10px;">
+        密钥只保存在本机浏览器，不会上传任何服务器。到 <b>openrouter.ai/keys</b> 免费注册即可获取（无需信用卡）。<br>
+        免费模型名单经常无预警轮换，写死单个模型ID容易突然失效；填 <code>openrouter/free</code> 会自动路由到当前可用的免费模型。<br>
+        免费额度：每分钟20次、每天50次（一次性充值满$10后升到1000次/天，额度永久有效）。</div>
+        <div class="status" style="margin-top:-4px;">这几项改动后自动保存。</div>
+      </div>
+
+      <div class="panel">
+        <h2>🔑 其它</h2>
+      <details style="margin-top:14px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ Claude API Key（直连失败时备用）</summary>
+        <div style="margin-top:10px;">
+          <div class="field">
+            <label>Anthropic API Key</label>
+            <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
+          </div>
+          <div class="status" style="margin-top:-4px;">Key 只存内存，刷新即清。填好后再点获取按钮使用。</div>
+        </div>
+      </details>
+
+      <details style="margin-top:10px;">
+        <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ 如何配置 GitHub 自动抓取（5分钟，一次配置永久生效）</summary>
+        <div style="margin-top:10px;font-size:13px;line-height:1.8;color:var(--ink);">
+          <b>第一步：</b>注册 <a href="https://github.com" target="_blank">github.com</a> 账号（免费）<br>
+          <b>第二步：</b>创建新仓库，命名为 <code>fucai-data</code>（设为 Public 公开）<br>
+          <b>第三步：</b>将下方两个文件上传到仓库根目录（从本工具的下载区获取）：<br>
+          &nbsp;&nbsp;• <code>lottery_crawler.py</code> — 爬虫脚本<br>
+          &nbsp;&nbsp;• <code>.github/workflows/crawl.yml</code> — 自动执行计划<br>
+          <b>第四步：</b>仓库 Settings → Actions → General → 勾选 "Allow GitHub Actions to create and approve pull requests" 并保存<br>
+          <b>第五步：</b>回到本工具，上方填入 <code>你的用户名/fucai-data</code>，点「保存仓库地址」<br>
+          <b>之后：</b>每天北京时间22:00 GitHub 自动跑爬虫，结果存到 latest.json，本工具直接读取。
+        </div>
+      </details>
+
+      </div>
+    </div><!-- end tabSettings -->
+
     <!-- 扫码存档Tab内容 -->
     <div id="tabScan" class="tabContent">
       <p class="appSub">名称/金额/编号支持拍照自动识别，中奖金额刮开后手动填写。四项凑齐后加入清单，记录同步保存到 GitHub 仓库，也可一键导出Excel。</p>
 
       <div class="scanLayout">
-        <div class="panel">
-          <h2>GitHub 存储设置</h2>
-          <div class="field">
-            <label>仓库地址（复用「海报生成」页签已保存的仓库）</label>
-            <input type="text" id="scanRepoInput" placeholder="例如 your-name/fucai-data">
-          </div>
-          <div class="field">
-            <label>GitHub Token（需勾选 Contents 读写权限，仅保存在本机浏览器）</label>
-            <input type="password" id="scanTokenInput" placeholder="github_pat_… 或 ghp_…">
-          </div>
-          <button class="btn secondary" id="scanSaveConfigBtn">保存设置</button>
-          <div class="status" id="scanConfigStatus"></div>
-        </div>
+        <div class="status" style="margin-bottom:10px;">仓库地址和 GitHub Token（需 Contents 读写权限）在「⚙️ 设置」页签里填写。</div>
 
         <div class="panel">
           <h2>拍照识别</h2>
@@ -2064,12 +2074,12 @@ async function generateAIReading(){
 
   if(!gwUrl){
     statusEl.className='status err';
-    statusEl.textContent='请先填入 API 地址（直连 OpenRouter 填 https://openrouter.ai/api）';
+    statusEl.textContent='请先在「⚙️ 设置」填入 API 地址（直连 OpenRouter 填 https://openrouter.ai/api）';
     return;
   }
   if(!gwSecret){
     statusEl.className='status err';
-    statusEl.textContent='请先填入 API Key（到 openrouter.ai/keys 免费获取）';
+    statusEl.textContent='请先在「⚙️ 设置」填入 API Key（到 openrouter.ai/keys 免费获取）';
     return;
   }
   if(!window._trendRecords || window._trendRecords.length===0){
@@ -2421,21 +2431,24 @@ try{
   if(savedRepo) document.getElementById('githubRepoInput').value = savedRepo;
 } catch(e){}
 
-// 保存仓库地址按钮
+// 保存设置按钮（仓库地址 + GitHub Token + 工作流仓库，一次保存）
 document.getElementById('saveRepoBtn').addEventListener('click', ()=>{
   const val = document.getElementById('githubRepoInput').value.trim();
+  const tok = document.getElementById('scanTokenInput').value.trim();
+  const plr = document.getElementById('plRepo').value.trim();
+  const st = document.getElementById('settingsStatus');
   try{
-    if(val){
-      localStorage.setItem('fucaiGithubRepo', val);
-      document.getElementById('fetchStatus').className = 'status ok';
-      document.getElementById('fetchStatus').textContent = `✓ 已保存仓库地址：${val}。下次点「获取」将优先从此处读取数据。`;
-    } else {
-      localStorage.removeItem('fucaiGithubRepo');
-      document.getElementById('fetchStatus').textContent = '已清除仓库地址。';
-    }
+    if(val) localStorage.setItem('fucaiGithubRepo', val); else localStorage.removeItem('fucaiGithubRepo');
+    if(tok) localStorage.setItem('fucaiScanGhToken', tok); else localStorage.removeItem('fucaiScanGhToken');
+    if(plr) localStorage.setItem('fucaiPipelineRepo', plr); else localStorage.removeItem('fucaiPipelineRepo');
+    st.className = 'status ok';
+    st.textContent = `✓ 已保存（仅存在本机浏览器）：仓库 ${val||'未填'}；Token ${tok?'已填':'未填'}。`;
+    try{ document.getElementById('fetchStatus').textContent = val ? `已保存仓库地址：${val}，下次点「获取」将优先从此处读取数据。` : '已清除仓库地址。'; }catch(e){}
+    if(typeof plRefreshRepoShow==='function') plRefreshRepoShow();
+    if(val && tok && typeof loadScanFromGithub==='function') loadScanFromGithub();
   } catch(e){
-    document.getElementById('fetchStatus').className = 'status err';
-    document.getElementById('fetchStatus').textContent = '保存失败（浏览器不支持本地存储）。';
+    st.className = 'status err';
+    st.textContent = '保存失败（浏览器不支持本地存储）。';
   }
 });
 
@@ -2463,7 +2476,7 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
 
     if(which==='trend'){
       stage.style.display='none'; trendWrap.style.display='block'; credit.style.display='none';
-    } else if(which==='predict' || which==='chat' || which==='scan'){
+    } else if(which==='predict' || which==='chat' || which==='scan' || which==='settings'){
       stage.style.display='none'; trendWrap.style.display='none'; credit.style.display='none';
       if(which==='chat'){
         const hint = document.getElementById('chatGwHint');
@@ -2471,10 +2484,10 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
         const gwSecret = document.getElementById('gwSecretInput').value.trim();
         if(gwUrl && gwSecret){
           hint.className = 'status ok';
-          hint.textContent = '✓ 已复用走势图页签的 API 配置，可以直接开始对话。';
+          hint.textContent = '✓ 已使用「⚙️ 设置」里的 API 配置，可以直接开始对话。';
         } else {
           hint.className = 'status err';
-          hint.textContent = '⚠️ 尚未配置 API，请先到「走势图」页签填写 OpenRouter 地址和 API Key 并保存。';
+          hint.textContent = '⚠️ 尚未配置 API，请先到「⚙️ 设置」页签填写 OpenRouter 地址和 API Key。';
         }
       }
       if(which==='scan' && typeof loadScanFromGithub==='function') loadScanFromGithub();
@@ -2561,7 +2574,7 @@ async function loadPrediction(){
   const repo=(localStorage.getItem('fucaiGithubRepo')||'').trim();
   if(!repo){
     statusEl.className='status err';
-    statusEl.textContent='请先在「海报生成」→「数据来源」里填写并保存 GitHub 仓库地址';
+    statusEl.textContent='请先在「⚙️ 设置」里填写并保存 GitHub 仓库地址';
     return;
   }
   btn.disabled=true; statusEl.className='status'; statusEl.textContent='正在并行加载三份预测文件…';
@@ -3428,7 +3441,7 @@ async function loadTrend(){
   const repo = (localStorage.getItem('fucaiGithubRepo') || '').trim();
   if(!repo){
     statusEl.className = 'status err';
-    statusEl.textContent = '请先在「数据来源」面板里填写并保存 GitHub 仓库地址。';
+    statusEl.textContent = '请先在「⚙️ 设置」里填写并保存 GitHub 仓库地址。';
     return;
   }
   statusEl.className = 'status';
@@ -4309,7 +4322,7 @@ async function sendChatMessage(){
 
   if(!gwUrl || !gwSecret){
     statusEl.className = 'status err';
-    statusEl.textContent = '请先在「走势图」页签配置好 API 地址和 API Key，再回来使用。';
+    statusEl.textContent = '请先在「⚙️ 设置」页签配置好 API 地址和 API Key，再回来使用。';
     return;
   }
 
@@ -4831,30 +4844,14 @@ async function addScanRecord(rec){
   return { ok:true };
 }
 
-/* ── GitHub 存储设置 ── */
+/* ── GitHub 存储设置：已统一到「⚙️ 设置」页签（仓库地址用 githubRepoInput，Token 用 scanTokenInput）── */
 try{
   const cfg = getScanConfig();
-  const repoInput = document.getElementById('scanRepoInput');
-  if(repoInput && !repoInput.value) repoInput.value = cfg.repo;
   const tokenInput = document.getElementById('scanTokenInput');
   if(tokenInput && cfg.token) tokenInput.value = cfg.token;
+  const plInput = document.getElementById('plRepo');
+  if(plInput) plInput.value = (localStorage.getItem('fucaiPipelineRepo')||'').trim();
 } catch(e){}
-
-document.getElementById('scanSaveConfigBtn').addEventListener('click', ()=>{
-  const repoVal = document.getElementById('scanRepoInput').value.trim();
-  const tokenVal = document.getElementById('scanTokenInput').value.trim();
-  const cfgStatus = document.getElementById('scanConfigStatus');
-  try{
-    if(repoVal) localStorage.setItem('fucaiGithubRepo', repoVal);
-    if(tokenVal) localStorage.setItem('fucaiScanGhToken', tokenVal);
-    cfgStatus.className = 'status ok';
-    cfgStatus.textContent = '✓ 设置已保存（仅存在本机浏览器），正在拉取该仓库的现有记录…';
-    loadScanFromGithub();
-  } catch(e){
-    cfgStatus.className = 'status err';
-    cfgStatus.textContent = '保存失败（浏览器不支持本地存储）。';
-  }
-});
 
 document.getElementById('scanRefreshBtn').addEventListener('click', loadScanFromGithub);
 document.getElementById('scanTypeFilter').addEventListener('change', e=>{
@@ -6062,10 +6059,19 @@ renderScanTable();
   const ls={get:k=>{try{return localStorage.getItem(k)||'';}catch(e){return '';}}, set:(k,v)=>{try{localStorage.setItem(k,v);}catch(e){}}};
   const WF='nightly.yml';
   let timer=null, pollN=0;
-  const cfg=()=>({repo:ls.get('fucaiPipelineRepo').trim(), token:ls.get('fucaiPipelineToken').trim()});
+  // 工作流所在仓库：设置里手动填了就用它；否则按网页地址自动识别（用户名.github.io/仓库名 → 用户名/仓库名；根域名 → 用户名/用户名.github.io）
+  function autoRepo(){
+    try{
+      const h=location.hostname; if(!h.endsWith('.github.io')) return '';
+      const owner=h.split('.')[0]; const seg=location.pathname.split('/').filter(Boolean)[0];
+      return (seg && !/\.html?$/i.test(seg)) ? `${owner}/${seg}` : `${owner}/${owner}.github.io`;
+    }catch(e){ return ''; }
+  }
+  const cfg=()=>({repo:(ls.get('fucaiPipelineRepo').trim()||autoRepo()), token:ls.get('fucaiScanGhToken').trim()});
+  window.plRefreshRepoShow=function(){ const e=$('plRepoShow'); if(e) e.textContent=cfg().repo||'未能自动识别，请到「⚙️ 设置」→ 高级里填写'; const p=$('plRepo'); if(p) p.placeholder=autoRepo()||'用户名/仓库名'; };
+  window.plRefreshRepoShow();
   const setSt=(t,cls)=>{const e=$('plStatus'); e.className='status'+(cls?' '+cls:''); e.textContent=t;};
   try{
-    $('plRepo').value=ls.get('fucaiPipelineRepo'); $('plToken').value=ls.get('fucaiPipelineToken');
     const sel=ls.get('fucaiPipelineSel'); if(sel){ try{ const o=JSON.parse(sel); $('plML').checked=!!o.ml; $('plDL').checked=!!o.dl; $('plRL').checked=!!o.rl; }catch(e){} }
   }catch(e){}
   async function api(method,path,body){
@@ -6076,13 +6082,13 @@ renderScanTable();
     if(!r.ok){
       let hint='';
       if(r.status===401) hint='（Token 无效或已过期）';
-      else if(r.status===403||r.status===404) hint='（Token 没有该仓库的 Actions 读写权限，或仓库名填错）';
+      else if(r.status===403||r.status===404) hint='（Token 对 '+repo+' 没有 Actions 读写权限，或仓库名不对；可在「⚙️ 设置」换 Token 或在高级里改仓库）';
       else if(r.status===422) hint='（找不到 '+WF+'，或它没开启手动触发 workflow_dispatch）';
       throw new Error(`HTTP ${r.status}${hint} ${(j&&j.message)||''}`.trim());
     }
     return j;
   }
-  function need(){ const c=cfg(); if(!c.repo||!c.token){ setSt('请先展开下面的「设置」，填写工作流所在仓库和 Token 并保存','err'); const d=document.querySelector('#pipelinePanel details'); if(d) d.open=true; return false; } return true; }
+  function need(){ const c=cfg(); if(!c.token){ setSt('还没有 GitHub Token，请到「⚙️ 设置」页签填写并保存','err'); return false; } if(!c.repo){ setSt('未能自动识别工作流仓库，请到「⚙️ 设置」→ 高级里填写','err'); return false; } return true; }
   const stTxt=r=>r.status!=='completed'?(r.status==='queued'?'⏳ 排队中':'🔄 运行中'):({success:'✅ 成功',failure:'❌ 失败',cancelled:'⛔ 已取消',skipped:'⏭ 已跳过',timed_out:'⌛ 超时'}[r.conclusion]||r.conclusion);
   const jobIcon=j=>j.status!=='completed'?(j.status==='queued'?'⏳':'🔄'):({success:'✅',failure:'❌',cancelled:'⛔',skipped:'⏭'}[j.conclusion]||'•');
   function bj(iso){ try{ return new Date(new Date(iso).getTime()+8*3600e3).toISOString().slice(5,16).replace('T',' '); }catch(e){ return iso; } }
@@ -6107,10 +6113,6 @@ renderScanTable();
       try{ const r=await latest(since); if(r){ await showRun(r); if(r.status==='completed') clearInterval(timer); } }catch(e){}
     },20000);
   }
-  $('plSaveBtn').addEventListener('click',()=>{
-    ls.set('fucaiPipelineRepo',$('plRepo').value.trim()); ls.set('fucaiPipelineToken',$('plToken').value.trim());
-    setSt('✓ 设置已保存（只存在本机浏览器）','ok');
-  });
   $('plStatusBtn').addEventListener('click',async()=>{
     if(!need()) return;
     try{ setSt('查询中…'); const r=await latest(); if(!r){ setSt('该工作流还没有运行记录'); return; } await showRun(r); if(r.status!=='completed') poll(0); }
