@@ -1110,22 +1110,6 @@
     <!-- ═══════════ ML预测报告 Tab ═══════════ -->
     <div id="tabPredict" class="tabContent">
       <p class="appSub">基于 XGBoost + LightGBM + 随机森林 + 马尔可夫 + 遗漏分析，每日 Kaggle 自动训练生成。</p>
-      <div class="panel" id="pipelinePanel">
-        <h2>▶ 启动云端流水线</h2>
-        <div style="font-size:12px;color:#888;margin-bottom:8px;">在 GitHub 上启动「每晚 ML→DL→RL」工作流，由它去推送并运行三个 Kaggle 脚本。勾选要跑哪几步，ML 不跑时 RL 也能单独跑。</div>
-        <div id="plChecks" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:13px;">
-          <label><input type="checkbox" id="plML"> ML</label>
-          <label><input type="checkbox" id="plDL"> DL（约1.7小时）</label>
-          <label><input type="checkbox" id="plRL" checked> RL</label>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn" id="plRunBtn">🚀 启动所选</button>
-          <button class="btn secondary" id="plStatusBtn">🔄 查看最近一次运行</button>
-        </div>
-        <div class="status" id="plStatus" style="margin-top:8px;"></div>
-        <div id="plJobs" style="margin-top:6px;font-size:12px;line-height:1.8;"></div>
-        <div style="font-size:11px;color:#888;margin-top:8px;">使用「⚙️ 设置」里保存的 GitHub Token；工作流仓库默认自动识别：<span id="plRepoShow">—</span></div>
-      </div>
       <div class="panel">
         <h2>加载预测报告</h2>
         <button class="btn secondary" id="loadPredictBtn">📥 加载今日预测报告</button>
@@ -1165,7 +1149,25 @@
 
     <!-- AI文案助手Tab内容 -->
     <div id="tabChat" class="tabContent">
-      <p class="appSub">告诉AI你的需求，帮你写朋友圈、微信文案，或者聊聊其它的都可以。用的是「走势图分析」里配置的同一个AI通道。</p>
+      <p class="appSub">告诉AI你的需求，帮你写朋友圈、微信文案，或者聊聊其它的都可以。AI 通道在「⚙️ 设置」里配置。下面也可以启动云端流水线。</p>
+
+      <div class="card" id="pipelinePanel">
+        <div class="cardTitle">▶ 启动云端流水线</div>
+        <div style="font-size:12px;color:#888;margin-bottom:8px;">在 GitHub 上启动「每晚 ML→DL→RL」工作流，由它去推送并运行三个 Kaggle 脚本。勾选要跑哪几步，ML 不跑时 RL 也能单独跑。</div>
+        <div id="plChecks" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:13px;">
+          <label><input type="checkbox" id="plML"> ML</label>
+          <label><input type="checkbox" id="plDL"> DL（约1.7小时）</label>
+          <label><input type="checkbox" id="plRL" checked> RL</label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn" id="plRunBtn">🚀 启动所选</button>
+          <button class="btn secondary" id="plStatusBtn">🔄 查看最近一次运行</button>
+        </div>
+        <div class="status" id="plStatus" style="margin-top:8px;"></div>
+        <div id="plJobs" style="margin-top:6px;font-size:12px;line-height:1.8;"></div>
+        <div style="font-size:11px;color:#888;margin-top:8px;">使用「⚙️ 设置」里保存的 GitHub Token；工作流仓库默认自动识别：<span id="plRepoShow">—</span></div>
+      </div>
+
 
       <div class="card">
         <div class="cardTitle">⚙️ AI通道设置</div>
