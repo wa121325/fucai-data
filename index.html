@@ -1158,6 +1158,32 @@
     <!-- ═══════════ ML预测报告 Tab ═══════════ -->
     <div id="tabPredict" class="tabContent">
       <p class="appSub">基于 XGBoost + LightGBM + 随机森林 + 马尔可夫 + 遗漏分析，每日 Kaggle 自动训练生成。</p>
+      <div class="panel" id="pipelinePanel">
+        <h2>▶ 启动云端流水线</h2>
+        <div style="font-size:12px;color:#888;margin-bottom:8px;">在 GitHub 上启动「每晚 ML→DL→RL」工作流，由它去推送并运行三个 Kaggle 脚本。勾选要跑哪几步，ML 不跑时 RL 也能单独跑。</div>
+        <div id="plChecks" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:13px;">
+          <label><input type="checkbox" id="plML"> ML</label>
+          <label><input type="checkbox" id="plDL"> DL（约1.7小时）</label>
+          <label><input type="checkbox" id="plRL" checked> RL</label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn" id="plRunBtn">🚀 启动所选</button>
+          <button class="btn secondary" id="plStatusBtn">🔄 查看最近一次运行</button>
+        </div>
+        <div class="status" id="plStatus" style="margin-top:8px;"></div>
+        <div id="plJobs" style="margin-top:6px;font-size:12px;line-height:1.8;"></div>
+        <details style="margin-top:10px;font-size:12px;">
+          <summary style="cursor:pointer;color:#666;">⚙ 设置（只需填一次，保存在本机浏览器）</summary>
+          <div style="margin-top:8px;">
+            <div style="margin-bottom:6px;">工作流所在仓库（放 .github/workflows/nightly.yml 的那个，格式 用户名/仓库名）：</div>
+            <input id="plRepo" type="text" placeholder="例如 wa121325/xxxx" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;">
+            <div style="margin-bottom:6px;">GitHub Token（需要对该仓库有 Actions 读写权限）：</div>
+            <input id="plToken" type="password" placeholder="github_pat_…" style="width:100%;box-sizing:border-box;padding:6px;margin-bottom:8px;">
+            <button class="btn secondary" id="plSaveBtn">保存设置</button>
+            <div style="color:#888;margin-top:8px;">建议用 Fine-grained token：只选这一个仓库，权限只开 Actions → Read and write，并设置过期时间。Token 只存在这台设备的浏览器里，不会写进页面代码。</div>
+          </div>
+        </details>
+      </div>
       <div class="panel">
         <h2>加载预测报告</h2>
         <button class="btn secondary" id="loadPredictBtn">📥 加载今日预测报告</button>
@@ -6008,6 +6034,84 @@ document.getElementById('statTypeSel').addEventListener('mousedown', statsFillTy
 // 初次加载：先用本地缓存快速显示，再尝试从GitHub拉取最新版本
 scanRecords = loadLocalCache();
 renderScanTable();
+
+/* ── 网页端启动 GitHub Actions「每晚 ML→DL→RL」工作流，并显示各步骤进度 ── */
+(function(){
+  const $=id=>document.getElementById(id);
+  const ls={get:k=>{try{return localStorage.getItem(k)||'';}catch(e){return '';}}, set:(k,v)=>{try{localStorage.setItem(k,v);}catch(e){}}};
+  const WF='nightly.yml';
+  let timer=null, pollN=0;
+  const cfg=()=>({repo:ls.get('fucaiPipelineRepo').trim(), token:ls.get('fucaiPipelineToken').trim()});
+  const setSt=(t,cls)=>{const e=$('plStatus'); e.className='status'+(cls?' '+cls:''); e.textContent=t;};
+  try{
+    $('plRepo').value=ls.get('fucaiPipelineRepo'); $('plToken').value=ls.get('fucaiPipelineToken');
+    const sel=ls.get('fucaiPipelineSel'); if(sel){ try{ const o=JSON.parse(sel); $('plML').checked=!!o.ml; $('plDL').checked=!!o.dl; $('plRL').checked=!!o.rl; }catch(e){} }
+  }catch(e){}
+  async function api(method,path,body){
+    const {repo,token}=cfg();
+    const r=await fetch(`https://api.github.com/repos/${repo}${path}`,{method,headers:{'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    if(r.status===204) return null;
+    const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){}
+    if(!r.ok){
+      let hint='';
+      if(r.status===401) hint='（Token 无效或已过期）';
+      else if(r.status===403||r.status===404) hint='（Token 没有该仓库的 Actions 读写权限，或仓库名填错）';
+      else if(r.status===422) hint='（找不到 '+WF+'，或它没开启手动触发 workflow_dispatch）';
+      throw new Error(`HTTP ${r.status}${hint} ${(j&&j.message)||''}`.trim());
+    }
+    return j;
+  }
+  function need(){ const c=cfg(); if(!c.repo||!c.token){ setSt('请先展开下面的「设置」，填写工作流所在仓库和 Token 并保存','err'); const d=document.querySelector('#pipelinePanel details'); if(d) d.open=true; return false; } return true; }
+  const stTxt=r=>r.status!=='completed'?(r.status==='queued'?'⏳ 排队中':'🔄 运行中'):({success:'✅ 成功',failure:'❌ 失败',cancelled:'⛔ 已取消',skipped:'⏭ 已跳过',timed_out:'⌛ 超时'}[r.conclusion]||r.conclusion);
+  const jobIcon=j=>j.status!=='completed'?(j.status==='queued'?'⏳':'🔄'):({success:'✅',failure:'❌',cancelled:'⛔',skipped:'⏭'}[j.conclusion]||'•');
+  function bj(iso){ try{ return new Date(new Date(iso).getTime()+8*3600e3).toISOString().slice(5,16).replace('T',' '); }catch(e){ return iso; } }
+  async function showRun(run){
+    setSt(`${stTxt(run)} · ${run.name||'工作流'} #${run.run_number} · 开始于 ${bj(run.created_at)}（北京时间）`, run.conclusion==='failure'?'err':(run.status==='completed'&&run.conclusion==='success'?'ok':''));
+    try{
+      const j=await api('GET',`/actions/runs/${run.id}/jobs`);
+      const names={gate:'开关检查',ml:'ML',dl:'DL',rl:'RL'};
+      $('plJobs').innerHTML=(j.jobs||[]).map(x=>`${jobIcon(x)} ${names[x.name]||x.name}`).join('　')+`　<a href="${run.html_url}" target="_blank" rel="noopener">在 GitHub 查看详情</a>`;
+    }catch(e){ $('plJobs').innerHTML=`<a href="${run.html_url}" target="_blank" rel="noopener">在 GitHub 查看详情</a>`; }
+    return run;
+  }
+  async function latest(since){
+    const j=await api('GET',`/actions/workflows/${WF}/runs?per_page=5`);
+    const runs=(j.workflow_runs||[]).filter(r=>!since||new Date(r.created_at).getTime()>=since-15000);
+    return runs[0]||null;
+  }
+  function poll(since){
+    clearInterval(timer); pollN=0;
+    timer=setInterval(async()=>{
+      if(++pollN>720){ clearInterval(timer); return; }
+      try{ const r=await latest(since); if(r){ await showRun(r); if(r.status==='completed') clearInterval(timer); } }catch(e){}
+    },20000);
+  }
+  $('plSaveBtn').addEventListener('click',()=>{
+    ls.set('fucaiPipelineRepo',$('plRepo').value.trim()); ls.set('fucaiPipelineToken',$('plToken').value.trim());
+    setSt('✓ 设置已保存（只存在本机浏览器）','ok');
+  });
+  $('plStatusBtn').addEventListener('click',async()=>{
+    if(!need()) return;
+    try{ setSt('查询中…'); const r=await latest(); if(!r){ setSt('该工作流还没有运行记录'); return; } await showRun(r); if(r.status!=='completed') poll(0); }
+    catch(e){ setSt('查询失败：'+e.message,'err'); }
+  });
+  $('plRunBtn').addEventListener('click',async()=>{
+    if(!need()) return;
+    const ml=$('plML').checked, dl=$('plDL').checked, rl=$('plRL').checked;
+    if(!ml&&!dl&&!rl){ setSt('请至少勾选一步','err'); return; }
+    ls.set('fucaiPipelineSel',JSON.stringify({ml,dl,rl}));
+    const names=[ml&&'ML',dl&&'DL',rl&&'RL'].filter(Boolean).join(' → ');
+    if(!confirm(`确定启动：${names} ？`+(dl?'\n\nDL 大约要跑 1.7 小时。':''))) return;
+    const btn=$('plRunBtn'); btn.disabled=true;
+    try{
+      const t0=Date.now();
+      await api('POST',`/actions/workflows/${WF}/dispatches`,{ref:'main',inputs:{run_ml:String(ml),run_dl:String(dl),run_rl:String(rl)}});
+      setSt(`✓ 已发出启动请求（${names}），等待 GitHub 创建运行…`,'ok'); $('plJobs').textContent='';
+      for(let i=0;i<8;i++){ await new Promise(r=>setTimeout(r,4000)); const r=await latest(t0); if(r){ await showRun(r); poll(t0); break; } }
+    }catch(e){ setSt('启动失败：'+e.message,'err'); }
+    btn.disabled=false;
+  });
+})();
 </script>
 </body>
 </html>
