@@ -1018,6 +1018,9 @@
       </div>
     </div>
 
+    <button class="btn" id="downloadBtn">下载海报图片（PNG）</button>
+    <p class="status" id="downloadStatus"></p>
+
     <div class="panel">
       <h2>数据来源</h2>
       <div class="status" style="margin-bottom:10px;">仓库地址、GitHub Token、各类 API Key 都统一在「⚙️ 设置」页签里填写保存，这里只负责获取。</div>
@@ -1050,8 +1053,6 @@
       </div>
     </div>
 
-    <button class="btn" id="downloadBtn">下载海报图片（PNG）</button>
-    <p class="status" id="downloadStatus"></p>
     </div><!-- end tabPoster -->
 
     <!-- 走势图Tab内容 -->
@@ -6082,7 +6083,8 @@ renderScanTable();
     if(!r.ok){
       let hint='';
       if(r.status===401) hint='（Token 无效或已过期）';
-      else if(r.status===403||r.status===404) hint='（Token 对 '+repo+' 没有 Actions 读写权限，或仓库名不对；可在「⚙️ 设置」换 Token 或在高级里改仓库）';
+      else if(r.status===403) hint='（仓库 '+repo+' 没问题，是这个 Token 缺少「Actions: Read and write」权限。到 GitHub → Settings → Developer settings → 该 Token → Repository permissions → Actions 改成 Read and write，保存后回来重试，不用重新填 Token）';
+      else if(r.status===404) hint='（找不到仓库 '+repo+'，或 Token 没有访问它的权限；可在「⚙️ 设置」→ 高级里改仓库）';
       else if(r.status===422) hint='（找不到 '+WF+'，或它没开启手动触发 workflow_dispatch）';
       throw new Error(`HTTP ${r.status}${hint} ${(j&&j.message)||''}`.trim());
     }
