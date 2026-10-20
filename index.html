@@ -2998,6 +2998,7 @@ function renderDLResult(dlResult){
   const lstmTfm = dlResult.lstm_tfm;
   const rl = dlResult.rl;
   if(!lstmTfm && !rl){ panel.style.display='none'; return; }
+  { const _bar=document.getElementById('rlVersionBar'); if(_bar && _bar.parentNode!==el.parentNode) el.parentNode.insertBefore(_bar, el); }
   panel.style.display='block';
 
   const metaParts = [];
@@ -3036,6 +3037,7 @@ function renderDLResult(dlResult){
 
   // ── PPO 强化学习结果与推荐（每日） ──
   if(rl && rl.results){
+    html += `<div id="rlVersionSlot" style="margin-top:14px;"></div>`;
     html += `<div class="sectionTitle" style="font-size:13px;margin-top:14px;">🤖 强化学习策略（${(rl.mode==='prob_direct')?'概率直出':'每日增量微调'}）</div>`;
     html += `<div style="font-size:11px;color:#888;margin-bottom:10px;">${rl.state_composition||''}</div>`;
 
@@ -3274,6 +3276,7 @@ function renderDLResult(dlResult){
   }
 
   el.innerHTML = html || '<div class="status">暂无DL/RL结果（请先运行 kaggle_lstm_tfm.py 和 kaggle_rl_daily.py）</div>';
+  { const _bar=document.getElementById('rlVersionBar'), _slot=document.getElementById('rlVersionSlot'); if(_bar && _slot){ _bar.style.marginBottom='0'; _slot.appendChild(_bar); } }
 }
 
 /* 目标值的人话说明：重号/斜连/热点三个分档目标，0/1/2 看不出含义，这里翻成个数范围 */
