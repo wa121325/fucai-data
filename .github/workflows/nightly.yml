@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.g.outputs.enabled }}
+      skip_ml: ${{ steps.fresh.outputs.skip_ml }}
+      skip_dl: ${{ steps.fresh.outputs.skip_dl }}
+      skip_rl: ${{ steps.fresh.outputs.skip_rl }}
     steps:
       - uses: actions/checkout@v4
       - id: g
@@ -35,10 +38,50 @@ jobs:
           [ -f ci/switch.env ] && source ci/switch.env
           if [ "${{ github.event_name }}" != "schedule" ]; then NIGHTLY_ENABLED=true; fi
           echo "enabled=$NIGHTLY_ENABLED" >> "$GITHUB_OUTPUT"
+      # 定时触发时：如果你已经手动跑过、结果比"最新一期开奖"还新，这一步就不用再跑。
+      #   判断标准：数据仓库里结果文件的 updated_at（UTC），晚于 history.json 里最新一期开奖的公布时间（当天北京时间21:30）。
+      #   也就是"那次运行之后没有新开奖、数据也没变"，再跑一遍得到的结果是一样的。
+      #   ML 或 DL 要重跑时，RL 一定跟着重跑（RL 要吃它们的最新结果）。
+      #   手动触发（网页按钮/Actions 页面）永远照勾选的跑，不受这个判断影响；读取失败时按"需要跑"处理。
+      - id: fresh
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import os, json, time, urllib.request
+          from datetime import datetime, timedelta
+          out = {'skip_ml': False, 'skip_dl': False, 'skip_rl': False}
+          try:
+              if os.environ.get('EVENT') == 'schedule':
+                  base = os.environ.get('DATA_BASE') or f"https://raw.githubusercontent.com/{os.environ['DATA_REPO']}/main"
+                  def get(p):
+                      req = urllib.request.Request(f"{base}/{p}?t={int(time.time())}", headers={'Cache-Control': 'no-cache', 'User-Agent': 'ci'})
+                      return json.loads(urllib.request.urlopen(req, timeout=60).read().decode('utf-8'))
+                  hist = get('history.json')
+                  latest = max(str(hist[g][-1]['date'])[:10] for g in ('3d', 'ssq', 'kl8') if hist.get(g))
+                  pub_utc = datetime.strptime(latest, '%Y-%m-%d') + timedelta(hours=21, minutes=30) - timedelta(hours=8)   # 当天21:30北京时间 → UTC
+                  print(f"最新一期开奖日期 {latest}，公布时间约 {pub_utc:%Y-%m-%d %H:%M} UTC")
+                  for key, f in (('skip_ml', 'prediction.json'), ('skip_dl', 'dl_lstm_tfm.json'), ('skip_rl', 'dl_rl.json')):
+                      try:
+                          ua = datetime.strptime(str(get(f).get('updated_at', ''))[:16], '%Y-%m-%d %H:%M')
+                          out[key] = ua > pub_utc
+                          print(f"  {f} 更新于 {ua:%Y-%m-%d %H:%M} UTC → {'已是最新，跳过' if out[key] else '需要跑'}")
+                      except Exception as e:
+                          print(f"  {f} 读取失败，按需要跑处理: {e}")
+                  out['skip_rl'] = out['skip_rl'] and out['skip_ml'] and out['skip_dl']
+                  print(f"RL：{'它自己和上游都已是最新，跳过' if out['skip_rl'] else '需要跑（自己不是最新，或上游 ML/DL 要重跑）'}")
+              else:
+                  print("手动触发：不做跳过判断")
+          except Exception as e:
+              print(f"跳过判断出错，全部按需要跑处理: {e}")
+              out = {'skip_ml': False, 'skip_dl': False, 'skip_rl': False}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              for k, v in out.items(): fh.write(f"{k}={'true' if v else 'false'}\n")
+          PY
 
   ml:
     needs: gate
-    if: ${{ needs.gate.outputs.enabled == 'true' && github.event.inputs.run_ml != 'false' }}
+    if: ${{ needs.gate.outputs.enabled == 'true' && needs.gate.outputs.skip_ml != 'true' && github.event.inputs.run_ml != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -56,7 +99,7 @@ jobs:
 
   dl:
     needs: [gate, ml]
-    if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && github.event.inputs.run_dl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && needs.gate.outputs.skip_dl != 'true' && github.event.inputs.run_dl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
@@ -78,7 +121,7 @@ jobs:
   rl:
     needs: [gate, ml, dl]
     # ML 成功就跑 RL；DL 失败不拦截（共识投票会自动把过期的 DL 排除）
-    if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && github.event.inputs.run_rl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.gate.outputs.enabled == 'true' && needs.gate.outputs.skip_rl != 'true' && github.event.inputs.run_rl != 'false' && (needs.ml.result == 'success' || needs.ml.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
