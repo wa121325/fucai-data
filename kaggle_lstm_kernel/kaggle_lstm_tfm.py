@@ -128,6 +128,8 @@ WINDOW = 50; SEQ_LEN = 20
 DL_BACKTEST = False
 # 热启动开关：False=每次都从头全量训练（不加载上次权重微调）；True=恢复滑动窗口热启动微调
 DL_WARM_START = False
+# 特征缓存开关：False=每个目标都重新计算特征（慢，约2小时，与旧版完全一致）；True=同游戏只算一次特征（快，结果相同）
+DL_FEAT_CACHE = False
 
 # ══════════════════════════════════════════════════════
 #  新增特征辅助函数（三个脚本共用，务必保持完全一致）
@@ -545,6 +547,9 @@ def build_predict_seq(records, feat_fn, seq_len=SEQ_LEN):
 _FEAT_ROW_CACHE = {}   # 同一个游戏的每个目标都要重算一遍同样的特征，缓存后只算一次（快乐8目标变多了，避免训练时间翻倍）
 
 def _feat_row(feat_fn, records, j):
+    if not DL_FEAT_CACHE:
+        feat = feat_fn(records, j)
+        return None if feat is None else list(feat.values())
     key = (feat_fn.__name__, id(records), len(records), j)
     if key not in _FEAT_ROW_CACHE:
         feat = feat_fn(records, j)
