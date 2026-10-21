@@ -2986,6 +2986,7 @@ async function switchRlVersion(file){
     if(!data) throw new Error('没有可显示的数据');
     pred.dl_result.rl=data;
     renderDLResult(pred.dl_result);
+    try{ attachBlockDownloads(); }catch(e){ console.error('下载按钮', e); }   // 重新渲染会清掉各推荐块上的「下载图片」按钮，这里补回
   }catch(e){ if(note) note.textContent='⚠ 加载失败：'+e.message; }
 }
 
