@@ -2543,23 +2543,49 @@ async function downloadBallImage(nodes, title, btn){
   nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
     if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
     wrap.appendChild(c); });
-  // 3D：把「共识直选」12注附在图片末尾（若导出的块本身就是共识块则不重复）
+  // 3D 专用版式：推荐 | 采样 | 共识 三列；左下角放组选(组三/组六)推荐，二维码靠右下角
+  let d3Layout = false, gcBets = null;
   try{
-    if(/福彩3D/.test(title) && !wrap.textContent.includes('共识直选')){
+    if(/福彩3D/.test(title)){
       const rl = window._lastPrediction && window._lastPrediction.dl_result && window._lastPrediction.dl_result.rl;
-      const bets = rl && rl.results && rl.results['3d'] && rl.results['3d'].consensus && rl.results['3d'].consensus.bets;
-      if(bets && bets.length){
-        const cs = document.createElement('div');
-        cs.style.cssText='margin-top:10px;padding-top:8px;border-top:1px dashed #ddd;';
-        const ball = n=>`<span style="display:inline-block;width:18px;height:18px;line-height:18px;border-radius:50%;background:#7c3aed;color:#fff;font-size:9px;font-weight:700;text-align:center;margin:1px">${n}</span>`;
-        cs.innerHTML = `<div style="font-size:12px;color:#666;margin-bottom:3px;">共识直选（${bets.length}注）：</div>`
-          + bets.map((b,i)=>`<div style="white-space:nowrap;padding:2px 6px;"><span style="margin-right:4px;font-size:12px;">${i+1}.</span>${b.digits.map(ball).join('')} <span style="color:#888;font-size:10px;">${b.prob}%</span></div>`).join('');
-        wrap.appendChild(cs);
+      const cons = rl && rl.results && rl.results['3d'] && rl.results['3d'].consensus;
+      const bets = cons && cons.bets;
+      const flex = wrap.querySelector('.ball-flex');
+      if(bets && bets.length && flex && !wrap.textContent.includes('共识直选')){
+        wrap.style.width = '620px';
+        const col = document.createElement('div');
+        col.style.cssText = 'flex:1 1 0;min-width:0;';
+        const bl = n=>`<span class="ball-r" style="width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;background:#7c3aed;">${n}</span>`;
+        col.innerHTML = `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">共识（${bets.length}注）：</span></div>`
+          + bets.map((b,i)=>`<div class="rec-group" style="white-space:nowrap;padding:4px 6px;margin:3px 0;display:block;"><span style="margin-right:4px;">${i+1}.</span>${b.digits.map(bl).join('')}</div>`).join('');
+        flex.appendChild(col);
+        d3Layout = true;
+        gcBets = cons.group_cover && cons.group_cover.bets;
       }
     }
-  }catch(e){}
+  }catch(e){ console.error('3D版式', e); }
   const qrImg = (state.qr && state.qr.image) || '';
-  if(qrImg){
+  if(d3Layout){
+    // 底部一行：左=组选推荐，右=二维码（靠右下角）
+    const row = document.createElement('div');
+    row.style.cssText='display:flex;justify-content:space-between;align-items:flex-end;gap:12px;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
+    const left = document.createElement('div');
+    left.style.cssText='flex:1 1 auto;min-width:0;';
+    if(gcBets && gcBets.length){
+      const gb = (n,t)=>`<span style="display:inline-block;width:16px;height:16px;line-height:16px;border-radius:50%;background:${t==='组六'?'#0d9488':'#d97706'};color:#fff;font-size:9px;font-weight:700;text-align:center;margin:1px">${n}</span>`;
+      left.innerHTML = `<div style="font-size:12px;color:#666;margin-bottom:3px;">组三/组六推荐（${gcBets.length}注）：</div>`
+        + gcBets.map(b=>`<div style="white-space:nowrap;font-size:11px;color:#555;padding:1px 0;"><span style="display:inline-block;width:32px;">${b.type}</span>${b.digits.map(n=>gb(n,b.type)).join('')} <span style="color:#999;font-size:10px;">${b.prob}%</span></div>`).join('');
+    }
+    row.appendChild(left);
+    if(qrImg){
+      const q = document.createElement('div');
+      q.style.cssText='flex:0 0 auto;text-align:center;';
+      q.innerHTML = `<img src="${qrImg}" style="width:120px;height:120px;display:block;margin:0 0 0 auto;">`
+        + (state.qr.caption ? `<div style="font-size:11px;color:#666;margin-top:3px;">${state.qr.caption.replace(/</g,'&lt;')}</div>` : '');
+      row.appendChild(q);
+    }
+    wrap.appendChild(row);
+  } else if(qrImg){
     const q = document.createElement('div');
     q.style.cssText='text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
     q.innerHTML = `<img src="${qrImg}" style="width:140px;height:140px;display:inline-block;">`
