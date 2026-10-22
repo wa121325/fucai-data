@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-10-23 01:42:24",
+ "updated_at": "2026-10-23 01:55:53",
  "games": {
   "3d": {
    "game": "3d",
@@ -17,91 +17,112 @@
      "z": -0.15
     },
     "n_eval": 1000,
+    "l2": 10.0,
     "model_minus_freq": {
      "mean_hits": 0.018,
-     "z": 1.73
+     "z": 1.7
     }
    },
    "history_weights": {
-    "ln_f30": -0.0493,
-    "ln_f100": -0.0008,
-    "ln_f300": 0.0724,
-    "omit_ratio": 0.0089,
-    "pos_hot": 0.0127,
-    "share_last": 0.0117,
-    "is_zu3": -0.2282,
-    "is_baozi": -0.3134,
-    "ln_q": 0.7197
+    "ln_f30": -0.0542,
+    "ln_f100": -0.0213,
+    "ln_f300": 0.0632,
+    "omit_ratio": -0.0282,
+    "pos_hot": 0.012,
+    "share_last": 0.0132,
+    "ln_sum100": 0.0448,
+    "ln_span100": -0.0187,
+    "ln_f10": -0.0037,
+    "omit_sq": 0.0429,
+    "is_zu3": -0.2407,
+    "is_baozi": -0.2928,
+    "ln_q": 0.6915
    },
-   "n_logged": 5,
-   "n_labeled": 4,
-   "full_note": "推荐信号记录 4 期，需要 100 期才能把各路推荐并进来检验。",
-   "status": "fallback",
-   "reason": "滚动检验未达到「显著好于随机(z≥2)且好于频率基线」，沿用共识/RL 排序。",
-   "source": "consensus",
+   "n_logged_periods": 3,
+   "n_versions": 14,
+   "n_labeled": 2,
+   "logged_eval": {
+    "blend": {
+     "hits": 0.0,
+     "expected": 0.14,
+     "z": -0.39
+    },
+    "only_H": {
+     "hits": 0.0,
+     "expected": 0.14,
+     "z": -0.39
+    }
+   },
+   "lambda": 0.5,
+   "lambda_note": "默认（已标注的推荐期不足 10 期，暂不据此调权重）",
+   "evidence": "none",
+   "evidence_z": -0.73,
+   "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.73",
+   "source": "blend",
+   "base_qihao": "2026281",
+   "n_versions_today": 2,
    "picks": [
     {
-     "d": "266",
-     "score": 0.36,
-     "kind": "组三"
-    },
-    {
-     "d": "268",
-     "score": 0.312,
-     "kind": "组六"
-    },
-    {
-     "d": "066",
-     "score": 0.288,
-     "kind": "组三"
-    },
-    {
-     "d": "166",
-     "score": 0.288,
-     "kind": "组三"
-    },
-    {
-     "d": "155",
-     "score": 0.262,
-     "kind": "组三"
-    },
-    {
-     "d": "288",
-     "score": 0.262,
-     "kind": "组三"
-    },
-    {
-     "d": "256",
-     "score": 0.249,
-     "kind": "组六"
-    },
-    {
-     "d": "177",
-     "score": 0.236,
-     "kind": "组三"
-    },
-    {
-     "d": "226",
-     "score": 0.236,
-     "kind": "组三"
-    },
-    {
      "d": "267",
-     "score": 0.236,
+     "score": 3.631,
      "kind": "组六"
-    },
-    {
-     "d": "488",
-     "score": 0.236,
-     "kind": "组三"
     },
     {
      "d": "167",
-     "score": 0.223,
+     "score": 2.734,
+     "kind": "组六"
+    },
+    {
+     "d": "367",
+     "score": 2.636,
+     "kind": "组六"
+    },
+    {
+     "d": "379",
+     "score": 2.53,
+     "kind": "组六"
+    },
+    {
+     "d": "278",
+     "score": 2.526,
+     "kind": "组六"
+    },
+    {
+     "d": "268",
+     "score": 1.989,
+     "kind": "组六"
+    },
+    {
+     "d": "146",
+     "score": 1.786,
+     "kind": "组六"
+    },
+    {
+     "d": "067",
+     "score": 1.731,
+     "kind": "组六"
+    },
+    {
+     "d": "237",
+     "score": 1.718,
+     "kind": "组六"
+    },
+    {
+     "d": "678",
+     "score": 1.661,
+     "kind": "组六"
+    },
+    {
+     "d": "279",
+     "score": 1.648,
+     "kind": "组六"
+    },
+    {
+     "d": "247",
+     "score": 1.606,
      "kind": "组六"
     }
-   ],
-   "base_qihao": "2026281"
+   ]
   },
   "kl8": {
    "game": "kl8",
@@ -109,9 +130,9 @@
    "n_history": 2102,
    "history_eval": {
     "model": {
-     "avg_hits": 2.465,
+     "avg_hits": 2.417,
      "expected": 2.5,
-     "z": -0.54
+     "z": -1.28
     },
     "freq": {
      "avg_hits": 2.317,
@@ -119,156 +140,178 @@
      "z": -2.83
     },
     "n_eval": 400,
+    "l2": 10.0,
     "model_minus_freq": {
-     "mean_hits": 0.1475,
-     "z": 1.64
+     "mean_hits": 0.1,
+     "z": 1.12
     }
    },
    "history_weights": {
-    "ln_f5": -0.2045,
-    "ln_f10": -0.2342,
-    "ln_f30": 0.0078,
-    "ln_f100": 0.0896,
-    "omit_ratio": -0.5108,
-    "in_prev": -0.6009,
-    "nb_prev": -0.3136,
-    "ball_n": -0.8422
+    "ln_f3": -0.2775,
+    "ln_f5": -0.3208,
+    "ln_f10": -0.1138,
+    "ln_f20": 0.168,
+    "ln_f30": -0.0341,
+    "ln_f100": 0.05,
+    "omit_ratio": -1.2787,
+    "omit_sq": 1.3542,
+    "in_prev": -0.5999,
+    "nb_prev": -0.161,
+    "zone_hot30": -0.1777,
+    "is_odd": -0.1342,
+    "ball_n": -0.4528
    },
-   "n_logged": 2,
-   "n_labeled": 1,
-   "full_note": "推荐信号记录 1 期，需要 100 期才能把各路推荐并进来检验。",
-   "status": "fallback",
-   "reason": "滚动检验未达到「显著好于随机(z≥2)且好于频率基线」，沿用共识/RL 排序。",
-   "source": "consensus",
+   "n_logged_periods": 3,
+   "n_versions": 14,
+   "n_labeled": 2,
+   "logged_eval": {
+    "blend": {
+     "hits": 4.0,
+     "expected": 5.0,
+     "z": -0.55
+    },
+    "only_H": {
+     "hits": 4.0,
+     "expected": 5.0,
+     "z": -0.55
+    }
+   },
+   "lambda": 0.5,
+   "lambda_note": "默认（已标注的推荐期不足 10 期，暂不据此调权重）",
+   "evidence": "none",
+   "evidence_z": -1.28,
+   "evidence_basis": "开奖号码信号 400 期滚动检验 z=-1.28",
+   "source": "blend",
+   "base_qihao": "2026281",
+   "n_versions_today": 2,
    "ranking": [
     {
      "ball": 28,
-     "score": 2.472
-    },
-    {
-     "ball": 74,
-     "score": 2.247
+     "score": 4.13
     },
     {
      "ball": 7,
-     "score": 1.807
-    },
-    {
-     "ball": 37,
-     "score": 1.788
-    },
-    {
-     "ball": 39,
-     "score": 1.725
-    },
-    {
-     "ball": 66,
-     "score": 1.698
-    },
-    {
-     "ball": 80,
-     "score": 1.686
-    },
-    {
-     "ball": 79,
-     "score": 1.681
-    },
-    {
-     "ball": 38,
-     "score": 1.675
-    },
-    {
-     "ball": 24,
-     "score": 1.514
-    },
-    {
-     "ball": 33,
-     "score": 1.513
+     "score": 3.193
     },
     {
      "ball": 4,
-     "score": 1.474
-    },
-    {
-     "ball": 42,
-     "score": 1.456
-    },
-    {
-     "ball": 34,
-     "score": 1.405
-    },
-    {
-     "ball": 47,
-     "score": 1.36
+     "score": 3.078
     },
     {
      "ball": 12,
-     "score": 1.359
+     "score": 2.597
+    },
+    {
+     "ball": 80,
+     "score": 2.255
+    },
+    {
+     "ball": 24,
+     "score": 2.186
+    },
+    {
+     "ball": 42,
+     "score": 1.848
     },
     {
      "ball": 16,
-     "score": 1.307
+     "score": 1.693
     },
     {
-     "ball": 11,
-     "score": 1.282
+     "ball": 38,
+     "score": 1.612
     },
     {
-     "ball": 76,
-     "score": 1.262
+     "ball": 2,
+     "score": 1.558
     },
     {
-     "ball": 61,
-     "score": 1.24
+     "ball": 6,
+     "score": 1.296
+    },
+    {
+     "ball": 37,
+     "score": 1.181
+    },
+    {
+     "ball": 39,
+     "score": 1.101
+    },
+    {
+     "ball": 17,
+     "score": 1.003
+    },
+    {
+     "ball": 36,
+     "score": 0.921
+    },
+    {
+     "ball": 47,
+     "score": 0.919
+    },
+    {
+     "ball": 79,
+     "score": 0.761
+    },
+    {
+     "ball": 31,
+     "score": 0.756
+    },
+    {
+     "ball": 74,
+     "score": 0.716
+    },
+    {
+     "ball": 32,
+     "score": 0.704
     }
    ],
    "picks_by_n": {
     "4": [
+     4,
      7,
-     28,
-     37,
-     74
+     12,
+     28
     ],
     "5": [
+     4,
      7,
+     12,
      28,
-     37,
-     39,
-     74
+     80
     ],
     "6": [
+     4,
      7,
+     12,
+     24,
      28,
-     37,
-     39,
-     66,
-     74
+     80
     ],
     "9": [
+     4,
      7,
+     12,
+     16,
+     24,
      28,
-     37,
      38,
-     39,
-     66,
-     74,
-     79,
+     42,
      80
     ],
     "10": [
+     2,
+     4,
      7,
+     12,
+     16,
      24,
      28,
-     37,
      38,
-     39,
-     66,
-     74,
-     79,
+     42,
      80
     ]
-   },
-   "base_qihao": "2026281"
+   }
   }
  },
  "disclaimer": "彩票开奖具有随机性，选号器只是对开奖号码与各路推荐信号的统计整合，不代表更容易中奖，仅供娱乐参考。"

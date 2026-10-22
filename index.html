@@ -3145,18 +3145,18 @@ async function switchRlVersion(file){
 function renderDistillBlock(dz){
   if(!dz || !dz.games) return '';
   const PUR='#7c3aed', p2=x=>String(x).padStart(2,'0');
-  const srcTxt = {full:'开奖信号+各路推荐 蒸馏', history:'开奖号码信号 蒸馏', consensus:'沿用共识/RL排序（蒸馏未通过检验）', freq30:'近30期频率（无推荐数据）'};
-  const badge = r => r.status==='fallback'
-    ? `<span style="font-size:10px;color:#c58a00;border:1px solid #c58a00;border-radius:8px;padding:0 6px;">未通过检验·沿用共识</span>`
-    : `<span style="font-size:10px;color:#16a34a;border:1px solid #16a34a;border-radius:8px;padding:0 6px;">已通过检验·蒸馏选号</span>`;
+  const srcTxt = {blend:'开奖号码信号 + 多个RL版本一致度（融合）', history:'开奖号码信号（今天没有RL推荐记录）'};
+  const evTxt = {strong:['证据：显著','#16a34a'], weak:['证据：有迹象','#c58a00'], none:['证据：无（仅供参考）','#999']};
+  const badge = r => { const t=evTxt[r.evidence]||evTxt.none; return `<span style="font-size:10px;color:${t[1]};border:1px solid ${t[1]};border-radius:8px;padding:0 6px;">${t[0]}</span>`; };
   const evLine = (r,kind) => {
     const he=r.history_eval||{}, m=he.model||{}, f=he.freq||{};
     const hit = kind==='3d' ? `命中 ${m.hits} / 随机期望 ${m.expected}` : `前10球平均命中 ${m.avg_hits} / 随机期望 ${m.expected}`;
-    return `开奖号码信号·滚动检验 ${he.n_eval||'—'} 期：${hit}，z=${m.z}（最朴素的近30期频率法 z=${f.z}；z≥2 才算显著好于随机）`;
+    return `开奖号码信号·滚动检验 ${he.n_eval||'—'} 期：${hit}，z=${m.z}（朴素近30期频率法 z=${f.z}；z≥2显著、1~2有迹象、<1无证据）`;
   };
+  const metaLine = r => `用到 ${r.n_versions_today||0} 个RL版本的一致度（融合权重λ=${r.lambda}，${r.lambda_note||''}）；已累计 ${r.n_logged_periods||0} 期 / ${r.n_versions||0} 个版本的推荐记录，其中 ${r.n_labeled||0} 期已开奖可检验。`;
   let h = `<div style="margin:14px 0 4px;padding-top:10px;border-top:1px dashed #666;">
     <div style="font-size:13px;font-weight:700;color:#1a1a2e;">🧪 蒸馏选号器 <span style="font-size:10px;color:#888;font-weight:400;">更新 ${dz.updated_at||'—'}</span></div>
-    <div style="font-size:10.5px;color:#888;margin:2px 0 6px;">把几千期开奖号码的冷热/遗漏/重号信号，和每晚 ML·DL·RL·共识·采样 的推荐，压缩成一个选号器；每期用「只看过去、预测下一期」的滚动检验判断它到底有没有用。</div>`;
+    <div style="font-size:10.5px;color:#888;margin:2px 0 6px;">把几千期开奖号码的冷热/遗漏/重号信号，和一天里训练的多个RL版本（含共识里的ML/DL、采样）的一致度，融合成一个选号器；始终输出选号，并用「只看过去、预测下一期」的滚动检验标出证据强度。</div>`;
   const g3 = dz.games['3d'];
   if(g3){
     h += `<div style="margin:8px 0;"><div style="font-size:12px;font-weight:700;color:#1a1a2e;">福彩3D 组选号 ${badge(g3)}</div>`;
@@ -3165,7 +3165,7 @@ function renderDistillBlock(dz){
     h += `<div style="line-height:2.2;">` + (g3.picks||[]).map(p=>
       `<span class="rec-group" style="white-space:nowrap;display:inline-block;padding:3px 8px;margin:1px;">${p.d.split('').map(n=>`<span class="ball-r" style="background:${PUR};width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;">${n}</span>`).join('')}<span style="font-size:9px;color:#aaa;margin-left:3px;">${p.kind}</span></span>`).join('') + `</div>`;
     h += `<div style="font-size:10px;color:#999;margin-top:4px;">${evLine(g3,'3d')}</div>`;
-    h += `<div style="font-size:10px;color:#999;">${g3.reason||''}${g3.full_note?'　'+g3.full_note:''}（推荐记录已累计 ${g3.n_logged||0} 期）</div></div>`;
+    h += `<div style="font-size:10px;color:#999;">${metaLine(g3)}</div></div>`;
   }
   const gk = dz.games.kl8;
   if(gk){
@@ -3177,7 +3177,7 @@ function renderDistillBlock(dz){
       h += `<div class="rec-group" style="white-space:nowrap;display:block;padding:3px 8px;margin:2px 0;overflow-x:auto;"><span style="font-size:11px;color:#f7e7b0;margin-right:6px;">${names[n]||('选'+n)}</span>${list.map(b=>`<span class="ball-r" style="background:#d97706;width:18px;height:18px;line-height:18px;font-size:9px;margin:1px;">${p2(b)}</span>`).join('')}</div>`;
     });
     h += `<div style="font-size:10px;color:#999;margin-top:4px;">${evLine(gk,'kl8')}</div>`;
-    h += `<div style="font-size:10px;color:#999;">${gk.reason||''}${gk.full_note?'　'+gk.full_note:''}（推荐记录已累计 ${gk.n_logged||0} 期）</div></div>`;
+    h += `<div style="font-size:10px;color:#999;">${metaLine(gk)}</div></div>`;
   }
   h += `<div style="font-size:9.5px;color:#aaa;">${dz.disclaimer||''}</div></div>`;
   return h;

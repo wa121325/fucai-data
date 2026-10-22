@@ -2,47 +2,51 @@
 蒸馏选号器 —— distill_select.py（3D 组选号 + 快乐8 选号）
 
 「蒸馏」在这里的意思
-  把两类信息压缩成一个"选号器"：
-  ① 开奖号码本身（history.json，几千期）——每一期都能回头算出 冷热/遗漏/重号/邻号 等信号，
-     所以这一层有几千期样本，可以马上训练、马上做诚实的滚动检验；
-  ② 每晚各路推荐（ML/DL/RL、共识投票、采样）——这些推荐以前没有留存，
-     从今天起每晚记录进 distill_log.jsonl，样本一期一期攒，攒够后再把它们并进来。
+  老师：每晚（甚至一天训练很多版本）的 RL、以及共识投票(已含 ML/DL)、采样 给出的推荐。
+        同一期有多个 RL 版本时，全部记录下来，求"多版本一致度"——多个版本都看好的号码得分高。
+  学生：一个很轻的选号器 = 「开奖号码信号」模型（用几千期开奖号码训练，冷热/遗漏/重号/邻号等）
+        + 「多版本一致度」两者按权重融合，直接给出选号。
+  检验：滚动前推——每一期只用它之前的数据训练、预测它，对比随机期望和朴素频率基线。
 
-三层选号（谁通过检验用谁）
-  full     = 开奖信号 + 各路推荐信号 一起学（需要累计足够多期的推荐记录）
-  history  = 只用开奖号码信号（现在就能检验）
-  fallback = 以上都没通过检验 → 沿用共识/RL 的排序（页面上会标明）
-  检验方式：滚动前推——每一期只用它之前的数据训练、预测它，
-  对比"随机期望"和"最朴素的频率基线"；显著好于随机(z≥2)且好于频率基线才启用。
-  彩票开奖是随机的，大概率一直是 fallback；这个结论本身就是脚本的重要输出。
+标准（已调低、调灵敏）
+  选号器【始终输出蒸馏结果】，不再因为没通过严格检验就退回共识。
+  检验结果用「证据强度」标出来，不隐藏：
+    strong 显著(z≥2) / weak 有迹象(1≤z<2) / none 没有证据(z<1，仍输出，仅供参考)
+  训练用了验证集自动选正则强度，开奖信号也加了更多维度，提高灵敏度。
+
+数据来源
+  history.json                      开奖号码（几千期）
+  dl_rl.json                        当前 RL 结果
+  rl_archive/*/*.json               当天各个 RL 版本
+  git 历史里的 dl_rl.json 与 rl_archive 的各个旧版本（--backfill-git）
+  共识里已包含 ML/DL 概率；同一期的所有版本合并成「多版本一致度」
 
 用法
-  python distill_select.py                 # 正常运行（每晚流水线之后）
-  python distill_select.py --backfill-git  # 另外从 dl_rl.json 的 git 历史补录推荐记录
+  python distill_select.py                 # 正常运行
+  python distill_select.py --backfill-git  # 从 git 历史补录所有 RL 版本
   python distill_select.py --selftest      # 合成数据自检
 
 输出
-  distill_log.jsonl      每行=某游戏某一期的各路推荐信号（同一期只留最新一版）
-  distill_result.json    两个游戏各自的状态、检验结果、今日选号（网页读这个）
+  distill_log.jsonl      每行=某游戏某一期，所有 RL 版本的信号累计（同版本不重复计）
+  distill_result.json    两个游戏的选号、证据强度、检验结果（网页读这个）
 """
-import json, os, math, subprocess, argparse, itertools, random
+
+import json, os, math, subprocess, argparse, itertools, random, glob
 from datetime import datetime, timezone, timedelta
 import numpy as np
 
 LOG, OUT = 'distill_log.jsonl', 'distill_result.json'
 BJ = timezone(timedelta(hours=8))
-Z_NEED = 2.0
-L2 = 1.0
-
-# 3D
+Z_STRONG, Z_WEAK = 2.0, 1.0           # 证据强度档位（只用来标注，不再决定"用不用蒸馏结果"）
+L2_GRID = (0.3, 1.0, 3.0, 10.0)       # 正则强度候选，用验证集自动选
 D3_TOPK = 12
-D3_EVAL, D3_TRAIN_WIN, D3_REFIT = 1000, 3000, 100
-# 快乐8
-K8_TOPN = 10                   # 排名取前几个球（选四..选十都从这个排名里取前N个）
-K8_EVAL, K8_TRAIN_WIN, K8_REFIT = 400, 1500, 50
+D3_EVAL, D3_TRAIN_WIN, D3_REFIT, D3_VALID = 1000, 3000, 100, 300
+K8_TOPN = 10
+K8_EVAL, K8_TRAIN_WIN, K8_REFIT, K8_VALID = 400, 1500, 50, 150
 K8_PLAYS = [4, 5, 6, 9, 10]
-# 推荐记录并入（full 层）
-L_MIN_TRAIN, L_MIN_EVAL = 40, 60
+LAMBDA_DEFAULT = 0.5                  # 老师(多版本一致度)在融合里的默认权重
+LAMBDA_GRID = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
+LOGGED_FIT_MIN = 10                   # 有标签的"有推荐记录的期"≥它，才用这些期去挑融合权重
 
 
 # ═════════════════════════ 通用 ═════════════════════════
@@ -55,16 +59,19 @@ def _read_json(p):
         return json.load(f)
 
 
-def newton_clogit(X, t, iters=15):
-    """条件 logit：X (n,C,F)，t (n,) 真实候选下标。最大化对数似然 − L2"""
-    n, C, F = X.shape
-    w = np.zeros(F)
+def zs(v):
+    v = np.asarray(v, dtype=np.float64); sd = v.std()
+    return (v - v.mean()) / sd if sd > 1e-12 else np.zeros_like(v)
+
+
+def newton_clogit(X, t, l2, iters=15):
+    n, C, F = X.shape; w = np.zeros(F)
     for _ in range(iters):
         s = X @ w; s -= s.max(1, keepdims=True)
         pi = np.exp(s); pi /= pi.sum(1, keepdims=True)
         m = np.einsum('nc,ncf->nf', pi, X)
-        g = (X[np.arange(n), t] - m).sum(0) - L2 * w
-        H = -(np.einsum('nc,ncf,ncg->fg', pi, X, X) - np.einsum('nf,ng->fg', m, m)) - L2 * np.eye(F)
+        g = (X[np.arange(n), t] - m).sum(0) - l2 * w
+        H = -(np.einsum('nc,ncf,ncg->fg', pi, X, X) - np.einsum('nf,ng->fg', m, m)) - l2 * np.eye(F)
         try: step = np.linalg.solve(H, g)
         except np.linalg.LinAlgError: break
         w = w - step
@@ -72,19 +79,27 @@ def newton_clogit(X, t, iters=15):
     return w
 
 
-def newton_logit(X, y, iters=15):
-    """逻辑回归：X (N,F)，y (N,) 0/1"""
-    N, F = X.shape
-    w = np.zeros(F)
+def clogit_loglik(X, t, w):
+    s = X @ w; s -= s.max(1, keepdims=True)
+    return float((s[np.arange(len(X)), t] - np.log(np.exp(s).sum(1))).mean())
+
+
+def newton_logit(X, y, l2, iters=15):
+    N, F = X.shape; w = np.zeros(F)
     for _ in range(iters):
         z = X @ w; p = 1 / (1 + np.exp(-z))
-        g = X.T @ (y - p) - L2 * w
-        H = -(X.T * (p * (1 - p))) @ X - L2 * np.eye(F)
+        g = X.T @ (y - p) - l2 * w
+        H = -(X.T * (p * (1 - p))) @ X - l2 * np.eye(F)
         try: step = np.linalg.solve(H, g)
         except np.linalg.LinAlgError: break
         w = w - step
         if np.abs(step).max() < 1e-6: break
     return w
+
+
+def logit_loglik(X, y, w):
+    z = X @ w
+    return float((y * z - np.log1p(np.exp(z))).mean())
 
 
 # ═════════════════════════ 3D：组选号 ═════════════════════════
@@ -93,13 +108,19 @@ G_IDX = {g: i for i, g in enumerate(GROUPS)}
 G_Q = np.array([(6 if len(set(g)) == 3 else 3 if len(set(g)) == 2 else 1) / 1000.0 for g in GROUPS])
 G_KIND3 = np.array([1.0 if len(set(g)) == 2 else 0.0 for g in GROUPS])
 G_KIND1 = np.array([1.0 if len(set(g)) == 1 else 0.0 for g in GROUPS])
-# 每个组选号的全部排列(补齐到6个)
+G_SUM = np.array([sum(map(int, g)) for g in GROUPS])
+G_SPAN = np.array([int(max(g)) - int(min(g)) for g in GROUPS])
+_allsum = np.array([a + b + c for a in range(10) for b in range(10) for c in range(10)])
+_allspan = np.array([max(a, b, c) - min(a, b, c) for a in range(10) for b in range(10) for c in range(10)])
+Q_SUM = np.bincount(_allsum, minlength=28) / 1000.0
+Q_SPAN = np.bincount(_allspan, minlength=10) / 1000.0
 _PERM = np.zeros((220, 6, 3), dtype=np.int64); _PM = np.zeros((220, 6))
 for i, g in enumerate(GROUPS):
     ps = sorted(set(itertools.permutations(map(int, g))))
     for j, p in enumerate(ps): _PERM[i, j] = p; _PM[i, j] = 1.0
 _PN = _PM.sum(1)
-D3_HF = ['ln_f30', 'ln_f100', 'ln_f300', 'omit_ratio', 'pos_hot', 'share_last', 'is_zu3', 'is_baozi', 'ln_q']
+D3_HF = ['ln_f30', 'ln_f100', 'ln_f300', 'omit_ratio', 'pos_hot', 'share_last', 'ln_sum100', 'ln_span100',
+         'ln_f10', 'omit_sq', 'is_zu3', 'is_baozi', 'ln_q']
 
 
 def d3_group_seq(hist):
@@ -107,18 +128,20 @@ def d3_group_seq(hist):
 
 
 def d3_hist_features(hist, t0):
-    """为 t∈[t0, T] 计算每个组选号的开奖信号（预测第 t 期，只用 <t 的开奖）。返回 (T+1-t0, 220, F) float32"""
+    """t∈[t0,T]：预测第 t 期，只用 <t 的开奖。返回 (特征 (T+1-t0,220,F), 组选序号序列)"""
     T = len(hist)
     gseq = d3_group_seq(hist)
     digs = np.array([[int(x) for x in r['digits']] for r in hist])
     oh = np.zeros((T + 1, 220), dtype=np.int32)
-    for i, g in enumerate(gseq): oh[i + 1] = oh[i]; oh[i + 1, g] += 1            # 前缀和：oh[t]=前t期各组出现次数
     ohp = np.zeros((T + 1, 3, 10), dtype=np.int32)
+    ohs = np.zeros((T + 1, 28), dtype=np.int32); ohk = np.zeros((T + 1, 10), dtype=np.int32)
     for i in range(T):
+        oh[i + 1] = oh[i]; oh[i + 1, gseq[i]] += 1
         ohp[i + 1] = ohp[i]
         for p in range(3): ohp[i + 1, p, digs[i, p]] += 1
+        ohs[i + 1] = ohs[i]; ohs[i + 1, int(digs[i].sum())] += 1
+        ohk[i + 1] = ohk[i]; ohk[i + 1, int(digs[i].max() - digs[i].min())] += 1
     last = np.full(220, -1)
-    # 先把 t0 之前的 last_seen 推进
     for i in range(t0): last[gseq[i]] = i
     out = np.zeros((T + 1 - t0, 220, len(D3_HF)), dtype=np.float32)
     lnq = np.log(G_Q)
@@ -127,10 +150,10 @@ def d3_hist_features(hist, t0):
         for k, w in enumerate((30, 100, 300)):
             c = oh[t] - oh[max(0, t - w)]
             r[:, k] = np.log((c + 0.5) / ((min(t, w)) * G_Q + 0.5))
-        r[:, 3] = np.minimum((t - 1 - last) * G_Q, 6.0)          # 遗漏/期望间隔
-        w50 = min(t, 50)
+        om = np.minimum((t - 1 - last) * G_Q, 6.0)
+        r[:, 3] = om
         pc = ohp[t] - ohp[max(0, t - 50)]
-        lnf = np.log((pc + 0.5) / (w50 / 10.0 + 0.5))             # (3,10)
+        lnf = np.log((pc + 0.5) / (min(t, 50) / 10.0 + 0.5))
         val = lnf[0][_PERM[:, :, 0]] + lnf[1][_PERM[:, :, 1]] + lnf[2][_PERM[:, :, 2]]
         r[:, 4] = (val * _PM).sum(1) / _PN
         if t >= 1:
@@ -141,75 +164,57 @@ def d3_hist_features(hist, t0):
                     if d in a: a.remove(d); n += 1
                 sh[i] = n
             r[:, 5] = sh
-        r[:, 6] = G_KIND3; r[:, 7] = G_KIND1; r[:, 8] = lnq
+        w100 = min(t, 100)
+        cs_ = ohs[t] - ohs[max(0, t - 100)]; ck_ = ohk[t] - ohk[max(0, t - 100)]
+        r[:, 6] = np.log((cs_[G_SUM] + 0.5) / (w100 * Q_SUM[G_SUM] + 0.5))
+        r[:, 7] = np.log((ck_[G_SPAN] + 0.5) / (w100 * Q_SPAN[G_SPAN] + 0.5))
+        c10 = oh[t] - oh[max(0, t - 10)]
+        r[:, 8] = np.log((c10 + 0.5) / (min(t, 10) * G_Q + 0.5))
+        r[:, 9] = om ** 2 / 6.0
+        r[:, 10] = G_KIND3; r[:, 11] = G_KIND1; r[:, 12] = lnq
         if t < T: last[gseq[t]] = t
     return out, gseq
 
 
-def d3_eval(X, y, eval_n, train_win, refit, topk=D3_TOPK, base_col=0):
-    """X (N,220,F) 对应连续的期；y (N,) 真实下标。最后 eval_n 期滚动评估。
-    返回 dict：model / freq(最朴素：近30期频率)排序 的 命中、期望、z"""
+def choose_l2_clogit(X, y, start, valid):
+    """用 [start-valid, start) 做验证，挑对数似然最高的正则强度（只用评估窗口之前的数据）"""
+    lo = max(0, start - valid)
+    best, bl = L2_GRID[1], -1e18
+    tr_lo = max(0, lo - 3000)
+    for l2 in L2_GRID:
+        w = newton_clogit(X[tr_lo:lo].astype(np.float64), y[tr_lo:lo], l2)
+        ll = clogit_loglik(X[lo:start].astype(np.float64), y[lo:start], w)
+        if ll > bl: bl, best = ll, l2
+    return best
+
+
+def d3_eval(X, y, eval_n, train_win, refit, valid=D3_VALID, topk=D3_TOPK):
     N = len(X); start = N - eval_n
+    l2 = choose_l2_clogit(X, y, start, valid)
     acc = {'model': [0, 0.0, 0.0], 'freq': [0, 0.0, 0.0]}
     w = None; diff = []
     for t in range(start, N):
         if w is None or (t - start) % refit == 0:
-            lo = max(0, t - train_win)
-            w = newton_clogit(X[lo:t].astype(np.float64), y[lo:t])
-        s_m = X[t] @ w; s_f = X[t][:, base_col]
+            lo = max(0, t - train_win); w = newton_clogit(X[lo:t].astype(np.float64), y[lo:t], l2)
         hm = hf = 0
-        for name, s in (('model', s_m), ('freq', s_f)):
-            pk = np.argsort(-s, kind='stable')[:topk]; e = float(G_Q[pk].sum())
+        for name, sc in (('model', X[t] @ w), ('freq', X[t][:, 0])):
+            pk = np.argsort(-sc, kind='stable')[:topk]; e = float(G_Q[pk].sum())
             h = int(y[t] in pk); acc[name][0] += h; acc[name][1] += e; acc[name][2] += e * (1 - e)
             if name == 'model': hm = h
             else: hf = h
         diff.append(hm - hf)
-    out = {k: {'hits': v[0], 'expected': round(v[1], 2), 'z': _z(*v)} for k, v in acc.items()}
-    out['n_eval'] = eval_n
+    out = {k: {'hits': int(v[0]), 'expected': round(v[1], 2), 'z': _z(*v)} for k, v in acc.items()}
+    out['n_eval'] = eval_n; out['l2'] = l2
     d = np.array(diff, dtype=float)
     out['model_minus_freq'] = {'mean_hits': round(float(d.mean()), 4),
                                'z': round(float(d.mean() / (d.std(ddof=1) / math.sqrt(len(d)))), 2) if d.std(ddof=1) > 0 else 0.0}
-    return out, newton_clogit(X[max(0, N - train_win):].astype(np.float64), y[max(0, N - train_win):])
-
-
-# ── 3D 推荐信号（日志）──
-D3_LF = ['ln_cons', 'samp_k', 'ln_rl', 'in_rec', 'in_cons']
-
-
-def d3_record(rl):
-    r = (rl.get('results') or {}).get('3d')
-    if not r or not r.get('base_qihao'): return None
-    cons = r.get('consensus') or {}
-    gt = cons.get('group_table')
-    if not gt: return None
-    rec, con = {}, {}
-    for g in r.get('ppo_groups') or []:
-        k = ''.join(map(str, sorted(int(x) for x in g))); rec[k] = rec.get(k, 0) + 1
-    for b in cons.get('bets') or []:
-        k = ''.join(map(str, sorted(int(x) for x in b['digits']))); con[k] = con.get(k, 0) + 1
-    cands = {}
-    for sec in gt['sections']:
-        for row in sec['rows']:
-            for e in row:
-                if e: cands[e['d']] = [e['p'], e['q'], e.get('k', 0), e.get('rp'), rec.get(e['d'], 0), con.get(e['d'], 0)]
-    if len(cands) < 100: return None
-    return {'game': '3d', 'base_qihao': str(r['base_qihao']), 'base_date': r.get('base_date'),
-            'logged_at': rl.get('updated_at'), 'cands': cands}
-
-
-def d3_lfeat(cands):
-    X = np.zeros((220, len(D3_LF)))
-    for g, (p, q, k, rp, rec, con) in cands.items():
-        i = G_IDX.get(g)
-        if i is None: continue
-        q = max(float(q), 1e-6)
-        X[i] = [math.log(max(float(p), 1e-6) / q), float(k or 0), math.log(max(float(rp), 1e-6) / q) if rp is not None else 0.0, rec, con]
-    return X
+    lo = max(0, N - train_win)
+    return out, newton_clogit(X[lo:].astype(np.float64), y[lo:], l2)
 
 
 # ═════════════════════════ 快乐8：逐球 ═════════════════════════
-K8_HF = ['ln_f5', 'ln_f10', 'ln_f30', 'ln_f100', 'omit_ratio', 'in_prev', 'nb_prev', 'ball_n']
-K8_LF = ['rl_score', 'ball_final', 'votes', 'lift', 'pick_cnt', 'samp_cnt']
+K8_HF = ['ln_f3', 'ln_f5', 'ln_f10', 'ln_f20', 'ln_f30', 'ln_f100', 'omit_ratio', 'omit_sq',
+         'in_prev', 'nb_prev', 'zone_hot30', 'is_odd', 'ball_n']
 
 
 def k8_matrix(hist):
@@ -220,78 +225,110 @@ def k8_matrix(hist):
 
 
 def k8_hist_features(M, t0):
-    """t∈[t0,T]：预测第 t 期，只用 <t 的开奖。返回 (T+1-t0, 80, F) float32"""
     T = len(M)
     cs = np.zeros((T + 1, 80), dtype=np.int32); cs[1:] = np.cumsum(M, axis=0)
     last = np.full(80, -1)
-    for i in range(t0):
-        last[M[i] == 1] = i
+    for i in range(t0): last[M[i] == 1] = i
     out = np.zeros((T + 1 - t0, 80, len(K8_HF)), dtype=np.float32)
-    ball_n = np.arange(1, 81) / 80.0
+    ball_n = np.arange(1, 81) / 80.0; odd = (np.arange(1, 81) % 2).astype(np.float32); zone = (np.arange(80) // 20)
     for t in range(t0, T + 1):
         r = out[t - t0]
-        for k, w in enumerate((5, 10, 30, 100)):
+        for k, w in enumerate((3, 5, 10, 20, 30, 100)):
             c = cs[t] - cs[max(0, t - w)]
             r[:, k] = np.log((c + 0.5) / (min(t, w) * 0.25 + 0.5))
-        r[:, 4] = np.minimum((t - 1 - last) / 4.0, 6.0)
+        om = np.minimum((t - 1 - last) / 4.0, 6.0)
+        r[:, 6] = om; r[:, 7] = om ** 2 / 6.0
         if t >= 1:
-            prev = M[t - 1].astype(np.float32); r[:, 5] = prev
+            prev = M[t - 1].astype(np.float32); r[:, 8] = prev
             nb = np.zeros(80, dtype=np.float32); nb[1:] += prev[:-1]; nb[:-1] += prev[1:]
-            r[:, 6] = ((nb > 0) & (prev == 0)).astype(np.float32)
-        r[:, 7] = ball_n
+            r[:, 9] = ((nb > 0) & (prev == 0)).astype(np.float32)
+        c30 = cs[t] - cs[max(0, t - 30)]
+        zc = np.array([c30[zone == z].sum() for z in range(4)])
+        r[:, 10] = np.log((zc[zone] + 0.5) / (min(t, 30) * 5.0 + 0.5))
+        r[:, 11] = odd; r[:, 12] = ball_n
         if t < T: last[M[t] == 1] = t
     return out
 
 
-def k8_eval(X, Y, eval_n, train_win, refit, topn=K8_TOPN):
-    """X (N,80,F)，Y (N,80)。返回评估与最终权重。命中=前topn个球里中了几个，期望 topn*20/80"""
+def choose_l2_logit(X, Y, start, valid):
+    lo = max(0, start - valid); tr_lo = max(0, lo - 1500)
+    best, bl = L2_GRID[1], -1e18
+    Xv = X[lo:start].reshape(-1, X.shape[2]).astype(np.float64); Yv = Y[lo:start].reshape(-1).astype(np.float64)
+    for l2 in L2_GRID:
+        w = newton_logit(X[tr_lo:lo].reshape(-1, X.shape[2]).astype(np.float64), Y[tr_lo:lo].reshape(-1).astype(np.float64), l2)
+        ll = logit_loglik(Xv, Yv, w)
+        if ll > bl: bl, best = ll, l2
+    return best
+
+
+def k8_eval(X, Y, eval_n, train_win, refit, valid=K8_VALID, topn=K8_TOPN):
     N = len(X); start = N - eval_n
+    l2 = choose_l2_logit(X, Y, start, valid)
     exp = topn * 20 / 80.0
-    var = topn * 0.25 * 0.75 * (80 - topn) / 79.0   # 超几何方差（每期 20 个球）
+    var = topn * 0.25 * 0.75 * (80 - topn) / 79.0
     acc = {'model': 0.0, 'freq': 0.0}; w = None; diff = []
     for t in range(start, N):
         if w is None or (t - start) % refit == 0:
             lo = max(0, t - train_win)
-            w = newton_logit(X[lo:t].reshape(-1, X.shape[2]).astype(np.float64), Y[lo:t].reshape(-1).astype(np.float64))
-        s_m = X[t] @ w; s_f = X[t][:, 2]                  # freq 基线：近30期频率
-        hm = Y[t][np.argsort(-s_m, kind='stable')[:topn]].sum(); hf = Y[t][np.argsort(-s_f, kind='stable')[:topn]].sum()
+            w = newton_logit(X[lo:t].reshape(-1, X.shape[2]).astype(np.float64), Y[lo:t].reshape(-1).astype(np.float64), l2)
+        hm = Y[t][np.argsort(-(X[t] @ w), kind='stable')[:topn]].sum()
+        hf = Y[t][np.argsort(-X[t][:, 4], kind='stable')[:topn]].sum()
         acc['model'] += hm; acc['freq'] += hf; diff.append(hm - hf)
     n = eval_n
     out = {k: {'avg_hits': round(float(v) / n, 3), 'expected': round(exp, 3), 'z': _z(float(v), exp * n, var * n)} for k, v in acc.items()}
-    out['n_eval'] = n
+    out['n_eval'] = n; out['l2'] = l2
     d = np.array(diff, dtype=float)
     out['model_minus_freq'] = {'mean_hits': round(float(d.mean()), 4),
                                'z': round(float(d.mean() / (d.std(ddof=1) / math.sqrt(n))), 2) if d.std(ddof=1) > 0 else 0.0}
     lo = max(0, N - train_win)
-    return out, newton_logit(X[lo:].reshape(-1, X.shape[2]).astype(np.float64), Y[lo:].reshape(-1).astype(np.float64))
+    return out, newton_logit(X[lo:].reshape(-1, X.shape[2]).astype(np.float64), Y[lo:].reshape(-1).astype(np.float64), l2)
 
 
-def k8_record(rl):
+# ═════════════════════════ 老师信号（每个 RL 版本一份，同一期累加）═════════════════════════
+def d3_version(rl):
+    """从一个 RL 版本取 3D 信号。返回 (版本号, 期号, 日期, {组选号: [ln_cons, ln_rl|None, samp, rec, cons]})"""
+    r = (rl.get('results') or {}).get('3d')
+    if not r or not r.get('base_qihao'): return None
+    gt = (r.get('consensus') or {}).get('group_table')
+    if not gt: return None
+    rec, con = {}, {}
+    for g in r.get('ppo_groups') or []:
+        k = ''.join(map(str, sorted(int(x) for x in g))); rec[k] = rec.get(k, 0) + 1
+    for b in (r.get('consensus') or {}).get('bets') or []:
+        k = ''.join(map(str, sorted(int(x) for x in b['digits']))); con[k] = con.get(k, 0) + 1
+    c = {}
+    for sec in gt['sections']:
+        for row in sec['rows']:
+            for e in row:
+                if not e: continue
+                q = max(float(e['q']), 1e-6)
+                c[e['d']] = [math.log(max(float(e['p']), 1e-6) / q), math.log(max(float(e['rp']), 1e-6) / q) if e.get('rp') is not None else None,
+                             float(e.get('k', 0) or 0), rec.get(e['d'], 0), con.get(e['d'], 0)]
+    if len(c) < 100: return None
+    vid = str(rl.get('version_time_bj') or rl.get('updated_at') or '')
+    return vid, str(r['base_qihao']), r.get('base_date'), c
+
+
+def k8_version(rl):
     r = (rl.get('results') or {}).get('kl8')
     if not r or not r.get('base_qihao'): return None
     scores = r.get('rl_scores') or []
-    final = ((r.get('structure') or {}).get('ball_final')) or []
     if len(scores) != 80: return None
+    final = ((r.get('structure') or {}).get('ball_final')) or []
     votes, lift = {}, {}
     for e in ((r.get('consensus') or {}).get('table')) or []:
         votes[e['ball']] = e.get('votes', 0); lift[e['ball']] = e.get('lift', 1.0)
-    pick_cnt = {}
+    pick = {}
     for lst in (r.get('picks_by_n') or {}).values():
-        for b in lst: pick_cnt[b] = pick_cnt.get(b, 0) + 1
+        for b in lst: pick[b] = pick.get(b, 0) + 1
     samp = {b: c for b, c in ((r.get('sampled_stats') or {}).get('ball_top') or [])}
-    balls = [[scores[i], final[i] if i < len(final) else 1.0, votes.get(i + 1, 0), lift.get(i + 1, 1.0), pick_cnt.get(i + 1, 0), samp.get(i + 1, 0)] for i in range(80)]
-    return {'game': 'kl8', 'base_qihao': str(r['base_qihao']), 'base_date': r.get('base_date'),
-            'logged_at': rl.get('updated_at'), 'balls': balls}
+    sz = zs(scores)
+    balls = [[float(sz[i]), math.log(max(float(final[i]), 1e-6)) if i < len(final) else 0.0, float(votes.get(i + 1, 0)), float(lift.get(i + 1, 1.0)),
+              float(pick.get(i + 1, 0)), float(samp.get(i + 1, 0))] for i in range(80)]
+    vid = str(rl.get('version_time_bj') or rl.get('updated_at') or '')
+    return vid, str(r['base_qihao']), r.get('base_date'), balls
 
 
-def k8_lfeat(balls):
-    X = np.array(balls, dtype=np.float64)
-    X[:, 0] = (X[:, 0] - X[:, 0].mean()) / (X[:, 0].std() + 1e-9)        # rl_score 按期标准化
-    X[:, 1] = np.log(np.maximum(X[:, 1], 1e-6))
-    return X
-
-
-# ═════════════════════════ 日志 ═════════════════════════
 def load_log():
     d = {}
     if os.path.exists(LOG):
@@ -299,6 +336,7 @@ def load_log():
             for line in f:
                 try: r = json.loads(line)
                 except Exception: continue
+                if 'versions' not in r: continue          # 旧格式（只保留最新一版的记录）丢弃，由补录重新生成
                 d[(r['game'], r['base_qihao'])] = r
     return d
 
@@ -309,164 +347,197 @@ def save_log(d):
             f.write(json.dumps(d[k], ensure_ascii=False, separators=(',', ':')) + '\n')
 
 
-def merge(d, rec):
-    if rec is None: return False
-    k = (rec['game'], rec['base_qihao']); old = d.get(k)
-    if old is None or str(rec.get('logged_at') or '') >= str(old.get('logged_at') or ''):
-        d[k] = rec; return True
-    return False
+def add_version(log, game, ver):
+    """把一个版本累加进对应期的记录；同一个版本号只算一次。返回是否新增"""
+    if ver is None: return False
+    vid, bq, bd, payload = ver
+    key = (game, bq); rec = log.get(key)
+    if rec is None:
+        rec = {'game': game, 'base_qihao': bq, 'base_date': bd, 'versions': [], 'n': 0}
+        if game == '3d': rec['cands'] = {}; rec['n_rl'] = 0
+        else: rec['balls'] = [[0.0] * 6 for _ in range(80)]
+        log[key] = rec
+    if vid and vid in rec['versions']: return False
+    rec['versions'].append(vid); rec['n'] += 1
+    if game == '3d':
+        rec['n_rl'] += 1 if any(v[1] is not None for v in payload.values()) else 0
+        for g, v in payload.items():
+            a = rec['cands'].setdefault(g, [0.0, 0.0, 0.0, 0.0, 0.0])
+            a[0] += v[0]; a[1] += (v[1] if v[1] is not None else 0.0); a[2] += v[2]; a[3] += v[3]; a[4] += v[4]
+    else:
+        for i, v in enumerate(payload):
+            a = rec['balls'][i]
+            for j in range(6): a[j] += v[j]
+    return True
 
 
-def records_from_rl(rl):
-    return [r for r in (d3_record(rl), k8_record(rl)) if r]
+def versions_from_rl(rl):
+    return [('3d', d3_version(rl)), ('kl8', k8_version(rl))]
 
 
-def backfill_git(d):
-    try: shas = subprocess.run(['git', 'log', '--format=%H', '--', 'dl_rl.json'], capture_output=True, text=True, check=True).stdout.split()
-    except Exception as e:
-        print('  git 历史不可用：', e); return 0
+def backfill(log, use_git):
     n = 0
-    for sha in shas:
+    files = sorted(glob.glob('rl_archive/*/*.json'))
+    for p in files:
         try:
-            blob = subprocess.run(['git', 'show', f'{sha}:dl_rl.json'], capture_output=True, text=True, check=True).stdout
-            for r in records_from_rl(json.loads(blob)): n += merge(d, r)
+            for g, v in versions_from_rl(_read_json(p)): n += add_version(log, g, v)
         except Exception: continue
+    if use_git:
+        try:
+            out = subprocess.run(['git', 'log', '--name-status', '--format=C %H', '--', 'dl_rl.json', 'rl_archive/'], capture_output=True, text=True, check=True).stdout.splitlines()
+            sha, seen = None, set()
+            for ln in out:
+                if ln.startswith('C '): sha = ln[2:].strip(); continue
+                parts = ln.split('\t')
+                if len(parts) == 2 and parts[0] in ('A', 'M') and (parts[1] == 'dl_rl.json' or (parts[1].startswith('rl_archive/') and parts[1].endswith('.json') and 'index' not in parts[1])):
+                    if (sha, parts[1]) in seen: continue
+                    seen.add((sha, parts[1]))
+                    try:
+                        blob = subprocess.run(['git', 'show', f'{sha}:{parts[1]}'], capture_output=True, text=True, check=True).stdout
+                        for g, v in versions_from_rl(json.loads(blob)): n += add_version(log, g, v)
+                    except Exception: continue
+        except Exception as e:
+            print('  git 历史不可用：', e)
     return n
 
 
-# ═════════════════════════ 每个游戏的流程 ═════════════════════════
-def decide(he, fe, kind):
-    """he/fe: history/full 的检验结果。返回 (status, reason)"""
-    def ok(ev):
-        if not ev: return False
-        key = 'model'
-        return ev[key]['z'] >= Z_NEED and ev['model_minus_freq']['mean_hits'] > 0 and ev['model_minus_freq']['z'] >= 1.0
-    if ok(fe): return 'full', '开奖信号+各路推荐信号 的滚动检验显著好于随机且好于频率基线，启用。'
-    if ok(he): return 'history', '仅用开奖号码信号的滚动检验显著好于随机且好于频率基线，启用。'
-    return 'fallback', '滚动检验未达到「显著好于随机(z≥2)且好于频率基线」，沿用共识/RL 排序。'
+def teacher_3d(rec):
+    """多版本一致度：各路信号取版本均值，逐项标准化后等权相加。返回 (220,) 或 None"""
+    if not rec or rec['n'] == 0: return None
+    n = rec['n']; nr = max(rec.get('n_rl', 0), 1)
+    M = np.zeros((220, 5))
+    for g, a in rec['cands'].items():
+        i = G_IDX.get(g)
+        if i is not None: M[i] = [a[0] / n, a[1] / nr, a[2] / n, a[3] / n, a[4] / n]
+    cols = [zs(M[:, j]) for j in range(5) if M[:, j].std() > 1e-12]
+    return zs(np.sum(cols, axis=0)) if cols else None
 
 
-def run_3d(hist, log, rl_latest):
+def teacher_k8(rec):
+    if not rec or rec['n'] == 0: return None
+    B = np.array(rec['balls'], dtype=np.float64) / rec['n']
+    cols = [zs(B[:, j]) for j in range(6) if B[:, j].std() > 1e-12]
+    return zs(np.sum(cols, axis=0)) if cols else None
+
+
+# ═════════════════════════ 融合与流程 ═════════════════════════
+def tier(z):
+    return 'strong' if z >= Z_STRONG else ('weak' if z >= Z_WEAK else 'none')
+
+
+def logged_stats(items, lam, game):
+    """items: [(sH, T, y)]；在有推荐记录的已开奖期上，比较 融合(λ) 与 仅开奖信号 的命中"""
+    res = {'blend': [0.0, 0.0, 0.0], 'only_H': [0.0, 0.0, 0.0]}
+    for sH, T, y, q in items:
+        for name, sc in (('blend', zs(sH) + lam * zs(T)), ('only_H', zs(sH))):
+            if game == '3d':
+                pk = np.argsort(-sc, kind='stable')[:D3_TOPK]; e = float(G_Q[pk].sum())
+                res[name][0] += int(y in pk); res[name][1] += e; res[name][2] += e * (1 - e)
+            else:
+                pk = np.argsort(-sc, kind='stable')[:K8_TOPN]
+                res[name][0] += float(y[pk].sum()); res[name][1] += K8_TOPN * 0.25
+                res[name][2] += K8_TOPN * 0.25 * 0.75 * (80 - K8_TOPN) / 79.0
+    return {k: {'hits': round(v[0], 2), 'expected': round(v[1], 2), 'z': _z(*v)} for k, v in res.items()}
+
+
+def run_game(game, hist, log, rl_latest_key):
     T = len(hist)
-    n_need = D3_EVAL + D3_TRAIN_WIN + 300
-    t0 = max(310, T - n_need)
-    Xall, gseq = d3_hist_features(hist, t0)         # t0..T
-    X, y = Xall[:-1], gseq[t0:]                      # 有标签的期
-    he, w_h = d3_eval(X, y, min(D3_EVAL, len(X) - 200), D3_TRAIN_WIN, D3_REFIT)
-    res = {'game': '3d', 'unit': '组选号码', 'n_history': T, 'history_eval': he,
-           'history_weights': {f: round(float(v), 4) for f, v in zip(D3_HF, w_h)}}
-    # full：把推荐记录并进来
-    items = []
+    if game == '3d':
+        t0 = max(310, T - (D3_EVAL + D3_TRAIN_WIN + D3_VALID + 300))
+        Xall, gseq = d3_hist_features(hist, t0)
+        X, y = Xall[:-1], gseq[t0:]
+        he, w_h = d3_eval(X, y, min(D3_EVAL, len(X) - 600), D3_TRAIN_WIN, D3_REFIT)
+        hw = {f: round(float(v), 4) for f, v in zip(D3_HF, w_h)}
+        res = {'game': '3d', 'unit': '组选号码'}
+        label = lambda idx: int(gseq[idx])
+        sH_of = lambda row: Xall[row] @ w_h
+        teach = teacher_3d
+    else:
+        M = k8_matrix(hist); t0 = max(110, T - (K8_EVAL + K8_TRAIN_WIN + K8_VALID + 150))
+        Xall = k8_hist_features(M, t0)
+        X, Y = Xall[:-1], M[t0:].astype(np.float32)
+        he, w_h = k8_eval(X, Y, min(K8_EVAL, len(X) - 400), K8_TRAIN_WIN, K8_REFIT)
+        hw = {f: round(float(v), 4) for f, v in zip(K8_HF, w_h)}
+        res = {'game': 'kl8', 'unit': '球号'}
+        label = lambda idx: M[idx].astype(np.float32)
+        sH_of = lambda row: Xall[row] @ w_h
+        teach = teacher_k8
+    res.update({'n_history': T, 'history_eval': he, 'history_weights': hw})
+    # 有推荐记录、且下一期已开奖的期
+    items = []; n_rec = 0; n_ver_total = 0
     for (g, bq), rec in sorted(log.items(), key=lambda kv: int(kv[0][1]) if kv[0][1].isdigit() else 0):
-        if g != '3d': continue
+        if g != game: continue
+        n_rec += 1; n_ver_total += rec['n']
         idx = next((i for i, r in enumerate(hist) if str(r['qihao']) == bq), None)
         if idx is None or idx + 1 >= len(hist) or idx + 1 < t0: continue
-        Xh = Xall[idx + 1 - t0]; Xl = d3_lfeat(rec['cands'])
-        items.append((np.hstack([Xh, Xl]), int(gseq[idx + 1])))
-    res['n_logged'] = sum(1 for k in log if k[0] == '3d'); res['n_labeled'] = len(items)
-    fe, w_f = None, None
-    if len(items) >= L_MIN_TRAIN + L_MIN_EVAL:
-        Xf = np.stack([a for a, _ in items]); yf = np.array([b for _, b in items])
-        fe, w_f = d3_eval(Xf, yf, len(items) - L_MIN_TRAIN, 10 ** 9, 5, base_col=0)
-        res['full_eval'] = fe; res['full_weights'] = {f: round(float(v), 4) for f, v in zip(D3_HF + D3_LF, w_f)}
-    else:
-        res['full_note'] = f'推荐信号记录 {len(items)} 期，需要 {L_MIN_TRAIN + L_MIN_EVAL} 期才能把各路推荐并进来检验。'
-    status, reason = decide(he, fe, '3d'); res['status'] = status; res['reason'] = reason
-    # 今日选号：下一期 = 第 T 期
-    xh = Xall[T - t0]
-    rec = rl_latest.get('3d') if rl_latest else None
-    if status == 'full' and rec is not None:
-        score = np.hstack([xh, d3_lfeat(rec['cands'])]) @ w_f; res['source'] = 'full'
-    elif status == 'history':
-        score = xh @ w_h; res['source'] = 'history'
-    elif rec is not None:
-        score = d3_lfeat(rec['cands'])[:, 0]; res['source'] = 'consensus'
-    else:
-        score = xh[:, 0]; res['source'] = 'freq30'
-    order = np.argsort(-score, kind='stable')[:D3_TOPK]
-    res['picks'] = [{'d': GROUPS[i], 'score': round(float(score[i]), 3), 'kind': '组三' if len(set(GROUPS[i])) == 2 else ('豹子' if len(set(GROUPS[i])) == 1 else '组六')} for i in order]
-    if rec is not None: res['base_qihao'] = rec['base_qihao']
-    return res
-
-
-def run_kl8(hist, log, rl_latest):
-    T = len(hist)
-    M = k8_matrix(hist)
-    t0 = max(110, T - (K8_EVAL + K8_TRAIN_WIN + 150))
-    Xall = k8_hist_features(M, t0)
-    X, Y = Xall[:-1], M[t0:].astype(np.float32)
-    he, w_h = k8_eval(X, Y, min(K8_EVAL, len(X) - 200), K8_TRAIN_WIN, K8_REFIT)
-    res = {'game': 'kl8', 'unit': '球号', 'n_history': T, 'history_eval': he,
-           'history_weights': {f: round(float(v), 4) for f, v in zip(K8_HF, w_h)}}
-    items = []
-    for (g, bq), rec in sorted(log.items(), key=lambda kv: int(kv[0][1]) if kv[0][1].isdigit() else 0):
-        if g != 'kl8': continue
-        idx = next((i for i, r in enumerate(hist) if str(r['qihao']) == bq), None)
-        if idx is None or idx + 1 >= len(hist) or idx + 1 < t0: continue
-        items.append((np.hstack([Xall[idx + 1 - t0], k8_lfeat(rec['balls'])]), M[idx + 1].astype(np.float32)))
-    res['n_logged'] = sum(1 for k in log if k[0] == 'kl8'); res['n_labeled'] = len(items)
-    fe, w_f = None, None
-    if len(items) >= L_MIN_TRAIN + L_MIN_EVAL:
-        Xf = np.stack([a for a, _ in items]); Yf = np.stack([b for _, b in items])
-        fe, w_f = k8_eval(Xf, Yf, len(items) - L_MIN_TRAIN, 10 ** 9, 5)
-        res['full_eval'] = fe; res['full_weights'] = {f: round(float(v), 4) for f, v in zip(K8_HF + K8_LF, w_f)}
-    else:
-        res['full_note'] = f'推荐信号记录 {len(items)} 期，需要 {L_MIN_TRAIN + L_MIN_EVAL} 期才能把各路推荐并进来检验。'
-    status, reason = decide(he, fe, 'kl8'); res['status'] = status; res['reason'] = reason
-    xh = Xall[T - t0]
-    rec = rl_latest.get('kl8') if rl_latest else None
-    if status == 'full' and rec is not None:
-        score = np.hstack([xh, k8_lfeat(rec['balls'])]) @ w_f; res['source'] = 'full'
-    elif status == 'history':
-        score = xh @ w_h; res['source'] = 'history'
-    elif rec is not None:
-        b = np.array(rec['balls'], dtype=float); score = b[:, 1] + 1e-3 * b[:, 0]; res['source'] = 'consensus'   # 共识/RL 的最终逐球打分
-    else:
-        score = xh[:, 2]; res['source'] = 'freq30'
+        Tt = teach(rec)
+        if Tt is None: continue
+        items.append((sH_of(idx + 1 - t0), Tt, label(idx + 1), None))
+    res['n_logged_periods'] = n_rec; res['n_versions'] = n_ver_total; res['n_labeled'] = len(items)
+    # 融合权重
+    lam, lam_src = LAMBDA_DEFAULT, f'默认（已标注的推荐期不足 {LOGGED_FIT_MIN} 期，暂不据此调权重）'
+    if len(items) >= LOGGED_FIT_MIN:
+        best, bz = LAMBDA_DEFAULT, -1e9
+        for L in LAMBDA_GRID:
+            z = logged_stats(items, L, game)['blend']['z']
+            if z > bz: bz, best = z, L
+        lam, lam_src = best, f'在 {len(items)} 个已开奖的推荐期上挑选'
+    if items:
+        res['logged_eval'] = logged_stats(items, lam, game)
+    res['lambda'] = lam; res['lambda_note'] = lam_src
+    # 证据强度：以开奖号码信号在上千期滚动检验里的 z 为准；若推荐期够多(≥LOGGED_FIT_MIN)且融合更强，取两者较大
+    z_h = he['model']['z']; z_use = z_h; basis = f'开奖号码信号 {he["n_eval"]} 期滚动检验 z={z_h}'
+    if 'logged_eval' in res and len(items) >= LOGGED_FIT_MIN and res['logged_eval']['blend']['z'] > z_h:
+        z_use = res['logged_eval']['blend']['z']; basis = f'融合选号在 {len(items)} 个推荐期的检验 z={z_use}'
+    res['evidence'] = tier(z_use); res['evidence_z'] = z_use; res['evidence_basis'] = basis
+    # 今日选号
+    rec = log.get((game, rl_latest_key)) if rl_latest_key else None
+    sH = sH_of(T - t0); Tt = teach(rec) if rec else None
+    lam_eff = lam if Tt is not None else 0.0
+    score = zs(sH) + lam_eff * (zs(Tt) if Tt is not None else 0.0)
+    res['source'] = 'blend' if Tt is not None else 'history'
+    res['base_qihao'] = rl_latest_key; res['n_versions_today'] = rec['n'] if rec else 0
     order = np.argsort(-score, kind='stable')
-    res['ranking'] = [{'ball': int(i + 1), 'score': round(float(score[i]), 3)} for i in order[:20]]
-    res['picks_by_n'] = {str(n): sorted(int(i + 1) for i in order[:n]) for n in K8_PLAYS}
-    if rec is not None: res['base_qihao'] = rec['base_qihao']
+    if game == '3d':
+        res['picks'] = [{'d': GROUPS[i], 'score': round(float(score[i]), 3), 'kind': '组三' if len(set(GROUPS[i])) == 2 else ('豹子' if len(set(GROUPS[i])) == 1 else '组六')} for i in order[:D3_TOPK]]
+    else:
+        res['ranking'] = [{'ball': int(i + 1), 'score': round(float(score[i]), 3)} for i in order[:20]]
+        res['picks_by_n'] = {str(n): sorted(int(i + 1) for i in order[:n]) for n in K8_PLAYS}
     return res
 
 
 def run(args):
-    log = load_log(); n_new = 0
-    if args.backfill_git: n_new += backfill_git(log)
-    rl_latest = {}
-    if os.path.exists('dl_rl.json'):
-        for r in records_from_rl(_read_json('dl_rl.json')):
-            n_new += merge(log, r)
-        rl_latest = {r['game']: r for r in records_from_rl(_read_json('dl_rl.json'))}
-    save_log(log)
+    log = load_log()
+    n_new = backfill(log, args.backfill_git)
     hist = _read_json('history.json')
-    # 只用"该游戏最新一期开奖之后"的推荐记录作为今日选号输入；已经被新开奖覆盖的旧记录不再当作今日信号
+    # 当前 RL 结果对应的期号（尚未开奖的那期）= 今日选号用的老师信号
+    latest = {'3d': None, 'kl8': None}
+    if os.path.exists('dl_rl.json'):
+        rl = _read_json('dl_rl.json')
+        for g, v in versions_from_rl(rl):
+            if v: n_new += add_version(log, g, v); latest[g] = v[1]
+    save_log(log)
     for g, key in (('3d', '3d'), ('kl8', 'kl8')):
-        rec = rl_latest.get(g)
-        if rec and str(hist[key][-1]['qihao']) != rec['base_qihao']:
-            rl_latest.pop(g, None)
+        if latest[g] and str(hist[key][-1]['qihao']) != latest[g]: latest[g] = None      # 该期已开奖→不是"今日信号"
     out = {'updated_at': datetime.now(BJ).strftime('%Y-%m-%d %H:%M:%S'), 'games': {},
            'disclaimer': '彩票开奖具有随机性，选号器只是对开奖号码与各路推荐信号的统计整合，不代表更容易中奖，仅供娱乐参考。'}
-    out['games']['3d'] = run_3d(hist['3d'], log, rl_latest)
-    out['games']['kl8'] = run_kl8(hist['kl8'], log, rl_latest)
+    out['games']['3d'] = run_game('3d', hist['3d'], log, latest['3d'])
+    out['games']['kl8'] = run_game('kl8', hist['kl8'], log, latest['kl8'])
     with open(OUT, 'w', encoding='utf-8') as f:
         json.dump(out, f, ensure_ascii=False, indent=1, default=lambda o: float(o) if isinstance(o, (np.floating, np.integer)) else str(o))
-    print(f'[蒸馏] 日志 {len(log)} 条（本次新增/更新 {n_new}）')
+    print(f'[蒸馏] 日志 {len(log)} 期，本次新增版本 {n_new} 个')
     for g, r in out['games'].items():
-        he = r['history_eval']
-        if g == '3d':
-            print(f"  3D  状态={r['status']}  来源={r['source']}  开奖信号检验: 命中{he['model']['hits']}/期望{he['model']['expected']} z={he['model']['z']}（频率基线 z={he['freq']['z']}）")
-            print('      今日12个组选号：', ' '.join(p['d'] for p in r['picks']))
-        else:
-            print(f"  快乐8 状态={r['status']}  来源={r['source']}  开奖信号检验: 前10球平均命中{he['model']['avg_hits']}/期望{he['model']['expected']} z={he['model']['z']}（频率基线 z={he['freq']['z']}）")
-            print('      选十：', r['picks_by_n']['10'])
-        print('     ', r['reason'])
+        he = r['history_eval']; m = he['model']
+        nm = '3D' if g == '3d' else '快乐8'
+        hit = f"命中{m['hits']}/期望{m['expected']}" if g == '3d' else f"前10球均中{m['avg_hits']}/期望{m['expected']}"
+        print(f"  {nm}: 证据={r['evidence']}（{r['evidence_basis']}）  来源={r['source']}  λ={r['lambda']}  今日用到 {r['n_versions_today']} 个RL版本  开奖信号检验 {hit} z={m['z']}（频率基线 z={he['freq']['z']}，正则={he['l2']}）")
+        print('     今日选号：', ' '.join(p['d'] for p in r['picks']) if g == '3d' else r['picks_by_n']['10'])
+        if 'logged_eval' in r: print('     推荐期检验：', r['logged_eval'])
 
 
 # ═════════════════════════ 自检 ═════════════════════════
 def selftest():
-    rng = np.random.default_rng(1); random.seed(1)
-    # 3D：纯随机历史 → 不应启用；加入"上期号码会重复"的弱结构 → 应能检出
+    random.seed(1)
     for name, bias in (('3D 纯随机', 0.0), ('3D 含结构(25%概率重复上期组选号)', 0.25)):
         hist = []
         for i in range(2600):
@@ -474,22 +545,19 @@ def selftest():
             else: d = [random.randrange(10) for _ in range(3)]
             hist.append({'qihao': str(i), 'digits': d})
         Xall, gseq = d3_hist_features(hist, 310)
-        ev, _ = d3_eval(Xall[:-1], gseq[310:], 600, 1200, 100)
-        print(f"[{name}] model z={ev['model']['z']} freq z={ev['freq']['z']} 差z={ev['model_minus_freq']['z']}")
+        ev, _ = d3_eval(Xall[:-1], gseq[310:], 600, 1200, 100, valid=200)
+        print(f"[{name}] model z={ev['model']['z']} freq z={ev['freq']['z']} 差z={ev['model_minus_freq']['z']} 正则={ev['l2']}  → 证据={tier(ev['model']['z'])}")
     for name, bias in (('快乐8 纯随机', 0.0), ('快乐8 含结构(重号偏多)', 0.25)):
         hist = []
         for i in range(1800):
             if i and bias:
-                prev = hist[-1]['numbers']
-                keep = [b for b in prev if random.random() < 0.25 + bias]
-                rest = [b for b in range(1, 81) if b not in keep]
-                nums = sorted(keep + random.sample(rest, 20 - len(keep)))
-            else:
-                nums = sorted(random.sample(range(1, 81), 20))
+                prev = hist[-1]['numbers']; keep = [b for b in prev if random.random() < 0.25 + bias]
+                rest = [b for b in range(1, 81) if b not in keep]; nums = sorted(keep + random.sample(rest, 20 - len(keep)))
+            else: nums = sorted(random.sample(range(1, 81), 20))
             hist.append({'qihao': str(i), 'numbers': nums})
         M = k8_matrix(hist); Xall = k8_hist_features(M, 110)
-        ev, _ = k8_eval(Xall[:-1], M[110:].astype(np.float32), 400, 1000, 50)
-        print(f"[{name}] model avg={ev['model']['avg_hits']} (期望{ev['model']['expected']}) z={ev['model']['z']} 差z={ev['model_minus_freq']['z']}")
+        ev, _ = k8_eval(Xall[:-1], M[110:].astype(np.float32), 400, 1000, 50, valid=100)
+        print(f"[{name}] model avg={ev['model']['avg_hits']} (期望{ev['model']['expected']}) z={ev['model']['z']} 差z={ev['model_minus_freq']['z']} 正则={ev['l2']}  → 证据={tier(ev['model']['z'])}")
 
 
 if __name__ == '__main__':
