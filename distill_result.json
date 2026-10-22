@@ -1,0 +1,27 @@
+{
+ "updated_at": "2026-10-23 01:31:11",
+ "game": "3d",
+ "unit": "组选号码",
+ "n_logged": 1,
+ "n_labeled": 1,
+ "top_k": 12,
+ "need": {
+  "min_train": 40,
+  "min_eval": 100,
+  "z_vs_random": 2.0
+ },
+ "features": [
+  "ln_cons",
+  "samp_k",
+  "ln_rl",
+  "in_rec",
+  "in_cons",
+  "is_zu3",
+  "is_baozi"
+ ],
+ "status": "fallback",
+ "reason": "已标注样本 1 期，至少需要 140 期（40期训练起点 + 100期滚动评估）才能判断蒸馏是否有效；目前每个开奖日积累 1 期。",
+ "picks": [],
+ "note": "dl_rl.json 里没有尚未开奖的 3D 信号记录（可能今晚还没跑 RL）。",
+ "disclaimer": "彩票开奖具有随机性，选号器只是对各路信号的统计整合，不代表更容易中奖，仅供娱乐参考。"
+}

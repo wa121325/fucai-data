@@ -1,0 +1,41 @@
+# 蒸馏选号器：每晚流水线（ML→DL→RL）跑完后，记录当晚各路推荐信号 + 给已开奖的期打标签 + 滚动评估。
+# 脚本 distill_select.py；输出 distill_log.jsonl（日志）和 distill_result.json（状态+今日选号）。
+# 也可手动触发。很轻量（纯 numpy，几十秒）。
+name: 蒸馏选号器
+
+on:
+  workflow_run:
+    workflows: ["每晚 ML→DL→RL"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: distill-fucai
+  cancel-in-progress: false
+
+jobs:
+  distill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 需要 dl_rl.json 的 git 历史来补录
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install numpy
+      - name: 运行蒸馏脚本
+        run: python distill_select.py --backfill-git
+      - name: 提交结果
+        run: |
+          git config user.name  "distill-bot"
+          git config user.email "distill-bot@users.noreply.github.com"
+          git add distill_log.jsonl distill_result.json
+          if git diff --cached --quiet; then echo "无变化"; exit 0; fi
+          git commit -m "蒸馏选号器：更新日志与结果 $(date -u +%F)"
+          git pull --rebase origin main
+          git push origin HEAD:main
