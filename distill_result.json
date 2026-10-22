@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-10-23 01:55:53",
+ "updated_at": "2026-10-23 02:10:28",
  "games": {
   "3d": {
    "game": "3d",
@@ -41,6 +41,31 @@
    "n_logged_periods": 3,
    "n_versions": 14,
    "n_labeled": 2,
+   "n_ml_snapshots": 2,
+   "n_dl_snapshots": 4,
+   "source_eval": {
+    "rl": {
+     "name": "RL",
+     "n_periods": 2,
+     "hits": 0.0,
+     "expected": 0.14,
+     "z": -0.39
+    },
+    "ml": {
+     "name": "ML",
+     "n_periods": 1,
+     "hits": 0.0,
+     "expected": 0.07,
+     "z": -0.28
+    },
+    "dl": {
+     "name": "DL",
+     "n_periods": 2,
+     "hits": 0.0,
+     "expected": 0.09,
+     "z": -0.3
+    }
+   },
    "logged_eval": {
     "blend": {
      "hits": 0.0,
@@ -59,67 +84,74 @@
    "evidence_z": -0.73,
    "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.73",
    "source": "blend",
+   "sources_today": [
+    "rl",
+    "ml",
+    "dl"
+   ],
+   "n_ml_today": 1,
+   "n_dl_today": 1,
    "base_qihao": "2026281",
    "n_versions_today": 2,
    "picks": [
     {
      "d": "267",
-     "score": 3.631,
-     "kind": "组六"
-    },
-    {
-     "d": "167",
-     "score": 2.734,
-     "kind": "组六"
-    },
-    {
-     "d": "367",
-     "score": 2.636,
+     "score": 2.652,
      "kind": "组六"
     },
     {
      "d": "379",
-     "score": 2.53,
+     "score": 2.362,
      "kind": "组六"
     },
     {
      "d": "278",
-     "score": 2.526,
+     "score": 2.274,
+     "kind": "组六"
+    },
+    {
+     "d": "167",
+     "score": 2.149,
+     "kind": "组六"
+    },
+    {
+     "d": "367",
+     "score": 1.89,
      "kind": "组六"
     },
     {
      "d": "268",
-     "score": 1.989,
+     "score": 1.681,
      "kind": "组六"
     },
     {
-     "d": "146",
-     "score": 1.786,
-     "kind": "组六"
-    },
-    {
-     "d": "067",
-     "score": 1.731,
-     "kind": "组六"
-    },
-    {
-     "d": "237",
-     "score": 1.718,
+     "d": "289",
+     "score": 1.668,
      "kind": "组六"
     },
     {
      "d": "678",
-     "score": 1.661,
+     "score": 1.656,
+     "kind": "组六"
+    },
+    {
+     "d": "478",
+     "score": 1.635,
      "kind": "组六"
     },
     {
      "d": "279",
-     "score": 1.648,
+     "score": 1.597,
      "kind": "组六"
     },
     {
-     "d": "247",
-     "score": 1.606,
+     "d": "258",
+     "score": 1.584,
+     "kind": "组六"
+    },
+    {
+     "d": "378",
+     "score": 1.538,
      "kind": "组六"
     }
    ]
@@ -164,11 +196,36 @@
    "n_logged_periods": 3,
    "n_versions": 14,
    "n_labeled": 2,
+   "n_ml_snapshots": 2,
+   "n_dl_snapshots": 4,
+   "source_eval": {
+    "rl": {
+     "name": "RL",
+     "n_periods": 2,
+     "hits": 7.0,
+     "expected": 5.0,
+     "z": 1.1
+    },
+    "ml": {
+     "name": "ML",
+     "n_periods": 1,
+     "hits": 4.0,
+     "expected": 2.5,
+     "z": 1.16
+    },
+    "dl": {
+     "name": "DL",
+     "n_periods": 2,
+     "hits": 6.0,
+     "expected": 5.0,
+     "z": 0.55
+    }
+   },
    "logged_eval": {
     "blend": {
-     "hits": 4.0,
+     "hits": 5.0,
      "expected": 5.0,
-     "z": -0.55
+     "z": 0.0
     },
     "only_H": {
      "hits": 4.0,
@@ -182,88 +239,95 @@
    "evidence_z": -1.28,
    "evidence_basis": "开奖号码信号 400 期滚动检验 z=-1.28",
    "source": "blend",
+   "sources_today": [
+    "rl",
+    "ml",
+    "dl"
+   ],
+   "n_ml_today": 1,
+   "n_dl_today": 1,
    "base_qihao": "2026281",
    "n_versions_today": 2,
    "ranking": [
     {
-     "ball": 28,
-     "score": 4.13
-    },
-    {
-     "ball": 7,
-     "score": 3.193
-    },
-    {
      "ball": 4,
-     "score": 3.078
+     "score": 3.357
+    },
+    {
+     "ball": 28,
+     "score": 3.332
     },
     {
      "ball": 12,
-     "score": 2.597
+     "score": 2.621
+    },
+    {
+     "ball": 7,
+     "score": 2.368
     },
     {
      "ball": 80,
-     "score": 2.255
-    },
-    {
-     "ball": 24,
-     "score": 2.186
-    },
-    {
-     "ball": 42,
-     "score": 1.848
-    },
-    {
-     "ball": 16,
-     "score": 1.693
-    },
-    {
-     "ball": 38,
-     "score": 1.612
-    },
-    {
-     "ball": 2,
-     "score": 1.558
+     "score": 2.196
     },
     {
      "ball": 6,
-     "score": 1.296
+     "score": 2.084
     },
     {
-     "ball": 37,
-     "score": 1.181
+     "ball": 42,
+     "score": 2.042
     },
     {
-     "ball": 39,
-     "score": 1.101
+     "ball": 16,
+     "score": 1.983
     },
     {
-     "ball": 17,
-     "score": 1.003
+     "ball": 24,
+     "score": 1.94
+    },
+    {
+     "ball": 2,
+     "score": 1.815
+    },
+    {
+     "ball": 38,
+     "score": 1.566
     },
     {
      "ball": 36,
-     "score": 0.921
+     "score": 1.43
+    },
+    {
+     "ball": 40,
+     "score": 1.242
+    },
+    {
+     "ball": 44,
+     "score": 1.034
+    },
+    {
+     "ball": 41,
+     "score": 0.888
+    },
+    {
+     "ball": 13,
+     "score": 0.865
     },
     {
      "ball": 47,
-     "score": 0.919
+     "score": 0.864
     },
     {
-     "ball": 79,
-     "score": 0.761
+     "ball": 37,
+     "score": 0.743
     },
     {
-     "ball": 31,
-     "score": 0.756
+     "ball": 18,
+     "score": 0.719
     },
     {
-     "ball": 74,
-     "score": 0.716
-    },
-    {
-     "ball": 32,
-     "score": 0.704
+     "ball": 39,
+     "score": 0.701
     }
    ],
    "picks_by_n": {
@@ -282,32 +346,32 @@
     ],
     "6": [
      4,
+     6,
      7,
      12,
-     24,
      28,
      80
     ],
     "9": [
      4,
+     6,
      7,
      12,
      16,
      24,
      28,
-     38,
      42,
      80
     ],
     "10": [
      2,
      4,
+     6,
      7,
      12,
      16,
      24,
      28,
-     38,
      42,
      80
     ]

@@ -19,7 +19,8 @@
   dl_rl.json                        当前 RL 结果
   rl_archive/*/*.json               当天各个 RL 版本
   git 历史里的 dl_rl.json 与 rl_archive 的各个旧版本（--backfill-git）
-  共识里已包含 ML/DL 概率；同一期的所有版本合并成「多版本一致度」
+  prediction.json、dl_lstm_tfm.json（含 git 历史）  ML、DL 各目标概率，按 RL 共识同一套换算成候选号码的对数提升，作为独立两路老师
+  同一期：RL 多版本合并成「一致度」；RL、ML、DL 三路各自标准化后等权相加
 
 用法
   python distill_select.py                 # 正常运行
@@ -329,6 +330,173 @@ def k8_version(rl):
     return vid, str(r['base_qihao']), r.get('base_date'), balls
 
 
+# ═════════════════════════ ML / DL 信号（与 RL 共识同一套换算：目标概率 → 候选号码的对数权重）═════════════════════════
+VOTE_LAYOUT = {
+    '3d':  [('sum_grp', 3), ('odd', 4), ('group_type', 3), ('big', 4), ('span_grp', 3), ('road_dom', 3), ('arith', 2)],
+    'kl8': [('odd_grp', 3), ('zone_dom', 4), ('tot_grp', 3), ('big_grp', 3), ('five_dom', 5), ('consec_grp', 3), ('range_grp', 3),
+            ('repeat_grp', 3), ('diag_grp', 3), ('hot_grp', 3)],
+}
+VOTE_MIN_TARGETS = 4
+K8_MC = 40000                                  # 快乐8 蒙特卡洛样本数（固定种子，所有快照用同一批样本）
+_D3_ALL = np.array([[b, s, g] for b in range(10) for s in range(10) for g in range(10)], dtype=np.int64)
+
+
+def _grp3(x, lo, hi): return np.where(x <= lo, 0, np.where(x <= hi, 1, 2))
+
+
+def vote_feats_3d(C):
+    sm = C.sum(axis=1)
+    tri = (C[:, 0] == C[:, 1]) & (C[:, 1] == C[:, 2])
+    eq = (C[:, 0] == C[:, 1]) | (C[:, 1] == C[:, 2]) | (C[:, 0] == C[:, 2])
+    s3 = np.sort(C, axis=1); span = C.max(axis=1) - C.min(axis=1)
+    rc = np.stack([((C % 3) == r).sum(axis=1) for r in range(3)], axis=1)
+    return {'sum_grp': _grp3(sm, 9, 17), 'odd': (C % 2 != 0).sum(axis=1), 'group_type': np.where(tri, 0, np.where(eq, 1, 2)),
+            'big': (C >= 5).sum(axis=1), 'span_grp': _grp3(span, 3, 6), 'road_dom': rc.argmax(axis=1),
+            'arith': (((s3[:, 1] - s3[:, 0]) == (s3[:, 2] - s3[:, 1])) & ((s3[:, 2] - s3[:, 0]) > 0)).astype(np.int64)}
+
+
+def _k8_nb(prev):
+    nb = set()
+    for x in prev:
+        if x > 1: nb.add(x - 1)
+        if x < 80: nb.add(x + 1)
+    return nb - set(prev)
+
+
+def _k8_hot(draws, k=20):
+    cnt = {}
+    for r in draws:
+        for n in r['numbers']: cnt[n] = cnt.get(n, 0) + 1
+    return set(n for n, _ in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:k])
+
+
+def _cnt_grp(S, ball_set, lo, hi):
+    m = np.zeros(81, dtype=bool)
+    if ball_set: m[list(ball_set)] = True
+    x = m[S].sum(axis=1)
+    return np.where(x <= lo, 0, np.where(x <= hi, 1, 2))
+
+
+def vote_feats_kl8(S, prev, hot):
+    sm = S.sum(axis=1); odd = (S % 2 != 0).sum(axis=1); big = (S > 40).sum(axis=1)
+    zone = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 20), (21, 40), (41, 60), (61, 80)]], axis=1)
+    five = np.stack([((S >= lo) & (S <= hi)).sum(axis=1) for lo, hi in [(1, 16), (17, 32), (33, 48), (49, 64), (65, 80)]], axis=1)
+    adj = (np.diff(S, axis=1) == 1); runs = adj[:, 0].astype(np.int64) + (adj[:, 1:] & ~adj[:, :-1]).sum(axis=1)
+    rng = S[:, -1] - S[:, 0]
+    return {'odd_grp': np.where(odd < 9, 0, np.where(odd <= 11, 1, 2)), 'zone_dom': zone.argmax(axis=1),
+            'tot_grp': np.where(sm < 640, 0, np.where(sm < 820, 1, 2)), 'big_grp': np.where(big < 9, 0, np.where(big <= 11, 1, 2)),
+            'five_dom': five.argmax(axis=1), 'consec_grp': np.where(runs == 0, 0, np.where(runs <= 2, 1, 2)),
+            'range_grp': np.where(rng < 60, 0, np.where(rng < 70, 1, 2)),
+            'repeat_grp': _cnt_grp(S, prev, 4, 5), 'diag_grp': _cnt_grp(S, _k8_nb(prev) if prev else set(), 5, 7), 'hot_grp': _cnt_grp(S, hot, 4, 5)}
+
+
+def _vprobs(dct, n):
+    if not isinstance(dct, dict) or not dct: return None
+    v = np.array([float(dct.get(str(i), 0.0)) for i in range(n)], dtype=np.float64) / 100.0
+    return v / v.sum() if v.sum() > 0 else None
+
+
+def _logw(feats, tgt, layout):
+    n = len(next(iter(feats.values()))); logw = np.zeros(n); ncs = dict(layout)
+    for name, p in tgt.items():
+        nc = ncs[name]; f = feats[name]
+        q = np.bincount(f, minlength=nc)[:nc] / n
+        p = np.clip(np.asarray(p, dtype=np.float64)[:nc], 1e-3, 1.0); p = p / p.sum()
+        logw += np.log(np.where(q > 0, p / np.maximum(q, 1e-12), 1.0)[np.minimum(f, nc - 1)])
+    return logw
+
+
+_D3F = None; _K8S = None; _D3GI = None
+
+
+def ml_dl_vector(game, probs_by_target, hist, idx):
+    """一个来源(ML 或 DL)的目标概率 → 候选号码的对数提升：3D 返回(220,)；快乐8 返回(80,)。目标不足返回 None。
+    hist[:idx+1] 是该快照所基于的开奖史（快乐8 的重号/斜连/热点目标需要上期与近30期）"""
+    global _D3F, _K8S, _D3GI
+    layout = VOTE_LAYOUT[game]; tgt = {}
+    for name, n in layout:
+        pv = _vprobs((probs_by_target or {}).get(name), n)
+        if pv is not None: tgt[name] = pv
+    if len(tgt) < VOTE_MIN_TARGETS: return None
+    if game == '3d':
+        if _D3F is None:
+            _D3F = vote_feats_3d(_D3_ALL); _D3GI = np.array([G_IDX[''.join(map(str, sorted(c)))] for c in _D3_ALL.tolist()])
+        w = np.exp(_logw(_D3F, tgt, layout))
+        W = np.bincount(_D3GI, weights=w, minlength=220); N = np.bincount(_D3GI, minlength=220).astype(float)
+        return np.log(np.maximum(W / np.maximum(N, 1) / (w.mean() + 1e-12), 1e-6))
+    if _K8S is None:
+        rng = np.random.default_rng(20260101)
+        _K8S = np.argpartition(rng.random((K8_MC, 80)), 20, axis=1)[:, :20] + 1; _K8S.sort(axis=1)
+    prev = set(hist[idx]['numbers']); hot = _k8_hot(hist[max(0, idx - 29):idx + 1])
+    w = np.exp(_logw(vote_feats_kl8(_K8S, prev, hot), tgt, layout)); w /= w.sum()
+    inc = np.zeros(81)
+    for j in range(20): np.add.at(inc, _K8S[:, j], w)
+    return np.log(np.maximum(inc[1:] / 0.25, 1e-6))
+
+
+def md_snapshots(pred, dl, hists):
+    """从一份 prediction.json / dl_lstm_tfm.json 取出 [(game, 来源, 快照id, 基准期号, 向量)]"""
+    out = []
+    for game in ('3d', 'kl8'):
+        hist = hists[game]
+        pg = ((pred or {}).get('predictions') or {}).get(game)
+        if pg:
+            dc = pg.get('data_count')
+            if dc and 0 < dc <= len(hist):
+                idx = dc - 1
+                tg = {k: ((m.get('prediction') or {}).get('probs')) for k, m in (pg.get('models') or {}).items()}
+                v = ml_dl_vector(game, tg, hist, idx)
+                if v is not None: out.append((game, 'ml', 'ml' + str(pg.get('updated_at') or pred.get('updated_at')), str(hist[idx]['qihao']), v))
+        dg = ((dl or {}).get('results') or {}).get(game)
+        if dg:
+            ua = str(dl.get('updated_at') or '')
+            try:
+                bj = datetime.strptime(ua[:19], '%Y-%m-%d %H:%M:%S') + timedelta(hours=8)      # dl 文件里是 UTC 时间
+                dt = bj.strftime('%Y-%m-%d'); late = bj.hour >= 22
+                idx = max(i for i, r in enumerate(hist) if (str(r['date']) <= dt if late else str(r['date']) < dt))
+            except Exception: continue
+            v = ml_dl_vector(game, {k: (m or {}).get('probs') for k, m in dg.items()}, hist, idx)
+            if v is not None: out.append((game, 'dl', 'dl' + ua, str(hist[idx]['qihao']), v))
+    return out
+
+
+def new_rec(log, game, bq, bd=None):
+    key = (game, bq); rec = log.get(key)
+    if rec is None:
+        rec = {'game': game, 'base_qihao': bq, 'base_date': bd, 'versions': [], 'n': 0}
+        if game == '3d': rec['cands'] = {}; rec['n_rl'] = 0
+        else: rec['balls'] = [[0.0] * 6 for _ in range(80)]
+        log[key] = rec
+    return rec
+
+
+def add_md(log, game, src, sid, bq, vec):
+    rec = new_rec(log, game, bq)
+    s = rec.setdefault(src, {'ids': [], 'v': [0.0] * len(vec)})
+    if sid in s['ids']: return False
+    s['ids'].append(sid); s['v'] = [round(a + float(b), 4) for a, b in zip(s['v'], vec)]
+    return True
+
+
+def backfill_md(log, hists, use_git):
+    n = 0
+    def feed(pred, dl):
+        nonlocal n
+        for game, src, sid, bq, vec in md_snapshots(pred, dl, hists): n += add_md(log, game, src, sid, bq, vec)
+    feed(_read_json('prediction.json') if os.path.exists('prediction.json') else None, _read_json('dl_lstm_tfm.json') if os.path.exists('dl_lstm_tfm.json') else None)
+    if use_git:
+        for fn, kind in (('prediction.json', 'ml'), ('dl_lstm_tfm.json', 'dl')):
+            try:
+                for sha in subprocess.run(['git', 'log', '--format=%H', '--', fn], capture_output=True, text=True, check=True).stdout.split():
+                    try:
+                        d = json.loads(subprocess.run(['git', 'show', f'{sha}:{fn}'], capture_output=True, text=True, check=True).stdout)
+                        feed(d, None) if kind == 'ml' else feed(None, d)
+                    except Exception: continue
+            except Exception as e:
+                print('  git 历史不可用：', e)
+    return n
+
+
 def load_log():
     d = {}
     if os.path.exists(LOG):
@@ -351,12 +519,7 @@ def add_version(log, game, ver):
     """把一个版本累加进对应期的记录；同一个版本号只算一次。返回是否新增"""
     if ver is None: return False
     vid, bq, bd, payload = ver
-    key = (game, bq); rec = log.get(key)
-    if rec is None:
-        rec = {'game': game, 'base_qihao': bq, 'base_date': bd, 'versions': [], 'n': 0}
-        if game == '3d': rec['cands'] = {}; rec['n_rl'] = 0
-        else: rec['balls'] = [[0.0] * 6 for _ in range(80)]
-        log[key] = rec
+    rec = new_rec(log, game, bq, bd)
     if vid and vid in rec['versions']: return False
     rec['versions'].append(vid); rec['n'] += 1
     if game == '3d':
@@ -401,23 +564,48 @@ def backfill(log, use_git):
     return n
 
 
-def teacher_3d(rec):
-    """多版本一致度：各路信号取版本均值，逐项标准化后等权相加。返回 (220,) 或 None"""
-    if not rec or rec['n'] == 0: return None
-    n = rec['n']; nr = max(rec.get('n_rl', 0), 1)
-    M = np.zeros((220, 5))
-    for g, a in rec['cands'].items():
-        i = G_IDX.get(g)
-        if i is not None: M[i] = [a[0] / n, a[1] / nr, a[2] / n, a[3] / n, a[4] / n]
-    cols = [zs(M[:, j]) for j in range(5) if M[:, j].std() > 1e-12]
+def _md_parts(rec, out):
+    for src in ('ml', 'dl'):
+        s = rec.get(src)
+        if s and s['ids']:
+            v = np.array(s['v'], dtype=np.float64) / len(s['ids'])
+            if v.std() > 1e-12: out[src] = zs(v)
+    return out
+
+
+def teacher_parts_3d(rec):
+    """老师的三路：RL(多版本一致度) / ML / DL，各自标准化成 (220,)；没有的路为 None"""
+    out = {'rl': None, 'ml': None, 'dl': None}
+    if not rec: return out
+    if rec['n'] > 0:
+        n = rec['n']; nr = max(rec.get('n_rl', 0), 1)
+        M = np.zeros((220, 5))
+        for g, a in rec['cands'].items():
+            i = G_IDX.get(g)
+            if i is not None: M[i] = [a[0] / n, a[1] / nr, a[2] / n, a[3] / n, a[4] / n]
+        cols = [zs(M[:, j]) for j in range(5) if M[:, j].std() > 1e-12]
+        if cols: out['rl'] = zs(np.sum(cols, axis=0))
+    return _md_parts(rec, out)
+
+
+def teacher_parts_k8(rec):
+    out = {'rl': None, 'ml': None, 'dl': None}
+    if not rec: return out
+    if rec['n'] > 0:
+        B = np.array(rec['balls'], dtype=np.float64) / rec['n']
+        cols = [zs(B[:, j]) for j in range(6) if B[:, j].std() > 1e-12]
+        if cols: out['rl'] = zs(np.sum(cols, axis=0))
+    return _md_parts(rec, out)
+
+
+def combine_teacher(parts):
+    """RL、ML、DL 三路各自标准化后等权相加（缺哪路就少哪路）"""
+    cols = [v for v in parts.values() if v is not None]
     return zs(np.sum(cols, axis=0)) if cols else None
 
 
-def teacher_k8(rec):
-    if not rec or rec['n'] == 0: return None
-    B = np.array(rec['balls'], dtype=np.float64) / rec['n']
-    cols = [zs(B[:, j]) for j in range(6) if B[:, j].std() > 1e-12]
-    return zs(np.sum(cols, axis=0)) if cols else None
+def teacher_3d(rec): return combine_teacher(teacher_parts_3d(rec))
+def teacher_k8(rec): return combine_teacher(teacher_parts_k8(rec))
 
 
 # ═════════════════════════ 融合与流程 ═════════════════════════
@@ -440,6 +628,25 @@ def logged_stats(items, lam, game):
     return {k: {'hits': round(v[0], 2), 'expected': round(v[1], 2), 'z': _z(*v)} for k, v in res.items()}
 
 
+def source_stats(items, game):
+    """各路老师单独的表现（只在该路有记录的已开奖期上统计）——看 ML / DL / RL 哪路有用"""
+    names = {'rl': 'RL', 'ml': 'ML', 'dl': 'DL'}; out = {}
+    for src in ('rl', 'ml', 'dl'):
+        h = e = v = 0.0; n = 0
+        for sH, T, y, pp in items:
+            sc = pp.get(src)
+            if sc is None: continue
+            n += 1
+            if game == '3d':
+                pk = np.argsort(-sc, kind='stable')[:D3_TOPK]; ex = float(G_Q[pk].sum())
+                h += int(y in pk); e += ex; v += ex * (1 - ex)
+            else:
+                pk = np.argsort(-sc, kind='stable')[:K8_TOPN]
+                h += float(y[pk].sum()); e += K8_TOPN * 0.25; v += K8_TOPN * 0.25 * 0.75 * (80 - K8_TOPN) / 79.0
+        out[src] = {'name': names[src], 'n_periods': n, 'hits': round(h, 2), 'expected': round(e, 2), 'z': _z(h, e, v) if n else 0.0}
+    return out
+
+
 def run_game(game, hist, log, rl_latest_key):
     T = len(hist)
     if game == '3d':
@@ -451,7 +658,7 @@ def run_game(game, hist, log, rl_latest_key):
         res = {'game': '3d', 'unit': '组选号码'}
         label = lambda idx: int(gseq[idx])
         sH_of = lambda row: Xall[row] @ w_h
-        teach = teacher_3d
+        teach = teacher_3d; parts_of = teacher_parts_3d
     else:
         M = k8_matrix(hist); t0 = max(110, T - (K8_EVAL + K8_TRAIN_WIN + K8_VALID + 150))
         Xall = k8_hist_features(M, t0)
@@ -461,7 +668,7 @@ def run_game(game, hist, log, rl_latest_key):
         res = {'game': 'kl8', 'unit': '球号'}
         label = lambda idx: M[idx].astype(np.float32)
         sH_of = lambda row: Xall[row] @ w_h
-        teach = teacher_k8
+        teach = teacher_k8; parts_of = teacher_parts_k8
     res.update({'n_history': T, 'history_eval': he, 'history_weights': hw})
     # 有推荐记录、且下一期已开奖的期
     items = []; n_rec = 0; n_ver_total = 0
@@ -470,10 +677,13 @@ def run_game(game, hist, log, rl_latest_key):
         n_rec += 1; n_ver_total += rec['n']
         idx = next((i for i, r in enumerate(hist) if str(r['qihao']) == bq), None)
         if idx is None or idx + 1 >= len(hist) or idx + 1 < t0: continue
-        Tt = teach(rec)
+        pp = parts_of(rec); Tt = combine_teacher(pp)
         if Tt is None: continue
-        items.append((sH_of(idx + 1 - t0), Tt, label(idx + 1), None))
+        items.append((sH_of(idx + 1 - t0), Tt, label(idx + 1), pp))
     res['n_logged_periods'] = n_rec; res['n_versions'] = n_ver_total; res['n_labeled'] = len(items)
+    res['n_ml_snapshots'] = sum(len((r.get('ml') or {}).get('ids', [])) for (g, _), r in log.items() if g == game)
+    res['n_dl_snapshots'] = sum(len((r.get('dl') or {}).get('ids', [])) for (g, _), r in log.items() if g == game)
+    res['source_eval'] = source_stats(items, game)
     # 融合权重
     lam, lam_src = LAMBDA_DEFAULT, f'默认（已标注的推荐期不足 {LOGGED_FIT_MIN} 期，暂不据此调权重）'
     if len(items) >= LOGGED_FIT_MIN:
@@ -496,6 +706,10 @@ def run_game(game, hist, log, rl_latest_key):
     lam_eff = lam if Tt is not None else 0.0
     score = zs(sH) + lam_eff * (zs(Tt) if Tt is not None else 0.0)
     res['source'] = 'blend' if Tt is not None else 'history'
+    pp_today = parts_of(rec) if rec else {}
+    res['sources_today'] = [k for k, v in pp_today.items() if v is not None]
+    res['n_ml_today'] = len((rec.get('ml') or {}).get('ids', [])) if rec else 0
+    res['n_dl_today'] = len((rec.get('dl') or {}).get('ids', [])) if rec else 0
     res['base_qihao'] = rl_latest_key; res['n_versions_today'] = rec['n'] if rec else 0
     order = np.argsort(-score, kind='stable')
     if game == '3d':
@@ -511,28 +725,28 @@ def run(args):
     n_new = backfill(log, args.backfill_git)
     hist = _read_json('history.json')
     # 当前 RL 结果对应的期号（尚未开奖的那期）= 今日选号用的老师信号
-    latest = {'3d': None, 'kl8': None}
     if os.path.exists('dl_rl.json'):
         rl = _read_json('dl_rl.json')
         for g, v in versions_from_rl(rl):
-            if v: n_new += add_version(log, g, v); latest[g] = v[1]
+            if v: n_new += add_version(log, g, v)
+    n_md = backfill_md(log, hist, args.backfill_git)       # ML / DL 的各目标概率 → 候选对数提升，按快照累计
     save_log(log)
-    for g, key in (('3d', '3d'), ('kl8', 'kl8')):
-        if latest[g] and str(hist[key][-1]['qihao']) != latest[g]: latest[g] = None      # 该期已开奖→不是"今日信号"
+    latest = {'3d': str(hist['3d'][-1]['qihao']), 'kl8': str(hist['kl8'][-1]['qihao'])}   # 今日信号 = 基于最新已开奖期的各路推荐
     out = {'updated_at': datetime.now(BJ).strftime('%Y-%m-%d %H:%M:%S'), 'games': {},
            'disclaimer': '彩票开奖具有随机性，选号器只是对开奖号码与各路推荐信号的统计整合，不代表更容易中奖，仅供娱乐参考。'}
     out['games']['3d'] = run_game('3d', hist['3d'], log, latest['3d'])
     out['games']['kl8'] = run_game('kl8', hist['kl8'], log, latest['kl8'])
     with open(OUT, 'w', encoding='utf-8') as f:
         json.dump(out, f, ensure_ascii=False, indent=1, default=lambda o: float(o) if isinstance(o, (np.floating, np.integer)) else str(o))
-    print(f'[蒸馏] 日志 {len(log)} 期，本次新增版本 {n_new} 个')
+    print(f'[蒸馏] 日志 {len(log)} 期，本次新增 RL 版本 {n_new} 个、ML/DL 快照 {n_md} 个')
     for g, r in out['games'].items():
         he = r['history_eval']; m = he['model']
         nm = '3D' if g == '3d' else '快乐8'
         hit = f"命中{m['hits']}/期望{m['expected']}" if g == '3d' else f"前10球均中{m['avg_hits']}/期望{m['expected']}"
-        print(f"  {nm}: 证据={r['evidence']}（{r['evidence_basis']}）  来源={r['source']}  λ={r['lambda']}  今日用到 {r['n_versions_today']} 个RL版本  开奖信号检验 {hit} z={m['z']}（频率基线 z={he['freq']['z']}，正则={he['l2']}）")
+        print(f"  {nm}: 证据={r['evidence']}（{r['evidence_basis']}）  来源={r['source']}  λ={r['lambda']}  今日用到 RL{r['n_versions_today']}/ML{r['n_ml_today']}/DL{r['n_dl_today']}  开奖信号检验 {hit} z={m['z']}（频率基线 z={he['freq']['z']}，正则={he['l2']}）")
         print('     今日选号：', ' '.join(p['d'] for p in r['picks']) if g == '3d' else r['picks_by_n']['10'])
         if 'logged_eval' in r: print('     推荐期检验：', r['logged_eval'])
+        print('     各路老师单独表现：', {k: (v['n_periods'], v['z']) for k, v in r['source_eval'].items()})
 
 
 # ═════════════════════════ 自检 ═════════════════════════
