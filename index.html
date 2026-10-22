@@ -2586,10 +2586,11 @@ async function downloadBallImage(nodes, title, btn){
     }
     wrap.appendChild(row);
   } else if(qrImg){
+    // 其它图：二维码同样靠右下角
     const q = document.createElement('div');
-    q.style.cssText='text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
-    q.innerHTML = `<img src="${qrImg}" style="width:140px;height:140px;display:inline-block;">`
-      + (state.qr.caption ? `<div style="font-size:12px;color:#666;margin-top:4px;">${state.qr.caption.replace(/</g,'&lt;')}</div>` : '');
+    q.style.cssText='text-align:right;margin-top:12px;padding-top:10px;border-top:1px dashed #ddd;';
+    q.innerHTML = `<div style="display:inline-block;text-align:center;"><img src="${qrImg}" style="width:120px;height:120px;display:block;">`
+      + (state.qr.caption ? `<div style="font-size:11px;color:#666;margin-top:3px;">${state.qr.caption.replace(/</g,'&lt;')}</div>` : '') + `</div>`;
     wrap.appendChild(q);
   }
   document.body.appendChild(wrap);
