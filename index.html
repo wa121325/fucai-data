@@ -1262,6 +1262,22 @@
       </div>
 
       <div class="panel">
+        <h2>🖼 下载图片内容</h2>
+        <div class="status" style="margin-bottom:8px;">选择预测报告、走势图下载的图片里包含哪些部分，勾选后自动保存（仅本机浏览器）。</div>
+        <div id="imgOptsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:13px;">
+          <label><input type="checkbox" data-opt="date"> 日期行（生成日期+上期开奖）</label>
+          <label><input type="checkbox" data-opt="qr"> 二维码</label>
+          <label><input type="checkbox" data-opt="cand"> 3D 各位候选判断</label>
+          <label><input type="checkbox" data-opt="rec"> 3D 推荐12注</label>
+          <label><input type="checkbox" data-opt="samp"> 3D 采样12注</label>
+          <label><input type="checkbox" data-opt="cons"> 3D 共识12注</label>
+          <label><input type="checkbox" data-opt="grp"> 3D 组三/组六推荐</label>
+          <label><input type="checkbox" data-opt="trendStats"> 走势图统计分析</label>
+        </div>
+        <div class="status" id="imgOptsStatus" style="margin-top:6px;"></div>
+      </div>
+
+      <div class="panel">
         <h2>🔑 其它</h2>
       <details style="margin-top:14px;">
         <summary style="font-size:12px;color:var(--muted);cursor:pointer;user-select:none;">▸ Claude API Key（直连失败时备用）</summary>
@@ -2510,8 +2526,29 @@ document.querySelectorAll('.mainTab').forEach(tab=>{
 ═══════════════════════════════════════════════════ */
 document.getElementById('loadPredictBtn').addEventListener('click', loadPrediction);
 
+/* ═══ 下载图片内容选项（设置页勾选，存 localStorage: fucaiImgOpts）═══ */
+const IMG_OPT_DEFAULTS = {date:true, qr:true, cand:true, rec:true, samp:true, cons:true, grp:true, trendStats:true};
+function getImgOpts(){
+  let o = {};
+  try{ o = JSON.parse(localStorage.getItem('fucaiImgOpts')||'{}') || {}; }catch(e){}
+  return Object.assign({}, IMG_OPT_DEFAULTS, o);
+}
+(function initImgOpts(){
+  const box = document.getElementById('imgOptsBox'); if(!box) return;
+  const o = getImgOpts();
+  box.querySelectorAll('input[data-opt]').forEach(cb=>{
+    cb.checked = !!o[cb.dataset.opt];
+    cb.addEventListener('change', ()=>{
+      const cur = getImgOpts(); cur[cb.dataset.opt] = cb.checked;
+      try{ localStorage.setItem('fucaiImgOpts', JSON.stringify(cur)); }catch(e){}
+      const st = document.getElementById('imgOptsStatus'); if(st){ st.className='status ok'; st.textContent='✓ 已保存'; }
+    });
+  });
+})();
+
 /* ═══ 球区下载为图片（自动附带默认二维码）═══ */
 async function downloadBallImage(nodes, title, btn){
+  const IO = getImgOpts();
   const old = btn ? btn.textContent : '';
   if(btn){ btn.textContent='生成中…'; btn.disabled=true; }
   const wrap = document.createElement('div');
@@ -2543,10 +2580,11 @@ async function downloadBallImage(nodes, title, btn){
   const dateEl = document.createElement('div');
   dateEl.style.cssText='font-size:12px;color:#777;margin:-4px 0 10px;line-height:1.5;';
   dateEl.innerHTML = _dateHtml;
-  wrap.appendChild(dateEl);
+  if(IO.date) wrap.appendChild(dateEl);
   nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
     if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
     wrap.appendChild(c); });
+  if(!IO.cand) wrap.querySelectorAll('.ball-cand').forEach(x=>{ if(x.textContent.includes('候选判断')) x.remove(); });
   // 3D 专用版式：推荐 | 采样 | 共识 三列；左下角放组选(组三/组六)推荐，二维码靠右下角
   let d3Layout = false, gcBets = null;
   try{
@@ -2557,18 +2595,22 @@ async function downloadBallImage(nodes, title, btn){
       const flex = wrap.querySelector('.ball-flex');
       if(bets && bets.length && flex && !wrap.textContent.includes('共识直选')){
         wrap.style.width = '620px';
+        [...flex.children].forEach(ch=>{
+          const t=(ch.textContent||'').trim();
+          if((!IO.rec && t.startsWith('推荐')) || (!IO.samp && t.startsWith('采样'))) ch.remove();
+        });
         const col = document.createElement('div');
         col.style.cssText = 'flex:1 1 0;min-width:0;';
         const bl = n=>`<span class="ball-r" style="width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;background:#7c3aed;">${n}</span>`;
         col.innerHTML = `<div style="margin-bottom:4px;"><span style="font-size:12px;color:#666;">共识（${bets.length}注）：</span></div>`
           + bets.map((b,i)=>`<div class="rec-group" style="white-space:nowrap;padding:4px 6px;margin:3px 0;display:block;"><span style="margin-right:4px;">${i+1}.</span>${b.digits.map(bl).join('')}</div>`).join('');
-        flex.appendChild(col);
+        if(IO.cons) flex.appendChild(col);
         d3Layout = true;
-        gcBets = cons.group_cover && cons.group_cover.bets;
+        gcBets = IO.grp ? (cons.group_cover && cons.group_cover.bets) : null;
       }
     }
   }catch(e){ console.error('3D版式', e); }
-  const qrImg = (state.qr && state.qr.image) || '';
+  const qrImg = (IO.qr && state.qr && state.qr.image) || '';
   if(d3Layout){
     // 底部一行：左=组选推荐，右=二维码（靠右下角）
     const row = document.createElement('div');
@@ -4060,8 +4102,9 @@ function collectTrendStats(){
   }).filter(x=>x.t);
 }
 function trendFooterLayout(W0){
-  const hasQr = !!(state.qr.show && state.qr.image);
-  const stats = collectTrendStats();
+  const IO = getImgOpts();
+  const hasQr = !!(IO.qr && state.qr.show && state.qr.image);
+  const stats = IO.trendStats ? collectTrendStats() : [];
   if(!hasQr && !stats.length) return {h:0, stats:[], hasQr:false};
   const QR=130, QW = hasQr ? QR+24 : 0;
   const pad=20, gap=10, region = W0 - pad*2 - (hasQr ? QW+16 : 0);
