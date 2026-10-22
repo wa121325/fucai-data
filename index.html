@@ -2720,11 +2720,13 @@ async function loadPrediction(){
 
   try{
     // 三个文件互相独立，并行拉取，任意一个缺失不影响其它部分展示
-    const [mlData, lstmData, rlData] = await Promise.all([
+    const [mlData, lstmData, rlData, distillData] = await Promise.all([
       fetchJson('prediction.json'),
       fetchJson('dl_lstm_tfm.json'),
       fetchJson('dl_rl.json'),
+      fetchJson('distill_result.json'),    // 蒸馏选号器结果，可选：没有也不影响其它部分
     ]);
+    window._distill = distillData || null;
 
     if(!mlData){
       throw new Error('prediction.json 加载失败：' + (fetchErrs['prediction.json'] || '未知原因'));
@@ -3139,6 +3141,48 @@ async function switchRlVersion(file){
   }catch(e){ if(note) note.textContent='⚠ 加载失败：'+e.message; }
 }
 
+/* 蒸馏选号器（distill_select.py → distill_result.json）：3D 组选号 + 快乐8 选号 */
+function renderDistillBlock(dz){
+  if(!dz || !dz.games) return '';
+  const PUR='#7c3aed', p2=x=>String(x).padStart(2,'0');
+  const srcTxt = {full:'开奖信号+各路推荐 蒸馏', history:'开奖号码信号 蒸馏', consensus:'沿用共识/RL排序（蒸馏未通过检验）', freq30:'近30期频率（无推荐数据）'};
+  const badge = r => r.status==='fallback'
+    ? `<span style="font-size:10px;color:#c58a00;border:1px solid #c58a00;border-radius:8px;padding:0 6px;">未通过检验·沿用共识</span>`
+    : `<span style="font-size:10px;color:#16a34a;border:1px solid #16a34a;border-radius:8px;padding:0 6px;">已通过检验·蒸馏选号</span>`;
+  const evLine = (r,kind) => {
+    const he=r.history_eval||{}, m=he.model||{}, f=he.freq||{};
+    const hit = kind==='3d' ? `命中 ${m.hits} / 随机期望 ${m.expected}` : `前10球平均命中 ${m.avg_hits} / 随机期望 ${m.expected}`;
+    return `开奖号码信号·滚动检验 ${he.n_eval||'—'} 期：${hit}，z=${m.z}（最朴素的近30期频率法 z=${f.z}；z≥2 才算显著好于随机）`;
+  };
+  let h = `<div style="margin:14px 0 4px;padding-top:10px;border-top:1px dashed #666;">
+    <div style="font-size:13px;font-weight:700;color:#1a1a2e;">🧪 蒸馏选号器 <span style="font-size:10px;color:#888;font-weight:400;">更新 ${dz.updated_at||'—'}</span></div>
+    <div style="font-size:10.5px;color:#888;margin:2px 0 6px;">把几千期开奖号码的冷热/遗漏/重号信号，和每晚 ML·DL·RL·共识·采样 的推荐，压缩成一个选号器；每期用「只看过去、预测下一期」的滚动检验判断它到底有没有用。</div>`;
+  const g3 = dz.games['3d'];
+  if(g3){
+    h += `<div style="margin:8px 0;"><div style="font-size:12px;font-weight:700;color:#1a1a2e;">福彩3D 组选号 ${badge(g3)}</div>`;
+    h += `<div style="font-size:10.5px;color:#888;margin:2px 0 4px;">来源：${srcTxt[g3.source]||g3.source}${g3.base_qihao?` · 基于第${g3.base_qihao}期`:''}（组选号：数字顺序不限，12个）</div>`;
+    h += `<div class="ball-label" style="margin:2px 0 3px;"><span style="font-size:12px;color:#666;">蒸馏选号（${(g3.picks||[]).length}个组选号）：</span></div>`;
+    h += `<div style="line-height:2.2;">` + (g3.picks||[]).map(p=>
+      `<span class="rec-group" style="white-space:nowrap;display:inline-block;padding:3px 8px;margin:1px;">${p.d.split('').map(n=>`<span class="ball-r" style="background:${PUR};width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;">${n}</span>`).join('')}<span style="font-size:9px;color:#aaa;margin-left:3px;">${p.kind}</span></span>`).join('') + `</div>`;
+    h += `<div style="font-size:10px;color:#999;margin-top:4px;">${evLine(g3,'3d')}</div>`;
+    h += `<div style="font-size:10px;color:#999;">${g3.reason||''}${g3.full_note?'　'+g3.full_note:''}（推荐记录已累计 ${g3.n_logged||0} 期）</div></div>`;
+  }
+  const gk = dz.games.kl8;
+  if(gk){
+    h += `<div style="margin:8px 0;"><div style="font-size:12px;font-weight:700;color:#1a1a2e;">快乐8 选号 ${badge(gk)}</div>`;
+    h += `<div style="font-size:10.5px;color:#888;margin:2px 0 4px;">来源：${srcTxt[gk.source]||gk.source}${gk.base_qihao?` · 基于第${gk.base_qihao}期`:''}（按排名取前N个球）</div>`;
+    const names={4:'选四',5:'选五',6:'选六',9:'选九',10:'选十'};
+    h += `<div class="ball-label" style="margin:2px 0 3px;"><span style="font-size:12px;color:#666;">蒸馏选号（按排名取前N个球）：</span></div>`;
+    Object.entries(gk.picks_by_n||{}).forEach(([n,list])=>{
+      h += `<div class="rec-group" style="white-space:nowrap;display:block;padding:3px 8px;margin:2px 0;overflow-x:auto;"><span style="font-size:11px;color:#f7e7b0;margin-right:6px;">${names[n]||('选'+n)}</span>${list.map(b=>`<span class="ball-r" style="background:#d97706;width:18px;height:18px;line-height:18px;font-size:9px;margin:1px;">${p2(b)}</span>`).join('')}</div>`;
+    });
+    h += `<div style="font-size:10px;color:#999;margin-top:4px;">${evLine(gk,'kl8')}</div>`;
+    h += `<div style="font-size:10px;color:#999;">${gk.reason||''}${gk.full_note?'　'+gk.full_note:''}（推荐记录已累计 ${gk.n_logged||0} 期）</div></div>`;
+  }
+  h += `<div style="font-size:9.5px;color:#aaa;">${dz.disclaimer||''}</div></div>`;
+  return h;
+}
+
 function renderDLResult(dlResult){
   const panel = document.getElementById('dlResultPanel');
   const meta  = document.getElementById('dlResultMeta');
@@ -3425,6 +3469,7 @@ function renderDLResult(dlResult){
     }
   }
 
+  try{ html += renderDistillBlock(window._distill); }catch(e){ console.error('蒸馏块', e); }
   el.innerHTML = html || '<div class="status">暂无DL/RL结果（请先运行 kaggle_lstm_tfm.py 和 kaggle_rl_daily.py）</div>';
   { const _bar=document.getElementById('rlVersionBar'), _slot=document.getElementById('rlVersionSlot'); if(_bar && _slot){ _bar.style.marginBottom='0'; _slot.appendChild(_bar); } }
 }
