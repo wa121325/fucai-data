@@ -2545,7 +2545,8 @@ function getImgOpts(){
 })();
 
 /* ═══ 球区下载为图片（自动附带默认二维码）═══ */
-async function downloadBallImage(nodes, title, btn){
+async function downloadBallImage(nodes, title, btn, xopt){
+  xopt = xopt || {};
   const IO = getImgOpts();
   const old = btn ? btn.textContent : '';
   if(btn){ btn.textContent='生成中…'; btn.disabled=true; }
@@ -2579,9 +2580,17 @@ async function downloadBallImage(nodes, title, btn){
   dateEl.style.cssText='font-size:12px;color:#777;margin:-4px 0 10px;line-height:1.5;';
   dateEl.innerHTML = _dateHtml;
   if(IO.date) wrap.appendChild(dateEl);
+  if(xopt.width) wrap.style.width = xopt.width+'px';
+  let nodeHost = wrap;
+  if(xopt.dark){   // 深色底的块（如分区表）放进深色容器里，避免白底看不清
+    nodeHost = document.createElement('div');
+    nodeHost.style.cssText='background:#111;color:#ccc;border-radius:8px;padding:10px;';
+    wrap.appendChild(nodeHost);
+  }
   nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
+    if(xopt.dark){ c.style.overflow='visible'; c.querySelectorAll('td').forEach(td=>{ td.style.position='static'; td.style.boxShadow='none'; }); }
     if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
-    wrap.appendChild(c); });
+    nodeHost.appendChild(c); });
   if(!IO.cand) wrap.querySelectorAll('.ball-cand').forEach(x=>{ if(x.textContent.includes('候选判断')) x.remove(); });
   // 3D 专用版式：推荐 | 采样 | 共识 三列；左下角放组选(组三/组六)推荐，二维码靠右下角
   let d3Layout = false, gcBets = null;
@@ -2978,8 +2987,16 @@ function renderGroupTable(gt, rlGame){
       + gt.picks.map(e=>`<div style="border:1px solid ${PUR};border-radius:6px;padding:2px 6px;font-size:10.5px;color:#ddd;max-width:100%;box-sizing:border-box;line-height:1.6;"><b>${e.d}</b> <span style="display:inline-block;white-space:nowrap;color:#888;">和${e.sum}·${e.kind==='zu6'?'组六':(e.kind==='zu3'?'组三':'豹子')}</span> <span style="display:inline-block;white-space:nowrap;color:#888;">${e.p}%/随机${e.q}%</span>${e.k>0?` <span style="display:inline-block;white-space:nowrap;color:#f59e0b;">采样${e.k}</span>`:''}${e.rp!=null?` <span style="display:inline-block;white-space:nowrap;color:#4ade80;">RL联合${e.rp}%</span>`:''} <span style="display:inline-block;white-space:nowrap;color:#888;">z=${e.z}</span></div>`).join('') + `</div>`;
   } else picks = `<div style="font-size:11px;color:#999;margin:4px 0;">没有共识和采样同时偏向的号码，今天不标最可能出现的号。</div>`;
   return `<details style="margin:8px 0;border:1px solid #333;border-radius:8px;padding:4px 8px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">🧩 和数值号码分区表（组选号码 · 共识概率×RL采样${gt.n_sampled||0}注联合信号，点开查看）</summary>`
-    + `<div style="font-size:9.5px;color:#777;margin:4px 0;">每格：号码 / 共识概率%（该组选号全部排列合计）；橙色“采n”=RL采样里出现n次；浅绿“R x”=RL自己对这个组选号的联合概率%（推荐12注就是按它排序选的，仅显示、不参与选号）；绿色“荐n”=RL推荐12注里出现n次；蓝色“共n”=共识直选12注里出现n次；紫色深浅=联合信号z；粗框=最可能出现。表可左右滑动。</div>`
+    + `<div style="text-align:right;margin:4px 0;"><button class="gt-dl-btn" onclick="downloadGroupTable(this)" style="font-size:11px;padding:3px 8px;border:1px solid #888;border-radius:6px;background:transparent;color:#aaa;cursor:pointer;">🖼 下载图片</button></div>`
+    + `<div data-nodl="1" style="font-size:9.5px;color:#777;margin:4px 0;">每格：号码 / 共识概率%（该组选号全部排列合计）；橙色“采n”=RL采样里出现n次；浅绿“R x”=RL自己对这个组选号的联合概率%（推荐12注就是按它排序选的，仅显示、不参与选号）；绿色“荐n”=RL推荐12注里出现n次；蓝色“共n”=共识直选12注里出现n次；紫色深浅=联合信号z；粗框=最可能出现。表可左右滑动。</div>`
     + t + picks + mine + `</details>`;
+}
+function downloadGroupTable(btn){
+  const det = btn.closest('details');
+  const nodes = [...det.children].filter(ch=>ch.tagName!=='SUMMARY' && !ch.dataset.nodl && !ch.querySelector('.gt-dl-btn'));
+  const tbl = det.querySelector('table');
+  const w = Math.max(700, (tbl ? tbl.scrollWidth : 0) + 60);
+  downloadBallImage(nodes, '福彩3D 和值号码分区表', btn, {width:w, dark:true});
 }
 function renderConsensus(game, c, rlGame){
   if(!c) return '';
