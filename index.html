@@ -2543,6 +2543,21 @@ async function downloadBallImage(nodes, title, btn){
   nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
     if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
     wrap.appendChild(c); });
+  // 3D：把「共识直选」12注附在图片末尾（若导出的块本身就是共识块则不重复）
+  try{
+    if(/福彩3D/.test(title) && !wrap.textContent.includes('共识直选')){
+      const rl = window._lastPrediction && window._lastPrediction.dl_result && window._lastPrediction.dl_result.rl;
+      const bets = rl && rl.results && rl.results['3d'] && rl.results['3d'].consensus && rl.results['3d'].consensus.bets;
+      if(bets && bets.length){
+        const cs = document.createElement('div');
+        cs.style.cssText='margin-top:10px;padding-top:8px;border-top:1px dashed #ddd;';
+        const ball = n=>`<span style="display:inline-block;width:18px;height:18px;line-height:18px;border-radius:50%;background:#7c3aed;color:#fff;font-size:9px;font-weight:700;text-align:center;margin:1px">${n}</span>`;
+        cs.innerHTML = `<div style="font-size:12px;color:#666;margin-bottom:3px;">共识直选（${bets.length}注）：</div>`
+          + bets.map((b,i)=>`<div style="white-space:nowrap;padding:2px 6px;"><span style="margin-right:4px;font-size:12px;">${i+1}.</span>${b.digits.map(ball).join('')} <span style="color:#888;font-size:10px;">${b.prob}%</span></div>`).join('');
+        wrap.appendChild(cs);
+      }
+    }
+  }catch(e){}
   const qrImg = (state.qr && state.qr.image) || '';
   if(qrImg){
     const q = document.createElement('div');
