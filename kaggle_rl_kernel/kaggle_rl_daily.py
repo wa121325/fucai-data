@@ -3198,6 +3198,13 @@ def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
     gt = None
     try:
         gp, gcnt, gk = {}, {}, {}
+        # RL自身的联合概率（推荐12注就是按它排序选出的）：按组选号把全部排列加总，仅用于显示，不参与选号
+        grl = None
+        if J.get('rl') is not None:
+            grl = {}
+            _jr = np.asarray(J['rl'], dtype=float); _jr = _jr / _jr.sum()
+            for i in range(1000):
+                key = tuple(sorted(int(x) for x in _D3_ALL[i])); grl[key] = grl.get(key, 0.0) + float(_jr[i])
         for i in range(1000):
             key = tuple(sorted(int(x) for x in _D3_ALL[i]))
             gp[key] = gp.get(key, 0.0) + float(Jc[i]); gcnt[key] = gcnt.get(key, 0) + 1
@@ -3210,7 +3217,7 @@ def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
             zs_ = _binom_midp_z(gk.get(key, 0), n_s, q) if n_s else 0.0
             z_ = (zc_ + zs_) / np.sqrt(2) if n_s else zc_
             ents[key] = {'d': ''.join(map(str, key)), 'sum': int(sum(key)), 'kind': {3: 'zu6', 2: 'zu3', 1: 'baozi'}[len(set(key))],
-                         'p': round(p * 100, 2), 'q': round(q * 100, 2), 'k': int(gk.get(key, 0)),
+                         'p': round(p * 100, 2), 'q': round(q * 100, 2), 'k': int(gk.get(key, 0)), 'rp': round(grl.get(key, 0.0) * 100, 2) if grl is not None else None,
                          'zc': round(float(zc_), 2), 'zs': round(float(zs_), 2), 'z': round(float(z_), 2), 'pk': False, '_above': p > q}
         zmin_g = STRAT_MIN_Z_COMB if n_s else STRAT_MIN_Z
         picks, per_sum = [], {}
