@@ -2518,7 +2518,7 @@ async function downloadBallImage(nodes, title, btn){
   wrap.appendChild(head);
   // 日期行：几月几日生成 + 上期开奖期号与号码（仅预测报告导出图使用）
   const _lt = new Date();
-  let _dateTxt = `${_lt.getMonth()+1}月${_lt.getDate()}日生成`;
+  let _dateHtml = `${_lt.getMonth()+1}月${_lt.getDate()}日生成`;
   try{
     const _gk = ({'福彩3D':'3d','双色球':'ssq','快乐8':'kl8'})[(title.match(/福彩3D|双色球|快乐8/)||[])[0]];
     if(!window._histForImg){
@@ -2529,15 +2529,16 @@ async function downloadBallImage(nodes, title, btn){
     const arr = window._histForImg[_gk]; const last = arr && arr[arr.length-1];
     if(last){
       const p2 = v=>String(v).padStart(2,'0');
-      const nums = _gk==='3d' ? last.digits.join(' ')
-                 : _gk==='ssq' ? last.red.map(p2).join(' ')+' + '+p2(last.blue)
-                 : last.numbers.map(p2).join(' ');
-      _dateTxt += ` · 上期 ${last.qihao}期 ${nums}`;
+      const R = t=>`<b style="color:#d6283a;">${t}</b>`, B = t=>`<b style="color:#1b5fd1;">${t}</b>`;
+      const nums = _gk==='3d' ? R(last.digits.join(' '))
+                 : _gk==='ssq' ? R(last.red.map(p2).join(' '))+' + '+B(p2(last.blue))
+                 : R(last.numbers.map(p2).join(' '));
+      _dateHtml += ` · 上期${last.qihao}期开奖号码：${nums}`;
     }
   }catch(e){}
   const dateEl = document.createElement('div');
   dateEl.style.cssText='font-size:12px;color:#777;margin:-4px 0 10px;line-height:1.5;';
-  dateEl.textContent = _dateTxt;
+  dateEl.innerHTML = _dateHtml;
   wrap.appendChild(dateEl);
   nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
     if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
