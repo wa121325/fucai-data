@@ -1263,10 +1263,8 @@
 
       <div class="panel">
         <h2>🖼 下载图片内容</h2>
-        <div class="status" style="margin-bottom:8px;">选择预测报告、走势图下载的图片里包含哪些部分，勾选后自动保存（仅本机浏览器）。</div>
+        <div class="status" style="margin-bottom:8px;">日期行和二维码每张图必出；下面这些可选，勾选后自动保存（仅本机浏览器）。</div>
         <div id="imgOptsBox" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:13px;">
-          <label><input type="checkbox" data-opt="date"> 日期行（生成日期+上期开奖）</label>
-          <label><input type="checkbox" data-opt="qr"> 二维码</label>
           <label><input type="checkbox" data-opt="cand"> 3D 各位候选判断</label>
           <label><input type="checkbox" data-opt="rec"> 3D 推荐12注</label>
           <label><input type="checkbox" data-opt="samp"> 3D 采样12注</label>
@@ -2531,7 +2529,7 @@ const IMG_OPT_DEFAULTS = {date:true, qr:true, cand:true, rec:true, samp:true, co
 function getImgOpts(){
   let o = {};
   try{ o = JSON.parse(localStorage.getItem('fucaiImgOpts')||'{}') || {}; }catch(e){}
-  return Object.assign({}, IMG_OPT_DEFAULTS, o);
+  return Object.assign({}, IMG_OPT_DEFAULTS, o, {date:true, qr:true});   // 日期行、二维码必出，不可关
 }
 (function initImgOpts(){
   const box = document.getElementById('imgOptsBox'); if(!box) return;
