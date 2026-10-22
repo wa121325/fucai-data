@@ -670,6 +670,10 @@
     flex-direction:column;
     align-items:center;
     margin-top:34px;
+    position:absolute;  /* 固定在海报右下角 */
+    right:44px;
+    bottom:96px;
+    margin-top:0;
   }
   .qrImg{
     width:150px;height:150px;
@@ -4047,6 +4051,63 @@ function ctxRect(ctx, x, y, w, h, fill){
   ctx.fillStyle = fill;
   ctx.fillRect(x, y, w, h);
 }
+
+/* ── 走势图底部：左下=统计分析（取自页面「指标统计/特征统计」卡片），右下=二维码 ── */
+function collectTrendStats(){
+  return [...document.querySelectorAll('#trendWrap div[style*="#faf9f6"]')].map(c=>{
+    const kids=[...c.children];
+    return {t:(kids[0]&&kids[0].textContent||'').trim(), lines:kids.slice(1).map(k=>k.textContent.trim()).filter(Boolean)};
+  }).filter(x=>x.t);
+}
+function trendFooterLayout(W0){
+  const hasQr = !!(state.qr.show && state.qr.image);
+  const stats = collectTrendStats();
+  if(!hasQr && !stats.length) return {h:0, stats:[], hasQr:false};
+  const QR=130, QW = hasQr ? QR+24 : 0;
+  const pad=20, gap=10, region = W0 - pad*2 - (hasQr ? QW+16 : 0);
+  const cols = Math.max(1, Math.min(4, Math.floor((region+gap)/(190+gap))));
+  const cw = (region - gap*(cols-1))/cols;
+  const colH = new Array(cols).fill(0), placed=[];
+  stats.forEach(st=>{
+    const h = 24 + st.lines.length*17 + 6;
+    let ci = colH.indexOf(Math.min(...colH));
+    placed.push({...st, col:ci, y:colH[ci], h, w:cw});
+    colH[ci] += h + gap;
+  });
+  const statsH = stats.length ? Math.max(...colH) : 0;
+  const qrH = hasQr ? QR+24+(state.qr.caption?26:0) : 0;
+  return {h: 36 + Math.max(statsH, qrH) + 20, stats:placed, hasQr, QR, QW, pad, gap, cw, cols, region, qrH, statsH};
+}
+async function drawTrendFooter(ctx, W0, startY, L){
+  if(!L || !L.h) return startY;
+  ctx.strokeStyle='#d4a017'; ctx.lineWidth=1.5; ctx.setLineDash([8,6]);
+  ctx.beginPath(); ctx.moveTo(L.pad,startY+20); ctx.lineTo(W0-L.pad,startY+20); ctx.stroke(); ctx.setLineDash([]);
+  const top = startY+36;
+  // 左：统计卡片
+  L.stats.forEach(st=>{
+    const x = L.pad + st.col*(L.cw+L.gap), y = top + st.y;
+    ctx.fillStyle='#faf9f6'; ctx.beginPath(); ctx.roundRect(x,y,st.w,st.h,8); ctx.fill();
+    ctx.strokeStyle='#e3e0d8'; ctx.lineWidth=1; ctx.stroke();
+    ctxText(ctx, st.t, x+10, y+13, {size:12,bold:true,color:'#2b2520',align:'left'});
+    st.lines.forEach((ln,i)=> ctxText(ctx, ln, x+10, y+32+i*17, {size:11,color:'#555',align:'left'}));
+  });
+  // 右：二维码（靠右下角）
+  if(L.hasQr){
+    await new Promise(res=>{
+      const img=new Image();
+      img.onload=()=>{
+        const bx=W0-L.pad-L.QW, bh=L.QR+24, by=top+Math.max(L.statsH,L.qrH)-L.qrH;
+        ctx.fillStyle='#fff'; ctx.beginPath(); ctx.roundRect(bx,by,L.QW,bh,14); ctx.fill();
+        ctx.strokeStyle='#d4a017'; ctx.lineWidth=3; ctx.stroke();
+        ctx.drawImage(img,bx+12,by+12,L.QR,L.QR);
+        if(state.qr.caption) ctxText(ctx,state.qr.caption,bx+L.QW/2,by+bh+14,{size:12,color:'#555'});
+        res();
+      };
+      img.onerror=res; img.src=state.qr.image;
+    });
+  }
+  return startY+L.h;
+}
 async function drawQR(ctx, W, startY){
   // 二维码画在 startY 处，居中，不遮挡走势图
   if(!state.qr.show || !state.qr.image) return startY;
@@ -4098,7 +4159,7 @@ async function draw3DCanvas(records){
   const COL_Q=58, COL_D=46, COL_N=20, COL_S=36;
   const W0 = COL_Q + COL_D + COL_N*30 + COL_S*5 + 40;  // 内容宽
   const ROW_H=28, HEAD_H=56, TITLE_H=48;
-  const QR_H = (state.qr.show && state.qr.image) ? (220 + (state.qr.caption?40:0)) : 0;
+  const FOOTER = trendFooterLayout(W0); const QR_H = FOOTER.h;
   const FOOT_H = 50;
   const H0 = TITLE_H + HEAD_H + ROW_H*n + FOOT_H + QR_H + 20;
 
@@ -4199,7 +4260,7 @@ async function draw3DCanvas(records){
   cy+=FOOT_H-14;
 
   // 二维码（正下方）
-  await drawQR(ctx, W0, cy);
+  await drawTrendFooter(ctx, W0, cy, FOOTER);
 
   ctx.setTransform(1,0,0,1,0,0); // 重置scale
   return c;
@@ -4214,7 +4275,7 @@ async function drawSSQCanvas(records){
   const COL_Q=58,COL_D=46,COL_N=20,COL_B=28;
   const W0=COL_Q+COL_D+COL_N*33+COL_B+40;
   const ROW_H=26,HEAD_H=32,TITLE_H=48;
-  const QR_H=(state.qr.show&&state.qr.image)?(220+(state.qr.caption?40:0)):0;
+  const FOOTER = trendFooterLayout(W0); const QR_H = FOOTER.h;
   const H0=TITLE_H+HEAD_H+ROW_H*n+50+QR_H+20;
   const {c,ctx}=makeCanvas(W0*SCALE,H0*SCALE);
   ctx.scale(SCALE,SCALE);
@@ -4260,7 +4321,7 @@ async function drawSSQCanvas(records){
   cy+=14;
   ctxText(ctx,'数据来源： |  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
   cy+=36;
-  await drawQR(ctx,W0,cy);
+  await drawTrendFooter(ctx, W0, cy, FOOTER);
   ctx.setTransform(1,0,0,1,0,0);
   return c;
 }
@@ -4274,7 +4335,7 @@ async function drawKL8Canvas(records){
   const COL_Q=56,COL_D=44,COL_N=18;
   const W0=COL_Q+COL_D+COL_N*80+40;
   const ROW_H=22,HEAD_H=28,TITLE_H=48;
-  const QR_H=(state.qr.show&&state.qr.image)?(220+(state.qr.caption?40:0)):0;
+  const FOOTER = trendFooterLayout(W0); const QR_H = FOOTER.h;
   const H0=TITLE_H+HEAD_H+ROW_H*n+50+QR_H+20;
   const {c,ctx}=makeCanvas(W0*SCALE,H0*SCALE);
   ctx.scale(SCALE,SCALE);
@@ -4318,7 +4379,7 @@ async function drawKL8Canvas(records){
   cy+=14;
   ctxText(ctx,'数据来源：|  仅供参考，开奖以官方公布为准',W0/2,cy,{size:10,color:'#aaa'});
   cy+=36;
-  await drawQR(ctx,W0,cy);
+  await drawTrendFooter(ctx, W0, cy, FOOTER);
   ctx.setTransform(1,0,0,1,0,0);
   return c;
 }
