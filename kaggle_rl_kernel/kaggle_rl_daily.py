@@ -2870,6 +2870,8 @@ VOTE_NSAMP = {'ssq': 300000, 'kl8': 200000}   # 蒙特卡洛样本数
 VOTE_K = {'ssq': 10, 'kl8': 30}               # 每一方投票的球数（3D每位固定投3个数字）
 VOTE_FLAT_EPS = 0.03                          # 提升倍数最大最小差小于它 → 无明显倾向
 VOTE_MIN_TARGETS = 4                          # 一方至少给出几个目标的概率才算有效
+VOTE_OFF = {'ml', 'dl', 'rl'} & set(x.strip().lower() for x in os.environ.get('VOTE_OFF', '').split(','))   # 要关掉的投票方：改下一行即可，例如 VOTE_OFF = {'ml'}；也可设环境变量 VOTE_OFF=ml,dl
+# VOTE_OFF = {'ml'}      # ← 取消这行注释并写上要关的（'ml' / 'dl' / 'rl'），被关的一方不参与投票，页面上显示"已手动关闭"
 VOTE_ALPHA = 1.0                              # 似然比指数（<1 表示对 ML/DL 判断打折）
 VOTE_LAYOUT_CUR = VOTE_LAYOUT['3d']            # 当前正在计算的游戏的目标布局（vote_ball_lifts/vote_3d_joints 会设置）
 
@@ -3013,6 +3015,7 @@ def vote_ball_lifts(game, sources, rl_scores, seed):
         lifts['rl'] = ball_sample_probs(rl_scores) * pool   # RL分数→softmax概率→相对均匀的倍数
     else:
         lifts['rl'] = None
+    for k in VOTE_OFF: lifts[k] = None
     return lifts
 
 
@@ -3024,7 +3027,7 @@ def vote_balls(game, lifts):
     for key in ('ml', 'dl', 'rl'):
         lf = lifts.get(key)
         if lf is None:
-            info[key] = {'available': False}; continue
+            info[key] = {'available': False, 'reason': '已手动关闭' if key in VOTE_OFF else '未获取'}; continue
         strength = float(lf.max() - lf.min())
         flat = strength < VOTE_FLAT_EPS
         order = sorted(range(pool), key=lambda i: (-lf[i], i))
@@ -3059,6 +3062,7 @@ def vote_3d_joints(sources, rl_pos_probs):
         J['rl'] = np.array([pp[0][b] * pp[1][s] * pp[2][g] for b, s, g in _D3_ALL])
     else:
         J['rl'] = None
+    for k in VOTE_OFF: J[k] = None
     return J
 
 
@@ -3090,7 +3094,7 @@ def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
     for key in ('ml', 'dl', 'rl'):
         j = J.get(key)
         if j is None:
-            info[key] = {'available': False}; continue
+            info[key] = {'available': False, 'reason': '已手动关闭' if key in VOTE_OFF else '未获取'}; continue
         mp = [np.bincount(_D3_ALL[:, c], weights=j, minlength=10) for c in range(3)]
         marg[key] = mp
         strength = max(float(m.max() - m.min()) for m in mp)
