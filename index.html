@@ -3151,10 +3151,10 @@ function renderDistillBlock(dz){
   const badge = r => { const t=evTxt[r.evidence]||evTxt.none; return `<span style="font-size:10px;color:${t[1]};border:1px solid ${t[1]};border-radius:8px;padding:0 6px;">${t[0]}</span>`; };
   const evLine = (r,kind) => {
     const he=r.history_eval||{}, m=he.model||{}, f=he.freq||{};
-    const hit = kind==='3d' ? `每位取前3个数字，三位合计命中 ${m.hits} 次 / 随机期望 ${m.expected}` : `前10球平均命中 ${m.avg_hits} / 随机期望 ${m.expected}`;
+    const hit = kind==='3d' ? `命中 ${m.hits} / 随机期望 ${m.expected}` : `前10球平均命中 ${m.avg_hits} / 随机期望 ${m.expected}`;
     return `开奖号码信号·滚动检验 ${he.n_eval||'—'} 期：${hit}，z=${m.z}（朴素近30期频率法 z=${f.z}；z≥2显著、1~2有迹象、<1无证据）`;
   };
-  const srcEv = r => { const se=r.source_eval||{}; const t=['rl','ml','dl'].filter(k=>se[k]&&se[k].n_periods).map(k=>`${se[k].name} ${se[k].n_periods}期 z=${se[k].z}`).join('；'); return t?`各路老师单独表现（已开奖期；3D 每位前3、快乐8 前10球）：${t}`:'各路老师单独表现：暂无已开奖的记录期'; };
+  const srcEv = r => { const se=r.source_eval||{}; const t=['rl','ml','dl'].filter(k=>se[k]&&se[k].n_periods).map(k=>`${se[k].name} ${se[k].n_periods}期 z=${se[k].z}`).join('；'); return t?`各路老师单独表现（已开奖期；3D 前12个组选号、快乐8 前10球）：${t}`:'各路老师单独表现：暂无已开奖的记录期'; };
   const wTxt = r => { const w=r.weights||{}; return `开奖信号${w.H}·RL${w.rl}·ML${w.ml}·DL${w.dl}`; };
   const rollLine = r => { const q=r.roll||{}; let t=`老师权重（滚动学习）：${wTxt(r)}。${q.note||''}`; if(q.n_oos){ t+=`（样本外 ${q.n_oos} 期：学到的 z=${q.z_learned_oos}，默认权重 z=${q.z_default_oos}；每期只用它之前的记录挑权重）`; } return t; };
   const metaLine = r => `今日老师：RL ${r.n_versions_today||0} 个版本 / ML ${r.n_ml_today||0} 份 / DL ${r.n_dl_today||0} 份；已累计 ${r.n_logged_periods||0} 期推荐记录（RL ${r.n_versions||0} 版、ML ${r.n_ml_snapshots||0} 份、DL ${r.n_dl_snapshots||0} 份），其中 ${r.n_labeled||0} 期已开奖可检验。`;
@@ -3163,16 +3163,11 @@ function renderDistillBlock(dz){
     <div style="font-size:10.5px;color:#888;margin:2px 0 6px;">把几千期开奖号码的冷热/遗漏/重号信号，和 RL（多版本、含共识/采样）、ML、DL 三路老师的推荐，各自标准化后融合成一个选号器；始终输出选号，并用「只看过去、预测下一期」的滚动检验标出证据强度。</div>`;
   const g3 = dz.games['3d'];
   if(g3){
-    h += `<div style="margin:8px 0;"><div style="font-size:12px;font-weight:700;color:#1a1a2e;">福彩3D 直选（按位置） ${badge(g3)}</div>`;
-    h += `<div style="font-size:10.5px;color:#888;margin:2px 0 4px;">来源：${srcTxt[g3.source]||g3.source}${g3.base_qihao?` · 基于第${g3.base_qihao}期`:''}（百/十/个位各自排名，数字越靠前越被看好）</div>`;
-    h += `<div class="ball-label" style="margin:2px 0 3px;"><span style="font-size:12px;color:#666;">各位置蒸馏排名（前5）：</span></div>`;
-    (g3.positions||[]).forEach(ps=>{
-      h += `<div style="margin:2px 0;font-size:10px;color:#666;line-height:1.9;"><span style="display:inline-block;width:26px;">${ps.name}</span>` + ps.digits.map((x,i)=>
-        `<span style="display:inline-block;width:${i<3?20:17}px;height:${i<3?20:17}px;line-height:${i<3?20:17}px;border-radius:50%;background:${i<3?PUR:'#9ca3af'};color:#fff;font-size:10px;font-weight:700;text-align:center;margin:1px 5px 1px 1px;">${x.d}</span>`).join('') + `</div>`;
-    });
-    h += `<div class="ball-label" style="margin:6px 0 3px;"><span style="font-size:12px;color:#666;">蒸馏直选（${(g3.bets||[]).length}注，三位得分之和最高）：</span></div>`;
-    h += `<div style="line-height:2.2;">` + (g3.bets||[]).map((b,i)=>
-      `<span class="rec-group" style="white-space:nowrap;display:inline-block;padding:3px 8px;margin:1px;"><span style="font-size:9px;color:#aaa;margin-right:3px;">${i+1}</span>${b.digits.map(n=>`<span class="ball-r" style="background:${PUR};width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;">${n}</span>`).join('')}</span>`).join('') + `</div>`;
+    h += `<div style="margin:8px 0;"><div style="font-size:12px;font-weight:700;color:#1a1a2e;">福彩3D 组选号 ${badge(g3)}</div>`;
+    h += `<div style="font-size:10.5px;color:#888;margin:2px 0 4px;">来源：${srcTxt[g3.source]||g3.source}${g3.base_qihao?` · 基于第${g3.base_qihao}期`:''}（组选号：数字顺序不限，12个）</div>`;
+    h += `<div class="ball-label" style="margin:2px 0 3px;"><span style="font-size:12px;color:#666;">蒸馏选号（${(g3.picks||[]).length}个组选号）：</span></div>`;
+    h += `<div style="line-height:2.2;">` + (g3.picks||[]).map(p=>
+      `<span class="rec-group" style="white-space:nowrap;display:inline-block;padding:3px 8px;margin:1px;">${p.d.split('').map(n=>`<span class="ball-r" style="background:${PUR};width:18px;height:18px;line-height:18px;font-size:10px;margin:1px;">${n}</span>`).join('')}<span style="font-size:9px;color:#aaa;margin-left:3px;">${p.kind}</span></span>`).join('') + `</div>`;
     h += `<div style="font-size:10px;color:#999;margin-top:4px;">${evLine(g3,'3d')}</div>`;
     h += `<div style="font-size:10px;color:#999;">${srcEv(g3)}</div><div style="font-size:10px;color:#a78bfa;">${rollLine(g3)}</div><div style="font-size:10px;color:#999;">${metaLine(g3)}</div></div>`;
   }
