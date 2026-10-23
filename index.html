@@ -3155,7 +3155,7 @@ function renderDistillBlock(dz){
     return `开奖号码信号·滚动检验 ${he.n_eval||'—'} 期：${hit}，z=${m.z}（朴素近30期频率法 z=${f.z}；z≥2显著、1~2有迹象、<1无证据）`;
   };
   const srcEv = r => { const se=r.source_eval||{}; const t=['rl','ml','dl'].filter(k=>se[k]&&se[k].n_periods).map(k=>`${se[k].name} ${se[k].n_periods}期 z=${se[k].z}`).join('；'); return t?`各路老师单独表现（已开奖期；3D 前12个组选号、快乐8 前10球）：${t}`:'各路老师单独表现：暂无已开奖的记录期'; };
-  const wTxt = r => { const w=r.weights||{}; return `开奖信号${w.H}·RL${w.rl}·ML${w.ml}·DL${w.dl}`; };
+  const wTxt = r => { const w=r.weights; return w ? `开奖信号${w.H}·RL${w.rl}·ML${w.ml}·DL${w.dl}` : '默认公式（开奖信号 + 0.5×RL/ML/DL等权混合）'; };
   const rollLine = r => { const q=r.roll||{}; let t=`老师权重（滚动学习）：${wTxt(r)}。${q.note||''}`; if(q.n_oos){ t+=`（样本外 ${q.n_oos} 期：学到的 z=${q.z_learned_oos}，默认权重 z=${q.z_default_oos}；每期只用它之前的记录挑权重）`; } return t; };
   const metaLine = r => `今日老师：RL ${r.n_versions_today||0} 个版本 / ML ${r.n_ml_today||0} 份 / DL ${r.n_dl_today||0} 份；已累计 ${r.n_logged_periods||0} 期推荐记录（RL ${r.n_versions||0} 版、ML ${r.n_ml_snapshots||0} 份、DL ${r.n_dl_snapshots||0} 份），其中 ${r.n_labeled||0} 期已开奖可检验。`;
   let h = `<div style="margin:14px 0 4px;padding-top:10px;border-top:1px dashed #666;">

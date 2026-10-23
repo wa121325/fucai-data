@@ -618,11 +618,14 @@ def tier(z):
 
 SRC4 = ('H', 'rl', 'ml', 'dl')
 _WCOMBOS = [c for c in itertools.product(W_GRID, repeat=4) if c[0] > 0 or any(c[1:])]
-_KD = _WCOMBOS.index(W_DEFAULT)
 
 
 def combo_score(sH, pp, w):
-    """四路各自按位/整体标准化后按权重相加，再标准化。缺的路不参与"""
+    """w=None：恢复版默认公式 = 开奖信号 + 0.5 × 三路老师等权混合（RL/ML/DL 各自标准化相加再标准化）。
+    w=(H,RL,ML,DL)：学到的权重，四路各自标准化后按权重相加，再标准化。缺的路不参与"""
+    if w is None:
+        Tt = combine_teacher(pp)
+        return zs(sH) + (LAMBDA_DEFAULT * zs(Tt) if Tt is not None else 0.0)
     v = w[0] * zs(sH)
     for j, k in enumerate(('rl', 'ml', 'dl')):
         if pp.get(k) is not None: v = v + w[j + 1] * pp[k]
@@ -633,9 +636,9 @@ def roll_learn(items, game):
     """滚动学习四路权重。指标=开奖实际号码在融合得分里的标准分之和（平滑、随机时期望0）。
     每一期只用它之前的记录挑权重再检验它(样本外)，与默认权重对比；够格才采用学到的权重。"""
     n = len(items); C = 220 if game == '3d' else 80
-    out = {'n_periods': n, 'weights': dict(zip(SRC4, W_DEFAULT)), 'adopted': False}
+    out = {'n_periods': n, 'weights': None, 'adopted': False}
     if n == 0:
-        out['note'] = '还没有已开奖的推荐期，使用默认权重'; return out
+        out['note'] = '还没有已开奖的推荐期，使用默认公式'; return out
     A = np.zeros((n, 4, C))
     for i, (sH, T, y, pp) in enumerate(items):
         A[i, 0] = zs(sH)
@@ -643,6 +646,9 @@ def roll_learn(items, game):
             if pp.get(k) is not None: A[i, j + 1] = pp[k]
     W = np.array(_WCOMBOS)
     comb = np.einsum('kj,njc->nkc', W, A)
+    K = len(W)
+    base = np.stack([zs(it[0]) + LAMBDA_DEFAULT * zs(it[1]) for it in items])           # 当前默认公式（恢复版）
+    comb = np.concatenate([comb, base[:, None, :]], axis=1)                              # 最后一个 = 默认公式
     if game == '3d':
         z = (comb - comb.mean(-1, keepdims=True)) / np.maximum(comb.std(-1, keepdims=True), 1e-12)     # (n,K,220)
         ys = np.array([it[2] for it in items])
@@ -651,25 +657,25 @@ def roll_learn(items, game):
     else:
         z = (comb - comb.mean(-1, keepdims=True)) / np.maximum(comb.std(-1, keepdims=True), 1e-12)
         Y = np.array([it[2] for it in items], dtype=np.float64)
-        S = np.einsum('nkc,nc->nk', z, Y); var_n = np.full(len(W), n * 20.0 * 60.0 / 79.0)
-    cum = S.sum(0); kb = int(np.argmax(cum))
-    zb = float(cum[kb] / math.sqrt(var_n[kb])); zd = float(cum[_KD] / math.sqrt(var_n[_KD]))
+        S = np.einsum('nkc,nc->nk', z, Y); var_n = np.full(K + 1, n * 20.0 * 60.0 / 79.0)
+    KD = K; cum = S.sum(0); kb = int(np.argmax(cum[:K]))
+    zb = float(cum[kb] / math.sqrt(var_n[kb])); zd = float(cum[KD] / math.sqrt(var_n[KD]))
     n_oos = max(0, n - ROLL_MIN); sl = sdo = vl = vd = 0.0
     for t in range(ROLL_MIN, n):
-        k = int(np.argmax(S[:t].sum(0))); sl += S[t, k]; sdo += S[t, _KD]
-        vl += Vz[t, k] if game == '3d' else 20.0 * 60.0 / 79.0; vd += Vz[t, _KD] if game == '3d' else 20.0 * 60.0 / 79.0
+        k = int(np.argmax(S[:t, :K].sum(0))); sl += S[t, k]; sdo += S[t, KD]
+        vl += Vz[t, k] if game == '3d' else 20.0 * 60.0 / 79.0; vd += Vz[t, KD] if game == '3d' else 20.0 * 60.0 / 79.0
     zl = round(sl / math.sqrt(vl), 2) if n_oos else None
     zdo = round(sdo / math.sqrt(vd), 2) if n_oos else None
     out.update({'best_weights': dict(zip(SRC4, _WCOMBOS[kb])), 'z_best_insample': round(zb, 2), 'z_default_insample': round(zd, 2),
                 'n_oos': n_oos, 'z_learned_oos': zl, 'z_default_oos': zdo})
     if n < ROLL_MIN:
-        out['note'] = f'已开奖的推荐期 {n}/{ROLL_MIN}，不足，使用默认权重（只记录、不调整）'
+        out['note'] = f'已开奖的推荐期 {n}/{ROLL_MIN}，不足，使用默认公式（只记录、不调整）'
     elif n_oos < ROLL_MIN_OOS:
-        out['note'] = f'样本外检验期 {n_oos}/{ROLL_MIN_OOS}，不足，使用默认权重'
+        out['note'] = f'样本外检验期 {n_oos}/{ROLL_MIN_OOS}，不足，使用默认公式'
     elif zb - zd < ROLL_GAIN_Z:
-        out['note'] = f'学到的权重只比默认高 {zb - zd:.2f}σ（需≥{ROLL_GAIN_Z}σ），使用默认权重'
+        out['note'] = f'学到的权重只比默认高 {zb - zd:.2f}σ（需≥{ROLL_GAIN_Z}σ），使用默认公式'
     elif zl < zdo:
-        out['note'] = f'学到的权重样本外(z={zl})不如默认(z={zdo})，使用默认权重'
+        out['note'] = f'学到的权重样本外(z={zl})不如默认(z={zdo})，使用默认公式'
     else:
         out['adopted'] = True; out['weights'] = dict(zip(SRC4, _WCOMBOS[kb]))
         out['note'] = f'已采用学到的权重：样本内 z={zb:.2f}（默认 {zd:.2f}），样本外 z={zl}（默认 {zdo}）'
@@ -749,14 +755,13 @@ def run_game(game, hist, log, rl_latest_key):
     res['source_eval'] = source_stats(items, game)
     # 融合权重：滚动学习（够格才采用，否则用默认）
     roll = roll_learn(items, game); res['roll'] = roll
-    wt = tuple(roll['weights'][k] for k in SRC4)
+    wt = tuple(roll['weights'][k] for k in SRC4) if roll['adopted'] else None      # None = 恢复版默认公式
     if items:
         res['logged_eval'] = logged_stats(items, wt, game)
     res['weights'] = roll['weights']; res['weights_note'] = roll['note']
     # 证据强度：以开奖号码信号在上千期滚动检验里的 z 为准；若推荐期够多(≥LOGGED_FIT_MIN)且融合更强，取两者较大
     z_h = he['model']['z']; z_use = z_h; basis = f'开奖号码信号 {he["n_eval"]} 期滚动检验 z={z_h}'
-    if 'logged_eval' in res and len(items) >= LOGGED_FIT_MIN and res['logged_eval']['blend']['z'] > z_h:
-        z_use = res['logged_eval']['blend']['z']; basis = f'融合选号在 {len(items)} 个推荐期的检验 z={z_use}'
+    # 证据只看真正只用过去预测下一期的滚动检验；融合在推荐期上的成绩（权重/公式在这些期上定过）只展示，不用来抬高证据档位
     res['evidence'] = tier(z_use); res['evidence_z'] = z_use; res['evidence_basis'] = basis
     # 今日选号
     rec = log.get((game, rl_latest_key)) if rl_latest_key else None

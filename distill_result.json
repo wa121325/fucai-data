@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-10-23 15:46:39",
+ "updated_at": "2026-10-23 16:00:46",
  "games": {
   "3d": {
    "game": "3d",
@@ -68,12 +68,7 @@
    },
    "roll": {
     "n_periods": 62,
-    "weights": {
-     "H": 1.0,
-     "rl": 0.5,
-     "ml": 0.5,
-     "dl": 0.5
-    },
+    "weights": null,
     "adopted": false,
     "best_weights": {
      "H": 0.0,
@@ -82,17 +77,17 @@
      "dl": 0.0
     },
     "z_best_insample": -0.26,
-    "z_default_insample": -0.97,
+    "z_default_insample": -0.96,
     "n_oos": 32,
     "z_learned_oos": -2.9,
-    "z_default_oos": -0.27,
-    "note": "学到的权重只比默认高 0.72σ（需≥1.0σ），使用默认权重"
+    "z_default_oos": -0.14,
+    "note": "学到的权重只比默认高 0.70σ（需≥1.0σ），使用默认公式"
    },
    "logged_eval": {
     "blend": {
-     "hits": 6.0,
-     "expected": 4.45,
-     "z": 0.76
+     "hits": 7.0,
+     "expected": 4.46,
+     "z": 1.25
     },
     "only_H": {
      "hits": 7.0,
@@ -100,16 +95,11 @@
      "z": 1.25
     }
    },
-   "weights": {
-    "H": 1.0,
-    "rl": 0.5,
-    "ml": 0.5,
-    "dl": 0.5
-   },
-   "weights_note": "学到的权重只比默认高 0.72σ（需≥1.0σ），使用默认权重",
+   "weights": null,
+   "weights_note": "学到的权重只比默认高 0.70σ（需≥1.0σ），使用默认公式",
    "evidence": "none",
-   "evidence_z": 0.76,
-   "evidence_basis": "融合选号在 62 个推荐期的检验 z=0.76",
+   "evidence_z": -0.73,
+   "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.73",
    "source": "blend",
    "sources_today": [
     "rl",
@@ -123,62 +113,62 @@
    "picks": [
     {
      "d": "278",
-     "score": 2.017,
+     "score": 1.979,
      "kind": "组六"
     },
     {
      "d": "357",
-     "score": 1.916,
+     "score": 1.942,
      "kind": "组六"
     },
     {
      "d": "258",
-     "score": 1.902,
+     "score": 1.926,
      "kind": "组六"
     },
     {
      "d": "379",
-     "score": 1.841,
-     "kind": "组六"
-    },
-    {
-     "d": "157",
-     "score": 1.773,
+     "score": 1.885,
      "kind": "组六"
     },
     {
      "d": "478",
-     "score": 1.744,
+     "score": 1.834,
      "kind": "组六"
     },
     {
      "d": "458",
-     "score": 1.694,
+     "score": 1.785,
      "kind": "组六"
     },
     {
-     "d": "378",
-     "score": 1.681,
+     "d": "157",
+     "score": 1.78,
      "kind": "组六"
     },
     {
      "d": "289",
-     "score": 1.649,
+     "score": 1.761,
      "kind": "组六"
     },
     {
      "d": "167",
-     "score": 1.64,
+     "score": 1.681,
      "kind": "组六"
     },
     {
-     "d": "578",
-     "score": 1.625,
+     "d": "378",
+     "score": 1.666,
      "kind": "组六"
     },
     {
-     "d": "137",
-     "score": 1.553,
+     "d": "267",
+     "score": 1.658,
+     "kind": "组六"
+    },
+    {
+     "d": "678",
+     "score": 1.605,
      "kind": "组六"
     }
    ]
@@ -264,11 +254,11 @@
      "dl": 2.0
     },
     "z_best_insample": 0.94,
-    "z_default_insample": -0.26,
+    "z_default_insample": -0.11,
     "n_oos": 33,
     "z_learned_oos": 0.17,
-    "z_default_oos": -0.57,
-    "note": "已采用学到的权重：样本内 z=0.94（默认 -0.26），样本外 z=0.17（默认 -0.57）"
+    "z_default_oos": -0.42,
+    "note": "已采用学到的权重：样本内 z=0.94（默认 -0.11），样本外 z=0.17（默认 -0.42）"
    },
    "logged_eval": {
     "blend": {
@@ -288,10 +278,10 @@
     "ml": 0.25,
     "dl": 2.0
    },
-   "weights_note": "已采用学到的权重：样本内 z=0.94（默认 -0.26），样本外 z=0.17（默认 -0.57）",
+   "weights_note": "已采用学到的权重：样本内 z=0.94（默认 -0.11），样本外 z=0.17（默认 -0.42）",
    "evidence": "none",
-   "evidence_z": 0.83,
-   "evidence_basis": "融合选号在 63 个推荐期的检验 z=0.83",
+   "evidence_z": -1.28,
+   "evidence_basis": "开奖号码信号 400 期滚动检验 z=-1.28",
    "source": "blend",
    "sources_today": [
     "rl",
