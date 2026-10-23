@@ -3018,7 +3018,7 @@ function renderConsensus(game, c, rlGame){
     return `<span style="margin-right:10px;color:${col};">● ${srcName[k]}：${st}</span>`;
   }).join('') + `</div>`;
   if(game==='3d'){
-    h += `<div style="font-size:9px;color:#888;margin:0 0 2px;">球色=得票：<span style="color:#6d28d9;">●</span>3票 <span style="color:#a78bfa;">●</span>2票 <span style="color:#9ca3af;">●</span>1票 <span style="color:#4b5563;">●</span>0票（第4、5名）；数字旁为概率</div>`;
+    h += `<div style="font-size:9px;color:#888;margin:0 0 2px;">球色=得票：<span style="color:#6d28d9;">●</span>3票 <span style="color:#a78bfa;">●</span>2票 <span style="color:#9ca3af;">●</span>1票 <span style="color:#4b5563;">●</span>0票；第4、5名按得票再按概率排，也可能有票；数字旁为概率</div>`;
     // 各位候选：Top3 数字及得票
     (c.pos||[]).forEach(ps=>{
       h += `<div style="margin:2px 0;font-size:10px;color:#666;line-height:1.9;"><span style="display:inline-block;width:26px;">${ps.name}</span>` + ps.cands.map((x,i)=>
