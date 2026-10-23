@@ -289,6 +289,28 @@ def k8_eval(X, Y, eval_n, train_win, refit, valid=K8_VALID, topn=K8_TOPN):
 
 
 # ═════════════════════════ 老师信号（每个 RL 版本一份，同一期累加）═════════════════════════
+def rl_vid(rl):
+    """RL 版本号 → 北京时间字符串。version_time_bj 本来就是北京时间；updated_at 是 UTC，要 +8 小时，
+    否则同一次运行在 dl_rl.json 和 rl_archive 里会被当成两个版本"""
+    try:
+        if rl.get('version_time_bj'):
+            return datetime.strptime(str(rl['version_time_bj'])[:19], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
+        if rl.get('updated_at'):
+            return (datetime.strptime(str(rl['updated_at'])[:19], '%Y-%m-%d %H:%M:%S') + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        pass
+    return str(rl.get('version_time_bj') or rl.get('updated_at') or '')
+
+
+def _same_ver(a, b, tol=30):
+    """两个版本号相差不到 tol 秒视为同一版本（同一次运行落盘时间有几秒差）"""
+    try:
+        f = lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M:%S')
+        return abs((f(a) - f(b)).total_seconds()) <= tol
+    except Exception:
+        return a == b
+
+
 def d3_version(rl):
     """从一个 RL 版本取 3D 信号。返回 (版本号, 期号, 日期, {组选号: [ln_cons, ln_rl|None, samp, rec, cons]})"""
     r = (rl.get('results') or {}).get('3d')
@@ -309,7 +331,7 @@ def d3_version(rl):
                 c[e['d']] = [math.log(max(float(e['p']), 1e-6) / q), math.log(max(float(e['rp']), 1e-6) / q) if e.get('rp') is not None else None,
                              float(e.get('k', 0) or 0), rec.get(e['d'], 0), con.get(e['d'], 0)]
     if len(c) < 100: return None
-    vid = str(rl.get('version_time_bj') or rl.get('updated_at') or '')
+    vid = rl_vid(rl)
     return vid, str(r['base_qihao']), r.get('base_date'), c
 
 
@@ -329,7 +351,7 @@ def k8_version(rl):
     sz = zs(scores)
     balls = [[float(sz[i]), math.log(max(float(final[i]), 1e-6)) if i < len(final) else 0.0, float(votes.get(i + 1, 0)), float(lift.get(i + 1, 1.0)),
               float(pick.get(i + 1, 0)), float(samp.get(i + 1, 0))] for i in range(80)]
-    vid = str(rl.get('version_time_bj') or rl.get('updated_at') or '')
+    vid = rl_vid(rl)
     return vid, str(r['base_qihao']), r.get('base_date'), balls
 
 
@@ -466,7 +488,7 @@ def md_snapshots(pred, dl, hists):
 def new_rec(log, game, bq, bd=None):
     key = (game, bq); rec = log.get(key)
     if rec is None:
-        rec = {'game': game, 'base_qihao': bq, 'base_date': bd, 'versions': [], 'n': 0}
+        rec = {'game': game, 'base_qihao': bq, 'base_date': bd, 'versions': [], 'n': 0, 'rlv': 2}
         if game == '3d': rec['cands'] = {}; rec['n_rl'] = 0
         else: rec['balls'] = [[0.0] * 6 for _ in range(80)]
         log[key] = rec
@@ -508,6 +530,10 @@ def load_log():
                 try: r = json.loads(line)
                 except Exception: continue
                 if 'versions' not in r: continue          # 旧格式（只保留最新一版的记录）丢弃，由补录重新生成
+                if r.get('rlv') != 2:          # RL 版本号以前没统一成北京时间，同一次运行会被算成两个版本：清掉 RL 累计，由补录重新生成（ML/DL 保留）
+                    r['versions'] = []; r['n'] = 0; r['rlv'] = 2
+                    if r['game'] == '3d': r['cands'] = {}; r['n_rl'] = 0
+                    else: r['balls'] = [[0.0] * 6 for _ in range(80)]
                 d[(r['game'], r['base_qihao'])] = r
     return d
 
@@ -523,7 +549,7 @@ def add_version(log, game, ver):
     if ver is None: return False
     vid, bq, bd, payload = ver
     rec = new_rec(log, game, bq, bd)
-    if vid and vid in rec['versions']: return False
+    if vid and any(_same_ver(vid, v) for v in rec['versions']): return False
     rec['versions'].append(vid); rec['n'] += 1
     if game == '3d':
         rec['n_rl'] += 1 if any(v[1] is not None for v in payload.values()) else 0

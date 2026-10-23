@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-10-24 01:55:18",
+ "updated_at": "2026-10-24 05:26:35",
  "games": {
   "3d": {
    "game": "3d",
@@ -39,17 +39,17 @@
     "ln_q": 0.6912
    },
    "n_logged_periods": 64,
-   "n_versions": 62,
+   "n_versions": 16,
    "n_labeled": 63,
    "n_ml_snapshots": 134,
    "n_dl_snapshots": 54,
    "source_eval": {
     "rl": {
      "name": "RL",
-     "n_periods": 5,
+     "n_periods": 3,
      "hits": 0.0,
-     "expected": 0.34,
-     "z": -0.6
+     "expected": 0.21,
+     "z": -0.47
     },
     "ml": {
      "name": "ML",
@@ -72,16 +72,16 @@
     "adopted": false,
     "best_weights": {
      "H": 0.0,
-     "rl": 0.0,
+     "rl": 2.0,
      "ml": 0.0,
      "dl": 0.25
     },
-    "z_best_insample": -0.38,
-    "z_default_insample": -1.2,
+    "z_best_insample": -0.28,
+    "z_default_insample": -1.16,
     "n_oos": 33,
-    "z_learned_oos": -3.16,
-    "z_default_oos": -0.47,
-    "note": "学到的权重只比默认高 0.82σ（需≥1.0σ），使用默认公式"
+    "z_learned_oos": -2.73,
+    "z_default_oos": -0.42,
+    "note": "学到的权重只比默认高 0.88σ（需≥1.0σ），使用默认公式"
    },
    "logged_eval": {
     "blend": {
@@ -96,7 +96,7 @@
     }
    },
    "weights": null,
-   "weights_note": "学到的权重只比默认高 0.82σ（需≥1.0σ），使用默认公式",
+   "weights_note": "学到的权重只比默认高 0.88σ（需≥1.0σ），使用默认公式",
    "evidence": "none",
    "evidence_z": -0.61,
    "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.61",
@@ -109,7 +109,7 @@
    "n_ml_today": 1,
    "n_dl_today": 1,
    "base_qihao": "2026282",
-   "n_versions_today": 2,
+   "n_versions_today": 1,
    "picks": [
     {
      "d": "256",
@@ -211,17 +211,17 @@
     "ball_n": -0.4533
    },
    "n_logged_periods": 65,
-   "n_versions": 62,
+   "n_versions": 16,
    "n_labeled": 64,
    "n_ml_snapshots": 138,
    "n_dl_snapshots": 57,
    "source_eval": {
     "rl": {
      "name": "RL",
-     "n_periods": 5,
-     "hits": 10.0,
-     "expected": 12.5,
-     "z": -0.87
+     "n_periods": 3,
+     "hits": 9.0,
+     "expected": 7.5,
+     "z": 0.67
     },
     "ml": {
      "name": "ML",
@@ -244,22 +244,22 @@
     "adopted": false,
     "best_weights": {
      "H": 0.0,
-     "rl": 0.0,
+     "rl": 2.0,
      "ml": 0.25,
      "dl": 2.0
     },
-    "z_best_insample": 0.96,
-    "z_default_insample": 0.05,
+    "z_best_insample": 1.05,
+    "z_default_insample": 0.11,
     "n_oos": 34,
-    "z_learned_oos": 0.19,
-    "z_default_oos": -0.18,
-    "note": "学到的权重只比默认高 0.90σ（需≥1.0σ），使用默认公式"
+    "z_learned_oos": 0.28,
+    "z_default_oos": -0.11,
+    "note": "学到的权重只比默认高 0.95σ（需≥1.0σ），使用默认公式"
    },
    "logged_eval": {
     "blend": {
-     "hits": 154.0,
+     "hits": 156.0,
      "expected": 160.0,
-     "z": -0.58
+     "z": -0.39
     },
     "only_H": {
      "hits": 152.0,
@@ -268,7 +268,7 @@
     }
    },
    "weights": null,
-   "weights_note": "学到的权重只比默认高 0.90σ（需≥1.0σ），使用默认公式",
+   "weights_note": "学到的权重只比默认高 0.95σ（需≥1.0σ），使用默认公式",
    "evidence": "none",
    "evidence_z": -1.28,
    "evidence_basis": "开奖号码信号 400 期滚动检验 z=-1.28",
@@ -281,7 +281,7 @@
    "n_ml_today": 1,
    "n_dl_today": 1,
    "base_qihao": "2026282",
-   "n_versions_today": 2,
+   "n_versions_today": 1,
    "ranking": [
     {
      "ball": 28,
