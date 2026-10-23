@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-10-23 15:29:57",
+ "updated_at": "2026-10-23 15:34:02",
  "games": {
   "3d": {
    "game": "3d",
@@ -36,36 +36,36 @@
     "is_odd": -0.0391,
     "level": 0.0411
    },
-   "n_logged_periods": 3,
-   "n_versions": 24,
-   "n_labeled": 2,
-   "n_ml_snapshots": 2,
-   "n_dl_snapshots": 2,
+   "n_logged_periods": 63,
+   "n_versions": 60,
+   "n_labeled": 62,
+   "n_ml_snapshots": 133,
+   "n_dl_snapshots": 51,
    "source_eval": {
     "rl": {
      "name": "RL",
-     "n_periods": 2,
+     "n_periods": 4,
      "hits": 4.0,
-     "expected": 1.8,
-     "z": 1.96
+     "expected": 3.6,
+     "z": 0.25
     },
     "ml": {
      "name": "ML",
-     "n_periods": 1,
-     "hits": 1.0,
-     "expected": 0.9,
-     "z": 0.13
+     "n_periods": 62,
+     "hits": 57.0,
+     "expected": 55.8,
+     "z": 0.19
     },
     "dl": {
      "name": "DL",
-     "n_periods": 1,
-     "hits": 1.0,
-     "expected": 0.9,
-     "z": 0.13
+     "n_periods": 29,
+     "hits": 25.0,
+     "expected": 26.1,
+     "z": -0.26
     }
    },
    "roll": {
-    "n_periods": 2,
+    "n_periods": 62,
     "weights": {
      "H": 1.0,
      "rl": 0.5,
@@ -75,27 +75,27 @@
     "adopted": false,
     "best_weights": {
      "H": 0.0,
-     "rl": 0.25,
-     "ml": 0.0,
+     "rl": 1.0,
+     "ml": 0.25,
      "dl": 0.0
     },
-    "z_best_insample": 1.63,
-    "z_default_insample": 0.85,
-    "n_oos": 0,
-    "z_learned_oos": null,
-    "z_default_oos": null,
-    "note": "已开奖的推荐期 2/30，不足，使用默认权重（只记录、不调整）"
+    "z_best_insample": 1.39,
+    "z_default_insample": -0.14,
+    "n_oos": 32,
+    "z_learned_oos": 0.17,
+    "z_default_oos": 0.92,
+    "note": "学到的权重样本外(z=0.17)不如默认(z=0.92)，使用默认权重"
    },
    "logged_eval": {
     "blend": {
-     "hits": 3.0,
-     "expected": 1.8,
-     "z": 1.07
+     "hits": 61.0,
+     "expected": 55.8,
+     "z": 0.83
     },
     "only_H": {
-     "hits": 1.0,
-     "expected": 1.8,
-     "z": -0.71
+     "hits": 51.0,
+     "expected": 55.8,
+     "z": -0.77
     }
    },
    "weights": {
@@ -104,10 +104,10 @@
     "ml": 0.5,
     "dl": 0.5
    },
-   "weights_note": "已开奖的推荐期 2/30，不足，使用默认权重（只记录、不调整）",
+   "weights_note": "学到的权重样本外(z=0.17)不如默认(z=0.92)，使用默认权重",
    "evidence": "none",
-   "evidence_z": -0.4,
-   "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.4",
+   "evidence_z": 0.83,
+   "evidence_basis": "融合选号在 62 个推荐期的检验 z=0.83",
    "source": "blend",
    "sources_today": [
     "rl",
