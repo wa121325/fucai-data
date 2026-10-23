@@ -3111,7 +3111,7 @@ def vote_3d(sources, rl_pos_probs, n_bets=12, sampled=None):
         order = sorted(range(10), key=lambda d: (-votes[d], -mean_p[d], d))
         pos.append({'name': names[c], 'cands': [
             {'digit': d, 'votes': int(votes[d]), 'prob': round(float(mean_p[d]) * 100, 1),
-             'by': {k: round(float(marg[k][c][d]) * 100, 1) for k in marg}} for d in order[:3]]})
+             'by': {k: round(float(marg[k][c][d]) * 100, 1) for k in marg}} for d in order[:5]]})
     Jc = np.mean([J[k] for k in use], axis=0); Jc = Jc / Jc.sum()
     order = np.argsort(-Jc, kind='stable')
     bets = [{'digits': [int(x) for x in _D3_ALL[i]], 'prob': round(float(Jc[i]) * 100, 2)} for i in order[:n_bets]]
