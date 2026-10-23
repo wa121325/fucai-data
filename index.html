@@ -3060,9 +3060,9 @@ function renderConsensus(game, c, rlGame){
   } else {
     // ssq / kl8：共识球号榜（得票 + 平均提升倍数），再给共识推荐
     const tb = c.table||[];
-    h += `<div style="font-size:11px;color:#666;margin:2px 0 3px;">共识球号榜（得票/${c.n_active}方，倍数=相对随机的提升）：</div><div style="line-height:1.9;">`;
+    h += `<div style="font-size:11px;color:#666;margin:2px 0 2px;">共识球号榜（共${c.n_active}方投票，倍数=相对随机的提升）：</div><div style="font-size:9px;color:#888;margin:0 0 2px;">球色=得票：<span style="color:#6d28d9;">●</span>3票 <span style="color:#a78bfa;">●</span>2票 <span style="color:#9ca3af;">●</span>1票 <span style="color:#4b5563;">●</span>0票；数字旁为提升倍数</div><div style="line-height:1.9;">`;
     tb.slice(0, game==='kl8'?20:12).forEach(t=>{
-      h += `<span style="display:inline-block;white-space:nowrap;margin:0 8px 2px 0;">${ball(p2(t.ball), t.votes>=Math.max(2,c.n_active)?PUR:(t.votes>=2?'#a78bfa':'#9ca3af'), 20)}<span style="color:#888;font-size:10px;">${t.votes}票·${t.lift}×</span></span>`;
+      h += `<span style="display:inline-block;white-space:nowrap;margin:0 7px 2px 0;">${ball(p2(t.ball), ({3:'#6d28d9',2:'#a78bfa',1:'#9ca3af'})[t.votes]||'#4b5563', 20)}<span style="color:#888;font-size:9.5px;">${t.lift}×</span></span>`;
     });
     h += `</div>`;
     ['ml','dl','rl'].forEach(k=>{
