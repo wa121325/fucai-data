@@ -1,241 +1,69 @@
 {
- "updated_at": "2026-10-24 10:58:44",
+ "updated_at": "2026-10-25 01:29:08",
  "games": {
   "3d": {
    "game": "3d",
    "unit": "组选号码",
-   "n_history": 8790,
+   "n_history": 8791,
    "history_eval": {
     "model": {
-     "hits": 67,
+     "hits": 68,
      "expected": 72.0,
-     "z": -0.61
+     "z": -0.49
     },
     "freq": {
      "hits": 47,
-     "expected": 49.04,
+     "expected": 49.05,
      "z": -0.3
     },
     "n_eval": 1000,
     "l2": 10.0,
     "model_minus_freq": {
-     "mean_hits": 0.02,
-     "z": 1.89
+     "mean_hits": 0.021,
+     "z": 1.98
     }
    },
    "history_weights": {
-    "ln_f30": -0.0571,
-    "ln_f100": -0.0215,
-    "ln_f300": 0.064,
-    "omit_ratio": -0.028,
-    "pos_hot": 0.0106,
-    "share_last": 0.0133,
-    "ln_sum100": 0.0423,
-    "ln_span100": -0.0152,
-    "ln_f10": -0.0008,
-    "omit_sq": 0.0427,
-    "is_zu3": -0.2407,
+    "ln_f30": -0.0573,
+    "ln_f100": -0.0223,
+    "ln_f300": 0.0653,
+    "omit_ratio": -0.0299,
+    "pos_hot": 0.0097,
+    "share_last": 0.0141,
+    "ln_sum100": 0.0397,
+    "ln_span100": -0.0156,
+    "ln_f10": -0.001,
+    "omit_sq": 0.0451,
+    "is_zu3": -0.2405,
     "is_baozi": -0.2926,
-    "ln_q": 0.6912
-   },
-   "n_logged_periods": 64,
-   "n_versions": 35,
-   "n_labeled": 63,
-   "n_ml_snapshots": 134,
-   "n_dl_snapshots": 54,
-   "source_eval": {
-    "rl": {
-     "name": "RL",
-     "n_periods": 5,
-     "hits": 0.0,
-     "expected": 0.34,
-     "z": -0.6
-    },
-    "ml": {
-     "name": "ML",
-     "n_periods": 63,
-     "hits": 4.0,
-     "expected": 3.59,
-     "z": 0.22
-    },
-    "dl": {
-     "name": "DL",
-     "n_periods": 30,
-     "hits": 3.0,
-     "expected": 1.32,
-     "z": 1.5
-    }
-   },
-   "roll": {
-    "n_periods": 63,
-    "weights": null,
-    "adopted": false,
-    "best_weights": {
-     "H": 0.0,
-     "rl": 0.0,
-     "ml": 0.0,
-     "dl": 0.25
-    },
-    "z_best_insample": -0.38,
-    "z_default_insample": -1.2,
-    "n_oos": 33,
-    "z_learned_oos": -3.16,
-    "z_default_oos": -0.47,
-    "note": "学到的权重只比默认高 0.82σ（需≥1.0σ），使用默认公式"
-   },
-   "logged_eval": {
-    "blend": {
-     "hits": 7.0,
-     "expected": 4.54,
-     "z": 1.2
-    },
-    "only_H": {
-     "hits": 7.0,
-     "expected": 4.54,
-     "z": 1.2
-    }
-   },
-   "weights": null,
-   "weights_note": "学到的权重只比默认高 0.82σ（需≥1.0σ），使用默认公式",
-   "evidence": "none",
-   "evidence_z": -0.61,
-   "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.61",
-   "source": "blend",
-   "sources_today": [
-    "rl",
-    "ml",
-    "dl"
-   ],
-   "n_ml_today": 1,
-   "n_dl_today": 1,
-   "base_qihao": "2026282",
-   "n_versions_today": 5,
-   "picks": [
-    {
-     "d": "256",
-     "score": 2.012,
-     "kind": "组六"
-    },
-    {
-     "d": "267",
-     "score": 2.008,
-     "kind": "组六"
-    },
-    {
-     "d": "346",
-     "score": 1.817,
-     "kind": "组六"
-    },
-    {
-     "d": "467",
-     "score": 1.793,
-     "kind": "组六"
-    },
-    {
-     "d": "368",
-     "score": 1.775,
-     "kind": "组六"
-    },
-    {
-     "d": "689",
-     "score": 1.768,
-     "kind": "组六"
-    },
-    {
-     "d": "168",
-     "score": 1.739,
-     "kind": "组六"
-    },
-    {
-     "d": "269",
-     "score": 1.693,
-     "kind": "组六"
-    },
-    {
-     "d": "245",
-     "score": 1.608,
-     "kind": "组六"
-    },
-    {
-     "d": "458",
-     "score": 1.598,
-     "kind": "组六"
-    },
-    {
-     "d": "348",
-     "score": 1.538,
-     "kind": "组六"
-    },
-    {
-     "d": "056",
-     "score": 1.512,
-     "kind": "组六"
-    }
-   ]
-  },
-  "kl8": {
-   "game": "kl8",
-   "unit": "球号",
-   "n_history": 2103,
-   "history_eval": {
-    "model": {
-     "avg_hits": 2.417,
-     "expected": 2.5,
-     "z": -1.28
-    },
-    "freq": {
-     "avg_hits": 2.322,
-     "expected": 2.5,
-     "z": -2.75
-    },
-    "n_eval": 400,
-    "l2": 10.0,
-    "model_minus_freq": {
-     "mean_hits": 0.095,
-     "z": 1.06
-    }
-   },
-   "history_weights": {
-    "ln_f3": -0.2766,
-    "ln_f5": -0.322,
-    "ln_f10": -0.1135,
-    "ln_f20": 0.1677,
-    "ln_f30": -0.0328,
-    "ln_f100": 0.0496,
-    "omit_ratio": -1.2784,
-    "omit_sq": 1.3536,
-    "in_prev": -0.5998,
-    "nb_prev": -0.1605,
-    "zone_hot30": -0.1885,
-    "is_odd": -0.1342,
-    "ball_n": -0.4533
+    "ln_q": 0.691
    },
    "n_logged_periods": 65,
-   "n_versions": 35,
+   "n_versions": 36,
    "n_labeled": 64,
-   "n_ml_snapshots": 138,
-   "n_dl_snapshots": 57,
+   "n_ml_snapshots": 135,
+   "n_dl_snapshots": 55,
    "source_eval": {
     "rl": {
      "name": "RL",
-     "n_periods": 5,
-     "hits": 10.0,
-     "expected": 12.5,
-     "z": -0.87
+     "n_periods": 6,
+     "hits": 0.0,
+     "expected": 0.4,
+     "z": -0.65
     },
     "ml": {
      "name": "ML",
      "n_periods": 64,
-     "hits": 170.0,
-     "expected": 160.0,
-     "z": 0.97
+     "hits": 4.0,
+     "expected": 3.62,
+     "z": 0.2
     },
     "dl": {
      "name": "DL",
      "n_periods": 31,
-     "hits": 79.0,
-     "expected": 77.5,
-     "z": 0.21
+     "hits": 3.0,
+     "expected": 1.38,
+     "z": 1.42
     }
    },
    "roll": {
@@ -245,33 +73,33 @@
     "best_weights": {
      "H": 0.0,
      "rl": 0.0,
-     "ml": 0.25,
-     "dl": 2.0
+     "ml": 0.0,
+     "dl": 0.25
     },
-    "z_best_insample": 0.96,
-    "z_default_insample": 0.05,
+    "z_best_insample": -0.34,
+    "z_default_insample": -1.32,
     "n_oos": 34,
-    "z_learned_oos": 0.19,
-    "z_default_oos": -0.18,
-    "note": "学到的权重只比默认高 0.90σ（需≥1.0σ），使用默认公式"
+    "z_learned_oos": -3.06,
+    "z_default_oos": -0.64,
+    "note": "学到的权重只比默认高 0.99σ（需≥1.0σ），使用默认公式"
    },
    "logged_eval": {
     "blend": {
-     "hits": 154.0,
-     "expected": 160.0,
-     "z": -0.58
+     "hits": 7.0,
+     "expected": 4.61,
+     "z": 1.16
     },
     "only_H": {
-     "hits": 152.0,
-     "expected": 160.0,
-     "z": -0.78
+     "hits": 8.0,
+     "expected": 4.61,
+     "z": 1.64
     }
    },
    "weights": null,
-   "weights_note": "学到的权重只比默认高 0.90σ（需≥1.0σ），使用默认公式",
+   "weights_note": "学到的权重只比默认高 0.99σ（需≥1.0σ），使用默认公式",
    "evidence": "none",
-   "evidence_z": -1.28,
-   "evidence_basis": "开奖号码信号 400 期滚动检验 z=-1.28",
+   "evidence_z": -0.49,
+   "evidence_basis": "开奖号码信号 1000 期滚动检验 z=-0.49",
    "source": "blend",
    "sources_today": [
     "rl",
@@ -280,134 +108,316 @@
    ],
    "n_ml_today": 1,
    "n_dl_today": 1,
-   "base_qihao": "2026282",
-   "n_versions_today": 5,
+   "base_qihao": "2026283",
+   "n_versions_today": 1,
+   "picks": [
+    {
+     "d": "267",
+     "score": 1.977,
+     "kind": "组六"
+    },
+    {
+     "d": "258",
+     "score": 1.972,
+     "kind": "组六"
+    },
+    {
+     "d": "012",
+     "score": 1.924,
+     "kind": "组六"
+    },
+    {
+     "d": "128",
+     "score": 1.804,
+     "kind": "组六"
+    },
+    {
+     "d": "268",
+     "score": 1.738,
+     "kind": "组六"
+    },
+    {
+     "d": "678",
+     "score": 1.654,
+     "kind": "组六"
+    },
+    {
+     "d": "123",
+     "score": 1.543,
+     "kind": "组六"
+    },
+    {
+     "d": "568",
+     "score": 1.542,
+     "kind": "组六"
+    },
+    {
+     "d": "126",
+     "score": 1.531,
+     "kind": "组六"
+    },
+    {
+     "d": "689",
+     "score": 1.53,
+     "kind": "组六"
+    },
+    {
+     "d": "368",
+     "score": 1.527,
+     "kind": "组六"
+    },
+    {
+     "d": "245",
+     "score": 1.526,
+     "kind": "组六"
+    }
+   ]
+  },
+  "kl8": {
+   "game": "kl8",
+   "unit": "球号",
+   "n_history": 2104,
+   "history_eval": {
+    "model": {
+     "avg_hits": 2.408,
+     "expected": 2.5,
+     "z": -1.44
+    },
+    "freq": {
+     "avg_hits": 2.328,
+     "expected": 2.5,
+     "z": -2.68
+    },
+    "n_eval": 400,
+    "l2": 10.0,
+    "model_minus_freq": {
+     "mean_hits": 0.08,
+     "z": 0.89
+    }
+   },
+   "history_weights": {
+    "ln_f3": -0.277,
+    "ln_f5": -0.3217,
+    "ln_f10": -0.1137,
+    "ln_f20": 0.1679,
+    "ln_f30": -0.0331,
+    "ln_f100": 0.0496,
+    "omit_ratio": -1.2797,
+    "omit_sq": 1.3556,
+    "in_prev": -0.6001,
+    "nb_prev": -0.1596,
+    "zone_hot30": -0.1963,
+    "is_odd": -0.1338,
+    "ball_n": -0.4534
+   },
+   "n_logged_periods": 66,
+   "n_versions": 36,
+   "n_labeled": 65,
+   "n_ml_snapshots": 139,
+   "n_dl_snapshots": 58,
+   "source_eval": {
+    "rl": {
+     "name": "RL",
+     "n_periods": 6,
+     "hits": 16.0,
+     "expected": 15.0,
+     "z": 0.32
+    },
+    "ml": {
+     "name": "ML",
+     "n_periods": 65,
+     "hits": 176.0,
+     "expected": 162.5,
+     "z": 1.3
+    },
+    "dl": {
+     "name": "DL",
+     "n_periods": 32,
+     "hits": 84.0,
+     "expected": 80.0,
+     "z": 0.55
+    }
+   },
+   "roll": {
+    "n_periods": 65,
+    "weights": {
+     "H": 0.0,
+     "rl": 2.0,
+     "ml": 0.25,
+     "dl": 2.0
+    },
+    "adopted": true,
+    "best_weights": {
+     "H": 0.0,
+     "rl": 2.0,
+     "ml": 0.25,
+     "dl": 2.0
+    },
+    "z_best_insample": 1.22,
+    "z_default_insample": 0.12,
+    "n_oos": 35,
+    "z_learned_oos": 0.45,
+    "z_default_oos": -0.09,
+    "note": "已采用学到的权重：样本内 z=1.22（默认 0.12），样本外 z=0.45（默认 -0.09）"
+   },
+   "logged_eval": {
+    "blend": {
+     "hits": 172.0,
+     "expected": 162.5,
+     "z": 0.91
+    },
+    "only_H": {
+     "hits": 154.0,
+     "expected": 162.5,
+     "z": -0.82
+    }
+   },
+   "weights": {
+    "H": 0.0,
+    "rl": 2.0,
+    "ml": 0.25,
+    "dl": 2.0
+   },
+   "weights_note": "已采用学到的权重：样本内 z=1.22（默认 0.12），样本外 z=0.45（默认 -0.09）",
+   "evidence": "none",
+   "evidence_z": -1.44,
+   "evidence_basis": "开奖号码信号 400 期滚动检验 z=-1.44",
+   "source": "blend",
+   "sources_today": [
+    "rl",
+    "ml",
+    "dl"
+   ],
+   "n_ml_today": 1,
+   "n_dl_today": 1,
+   "base_qihao": "2026283",
+   "n_versions_today": 1,
    "ranking": [
     {
-     "ball": 28,
-     "score": 3.259
+     "ball": 18,
+     "score": 2.35
     },
     {
-     "ball": 4,
-     "score": 1.911
+     "ball": 20,
+     "score": 2.288
     },
     {
-     "ball": 7,
-     "score": 1.864
+     "ball": 59,
+     "score": 2.136
     },
     {
-     "ball": 11,
-     "score": 1.814
+     "ball": 73,
+     "score": 1.833
+    },
+    {
+     "ball": 9,
+     "score": 1.545
+    },
+    {
+     "ball": 79,
+     "score": 1.493
     },
     {
      "ball": 2,
-     "score": 1.812
+     "score": 1.483
     },
     {
-     "ball": 1,
-     "score": 1.733
+     "ball": 8,
+     "score": 1.457
     },
     {
-     "ball": 16,
-     "score": 1.707
+     "ball": 33,
+     "score": 1.434
     },
     {
-     "ball": 22,
-     "score": 1.546
-    },
-    {
-     "ball": 56,
-     "score": 1.537
-    },
-    {
-     "ball": 15,
-     "score": 1.458
-    },
-    {
-     "ball": 12,
-     "score": 1.36
-    },
-    {
-     "ball": 14,
-     "score": 1.244
-    },
-    {
-     "ball": 38,
-     "score": 1.016
-    },
-    {
-     "ball": 6,
-     "score": 0.939
-    },
-    {
-     "ball": 34,
-     "score": 0.853
-    },
-    {
-     "ball": 52,
-     "score": 0.821
+     "ball": 24,
+     "score": 1.329
     },
     {
      "ball": 19,
-     "score": 0.809
+     "score": 1.286
     },
     {
-     "ball": 5,
-     "score": 0.788
+     "ball": 17,
+     "score": 1.262
     },
     {
-     "ball": 63,
-     "score": 0.779
+     "ball": 4,
+     "score": 1.244
     },
     {
-     "ball": 26,
-     "score": 0.776
+     "ball": 31,
+     "score": 1.237
+    },
+    {
+     "ball": 7,
+     "score": 1.237
+    },
+    {
+     "ball": 11,
+     "score": 1.08
+    },
+    {
+     "ball": 42,
+     "score": 0.976
+    },
+    {
+     "ball": 6,
+     "score": 0.972
+    },
+    {
+     "ball": 35,
+     "score": 0.94
+    },
+    {
+     "ball": 62,
+     "score": 0.856
     }
    ],
    "picks_by_n": {
     "4": [
-     4,
-     7,
-     11,
-     28
+     18,
+     20,
+     59,
+     73
     ],
     "5": [
-     2,
-     4,
-     7,
-     11,
-     28
+     9,
+     18,
+     20,
+     59,
+     73
     ],
     "6": [
-     1,
-     2,
-     4,
-     7,
-     11,
-     28
+     9,
+     18,
+     20,
+     59,
+     73,
+     79
     ],
     "9": [
-     1,
      2,
-     4,
-     7,
-     11,
-     16,
-     22,
-     28,
-     56
+     8,
+     9,
+     18,
+     20,
+     33,
+     59,
+     73,
+     79
     ],
     "10": [
-     1,
      2,
-     4,
-     7,
-     11,
-     15,
-     16,
-     22,
-     28,
-     56
+     8,
+     9,
+     18,
+     20,
+     24,
+     33,
+     59,
+     73,
+     79
     ]
    }
   }
