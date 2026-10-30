@@ -47,7 +47,12 @@ K8_EVAL, K8_TRAIN_WIN, K8_REFIT, K8_VALID = 400, 1500, 50, 150
 K8_PLAYS = [4, 5, 6, 9, 10]
 W_GRID = (0.0, 0.25, 0.5, 1.0, 2.0)   # 滚动学习：每一路(开奖信号H/RL/ML/DL)权重的候选值
 W_DEFAULT = (1.0, 0.5, 0.5, 0.5)       # 没学出来之前的默认权重 (H, RL, ML, DL)
-ROLL_MIN, ROLL_MIN_OOS, ROLL_GAIN_Z = 30, 20, 0.618   # 至少30个已开奖推荐期、20期样本外检验、样本内比默认高≥σ，才采用学到的权重
+# 滚动学习门槛（按游戏分开）。3D 每期只有 1 个开奖组选号、信号弱，原来的 30+20 期、0.618σ 门槛基本过不去，所以单独放宽：
+#   min  已开奖推荐期 ≥ 它才开始学（之前只记录）      oos  再多出多少期做样本外检验
+#   gain 样本内比默认公式高 ≥ 它(σ)才考虑采用          tol  样本外允许比默认差多少(σ)仍采用（样本外期数少，纯噪声大，留容差）
+#   half 近期加权的半衰期（期）：越近的期权重越大，让权重能跟着最近表现"滚"起来；0=不加权（快乐8保持原样）
+ROLL_PARAMS = {'3d':  dict(min=8,  oos=6,  gain=0.3,   tol=0.5, half=30),
+               'kl8': dict(min=30, oos=20, gain=0.618, tol=0.0, half=0)}
 LAMBDA_DEFAULT = 0.5                  # 老师(多版本一致度)在融合里的默认权重
 LAMBDA_GRID = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
 LOGGED_FIT_MIN = 10                   # 有标签的"有推荐记录的期"≥它，才用这些期去挑融合权重
@@ -662,6 +667,8 @@ def roll_learn(items, game):
     """滚动学习四路权重。指标=开奖实际号码在融合得分里的标准分之和（平滑、随机时期望0）。
     每一期只用它之前的记录挑权重再检验它(样本外)，与默认权重对比；够格才采用学到的权重。"""
     n = len(items); C = 220 if game == '3d' else 80
+    P = ROLL_PARAMS[game]; rmin, roos, rgain, rtol, half = P['min'], P['oos'], P['gain'], P['tol'], P['half']
+    dw = lambda m: np.ones(m) if not half else 0.5 ** (np.arange(m - 1, -1, -1) / half)        # 近期加权
     out = {'n_periods': n, 'weights': None, 'adopted': False}
     if n == 0:
         out['note'] = '还没有已开奖的推荐期，使用默认公式'; return out
@@ -684,24 +691,24 @@ def roll_learn(items, game):
         z = (comb - comb.mean(-1, keepdims=True)) / np.maximum(comb.std(-1, keepdims=True), 1e-12)
         Y = np.array([it[2] for it in items], dtype=np.float64)
         S = np.einsum('nkc,nc->nk', z, Y); var_n = np.full(K + 1, n * 20.0 * 60.0 / 79.0)
-    KD = K; cum = S.sum(0); kb = int(np.argmax(cum[:K]))
+    KD = K; cum = S.sum(0); kb = int(np.argmax((dw(n)[:, None] * S[:, :K]).sum(0)))
     zb = float(cum[kb] / math.sqrt(var_n[kb])); zd = float(cum[KD] / math.sqrt(var_n[KD]))
-    n_oos = max(0, n - ROLL_MIN); sl = sdo = vl = vd = 0.0
-    for t in range(ROLL_MIN, n):
-        k = int(np.argmax(S[:t, :K].sum(0))); sl += S[t, k]; sdo += S[t, KD]
+    n_oos = max(0, n - rmin); sl = sdo = vl = vd = 0.0
+    for t in range(rmin, n):
+        k = int(np.argmax((dw(t)[:, None] * S[:t, :K]).sum(0))); sl += S[t, k]; sdo += S[t, KD]
         vl += Vz[t, k] if game == '3d' else 20.0 * 60.0 / 79.0; vd += Vz[t, KD] if game == '3d' else 20.0 * 60.0 / 79.0
     zl = round(sl / math.sqrt(vl), 2) if n_oos else None
     zdo = round(sdo / math.sqrt(vd), 2) if n_oos else None
-    out.update({'best_weights': dict(zip(SRC4, _WCOMBOS[kb])), 'z_best_insample': round(zb, 2), 'z_default_insample': round(zd, 2),
+    out.update({'rolling_params': P, 'best_weights': dict(zip(SRC4, _WCOMBOS[kb])), 'z_best_insample': round(zb, 2), 'z_default_insample': round(zd, 2),
                 'n_oos': n_oos, 'z_learned_oos': zl, 'z_default_oos': zdo})
-    if n < ROLL_MIN:
-        out['note'] = f'已开奖的推荐期 {n}/{ROLL_MIN}，不足，使用默认公式（只记录、不调整）'
-    elif n_oos < ROLL_MIN_OOS:
-        out['note'] = f'样本外检验期 {n_oos}/{ROLL_MIN_OOS}，不足，使用默认公式'
-    elif zb - zd < ROLL_GAIN_Z:
-        out['note'] = f'学到的权重只比默认高 {zb - zd:.2f}σ（需≥{ROLL_GAIN_Z}σ），使用默认公式'
-    elif zl < zdo:
-        out['note'] = f'学到的权重样本外(z={zl})不如默认(z={zdo})，使用默认公式'
+    if n < rmin:
+        out['note'] = f'已开奖的推荐期 {n}/{rmin}，不足，使用默认公式（只记录、不调整）'
+    elif n_oos < roos:
+        out['note'] = f'样本外检验期 {n_oos}/{roos}，不足，使用默认公式'
+    elif zb - zd < rgain:
+        out['note'] = f'学到的权重只比默认高 {zb - zd:.2f}σ（需≥{rgain}σ），使用默认公式'
+    elif zl < zdo - rtol:
+        out['note'] = f'学到的权重样本外(z={zl})比默认(z={zdo})差超过{rtol}σ，使用默认公式'
     else:
         out['adopted'] = True; out['weights'] = dict(zip(SRC4, _WCOMBOS[kb]))
         out['note'] = f'已采用学到的权重：样本内 z={zb:.2f}（默认 {zd:.2f}），样本外 z={zl}（默认 {zdo}）'
