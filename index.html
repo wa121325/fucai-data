@@ -4175,14 +4175,19 @@ async function downloadTrend(){
     const resp = await fetch(url);
     const data = await resp.json();
     const records = data[trendType].slice(-50);
+    try{ await document.fonts.load('bold 12px "Noto Sans SC"'); await document.fonts.load('12px "Noto Sans SC"'); await document.fonts.ready; }catch(_){}
     const canvas = await (trendType==='3d'  ? draw3DCanvas(records)
                         : trendType==='ssq' ? drawSSQCanvas(records)
                         :                    drawKL8Canvas(records));
     const link = document.createElement('a');
     const labelMap = {'3d':'福彩3D','ssq':'双色球','kl8':'快乐8'};
     link.download = `福彩走势图_${labelMap[trendType]}_${new Date().toISOString().slice(0,10)}.png`;
-    link.href = canvas.toDataURL('image/png');
+    const blob = await new Promise(res=>canvas.toBlob(res, 'image/png'));
+    if(!blob) throw new Error('图片太大，浏览器没能生成（可换电脑浏览器下载）');
+    const objUrl = URL.createObjectURL(blob);
+    link.href = objUrl;
     link.click();
+    setTimeout(()=>URL.revokeObjectURL(objUrl), 30000);
   } catch(e){
     alert('下载失败：'+e.message);
   } finally{
@@ -4192,10 +4197,19 @@ async function downloadTrend(){
 }
 
 /* ── Canvas绘图工具函数 ── */
+/* 走势图清晰度：自动取"设备画布能承受的最大倍数"，最高 4 倍。
+   手机(iOS/安卓)画布总像素上限约 1600 万，电脑可到 4000 万以上；超过上限会导出失败/空白，所以按面积反推 */
+function trendScale(W0, H0){
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  const maxPixels = mobile ? 15e6 : 40e6, maxDim = mobile ? 15000 : 30000, cap = 4;
+  const s = Math.min(cap, Math.sqrt(maxPixels / (W0 * H0)), maxDim / W0, maxDim / H0);
+  return Math.max(1, Math.floor(s * 100) / 100);
+}
 function makeCanvas(w, h){
   const c = document.createElement('canvas');
-  c.width = w; c.height = h;
+  c.width = Math.ceil(w); c.height = Math.ceil(h);
   const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
   ctx.fillStyle = '#f2efe8';
   ctx.fillRect(0,0,w,h);
   return {c, ctx};
@@ -4320,7 +4334,6 @@ async function drawQR(ctx, W, startY){
    Canvas版：福彩3D走势图
 ════════════════════════════ */
 async function draw3DCanvas(records){
-  const SCALE = 2;  // 高清2倍
   const rows = records.map(r=>({...r, ...calc3D(r.digits)}));
   const n = rows.length;
 
@@ -4331,6 +4344,7 @@ async function draw3DCanvas(records){
   const FOOTER = trendFooterLayout(W0); const QR_H = FOOTER.h;
   const FOOT_H = 50;
   const H0 = TITLE_H + HEAD_H + ROW_H*n + FOOT_H + QR_H + 20;
+  const SCALE = trendScale(W0, H0);   // 自动取最高清晰度
 
   const W = W0*SCALE, H = H0*SCALE;
   const {c, ctx} = makeCanvas(W, H);
@@ -4439,13 +4453,13 @@ async function draw3DCanvas(records){
    Canvas版：双色球走势图
 ════════════════════════════ */
 async function drawSSQCanvas(records){
-  const SCALE=2;
   const n=records.length;
   const COL_Q=58,COL_D=46,COL_N=20,COL_B=28;
   const W0=COL_Q+COL_D+COL_N*33+COL_B+40;
   const ROW_H=26,HEAD_H=32,TITLE_H=48;
   const FOOTER = trendFooterLayout(W0); const QR_H = FOOTER.h;
   const H0=TITLE_H+HEAD_H+ROW_H*n+50+QR_H+20;
+  const SCALE = trendScale(W0, H0);
   const {c,ctx}=makeCanvas(W0*SCALE,H0*SCALE);
   ctx.scale(SCALE,SCALE);
   const cx=20; let cy=0;
@@ -4499,13 +4513,13 @@ async function drawSSQCanvas(records){
    Canvas版：快乐8走势图
 ════════════════════════════ */
 async function drawKL8Canvas(records){
-  const SCALE=2;
   const n=records.length;
   const COL_Q=56,COL_D=44,COL_N=18;
   const W0=COL_Q+COL_D+COL_N*80+40;
   const ROW_H=22,HEAD_H=28,TITLE_H=48;
   const FOOTER = trendFooterLayout(W0); const QR_H = FOOTER.h;
   const H0=TITLE_H+HEAD_H+ROW_H*n+50+QR_H+20;
+  const SCALE = trendScale(W0, H0);
   const {c,ctx}=makeCanvas(W0*SCALE,H0*SCALE);
   ctx.scale(SCALE,SCALE);
   const cx=20; let cy=0;
