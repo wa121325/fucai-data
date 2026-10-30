@@ -2588,7 +2588,13 @@ async function downloadBallImage(nodes, title, btn, xopt){
     wrap.appendChild(nodeHost);
   }
   nodes.forEach(n=>{ const c=n.cloneNode(true); c.querySelectorAll('.blk-dl-btn').forEach(b=>b.remove());
-    if(xopt.dark){ c.style.overflow='visible'; c.querySelectorAll('td').forEach(td=>{ td.style.position='static'; td.style.boxShadow='none'; }); }
+    if(xopt.dark){
+      c.style.overflow='visible';
+      c.querySelectorAll('div').forEach(d=>{ if(d.style.overflowX==='auto') d.style.overflow='visible'; });   // 表外层的横向滚动框也要展开，否则右边会被截掉
+      c.querySelectorAll('td').forEach(td=>{
+        if(td.style.position==='sticky'){ td.style.position='static'; td.style.boxShadow='none'; }   // 只取消左侧固定列；格子本身保持 relative，「豹/三/六」小标签才定位得对
+      });
+    }
     if(c.classList.contains('ball-cand')){ c.style.background='#f4f4f6'; c.style.color='#444'; c.querySelectorAll('span').forEach(x=>{ if(!x.style.background) x.style.color='#555'; }); }
     nodeHost.appendChild(c); });
   if(!IO.cand) wrap.querySelectorAll('.ball-cand').forEach(x=>{ if(x.textContent.includes('候选判断')) x.remove(); });
@@ -3035,9 +3041,10 @@ function renderGroupTable(gt, rlGame){
 }
 function downloadGroupTable(btn){
   const det = btn.closest('details');
-  const nodes = [...det.children].filter(ch=>ch.tagName!=='SUMMARY' && !ch.dataset.nodl && !ch.querySelector('.gt-dl-btn'));
-  const tbl = det.querySelector('table');
-  const w = Math.max(700, (tbl ? tbl.scrollWidth : 0) + 60);
+  // 只取当前显示的模式（隐藏的那张表不进图），宽度也按当前显示的表来量
+  const nodes = [...det.children].filter(ch=>ch.tagName!=='SUMMARY' && !ch.dataset.nodl && !ch.querySelector('.gt-dl-btn') && ch.style.display!=='none');
+  const tbl = [...det.querySelectorAll('table')].find(t=>t.offsetParent!==null);
+  const w = Math.max(700, (tbl ? tbl.scrollWidth : 0) + 80);
   downloadBallImage(nodes, '福彩3D 和值号码分区表', btn, {width:w, dark:true});
 }
 function renderConsensus(game, c, rlGame){
