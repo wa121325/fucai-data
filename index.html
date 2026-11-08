@@ -483,6 +483,12 @@
     letter-spacing:.2em;
   }
 
+  /* 和值/跨度分层点格子后，在和数值号码分区表里亮起对应号码 */
+  td.gtHi{
+    box-shadow:inset 0 0 0 2px #fde047, 0 0 10px 2px rgba(253,224,71,.85) !important;
+    position:relative; z-index:2;
+  }
+  td.gtHi > div:first-of-type{ color:#fde047 !important; text-shadow:0 0 6px rgba(253,224,71,.9); }
   footer.credit{
     text-align:center;
     font-size:12px;
@@ -2944,10 +2950,13 @@ function consCellPick(td){
   const band = b => { const a = String(b).split('~').map(Number); return a.length===2 ? a : [a[0],a[0]]; };
   const [s0,s1] = band(st.sum_bands[r]);
   const [k0,k1] = band(st.span_bands[c]);
-  document.querySelectorAll(`td.consCellBtn[data-cid="${cid}"]`).forEach(x=>{x.style.outline='';});
-  td.style.outline = '2px dashed #fff';
+  const wasOn = td.classList.contains('consCellOn');            // 再点一次同一格 = 取消选择
+  document.querySelectorAll(`td.consCellBtn[data-cid="${cid}"]`).forEach(x=>{x.style.outline=''; x.classList.remove('consCellOn');});
+  document.querySelectorAll(`details[data-cons="${cid}"] td.gtHi`).forEach(x=>x.classList.remove('gtHi'));   // 先清掉上一次的亮起
   const box = document.getElementById(cid+'_box'); if(!box) return;
   const PUR = '#7c3aed';
+  if(wasOn){ box.innerHTML = '还没选格子'; return; }
+  td.style.outline = '2px dashed #fff'; td.classList.add('consCellOn');
   if(!gt || !gt.sections){
     const cell = (st.cells||[]).find(x=>x.sum===st.sum_bands[r] && x.span===st.span_bands[c]);
     let body = cell ? cell.bets.map(b=>`<span style="display:inline-block;border:1px solid ${PUR};border-radius:6px;padding:1px 6px;margin:2px;color:#ddd;"><b>${b.digits.join('')}</b> ${b.prob}%${b.sampled?' <span style="color:#f59e0b;">★采样</span>':''}</span>`).join('') : '<div>这格没被选中；完整号码列表需要RL脚本新版本（含和数值分区表）运行后才有。</div>';
@@ -2966,7 +2975,23 @@ function consCellPick(td){
     return `<span style="display:inline-block;border:${e.pk?`2px solid ${PUR}`:'1px solid #444'};${bg}border-radius:6px;padding:1px 7px;margin:2px;color:#ddd;font-size:13px;white-space:nowrap;"><b>${e.d}</b>${e.k>0?'<span style="color:#f59e0b;">★</span>':''}</span>`;
   };
   const sums = [...new Set(ents.map(e=>e.sum))].sort((x,y)=>x-y);
-  box.innerHTML = sums.map(sm=>`<div style="margin:3px 0;"><b style="color:#ddd;font-size:13px;margin-right:6px;">和值${sm}</b>${ents.filter(e=>e.sum===sm).map(chip).join('')}</div>`).join('') || '<span style="color:#888;">无</span>';
+  // 同时在下方「和数值号码分区表」里把这些号码亮起（黄色高亮），分区显示/合并全表两种模式都会亮
+  let lit = 0;
+  const det = document.querySelector(`details[data-cons="${cid}"]`);
+  if(det){
+    const want = new Set(ents.map(e=>e.d));
+    det.querySelectorAll('td[data-d]').forEach(x=>{ if(want.has(x.dataset.d)){ x.classList.add('gtHi'); lit++; } });
+    if(lit) det.open = true;
+  }
+  const hint = (det && ents.length)
+    ? `<div style="font-size:11px;color:#fde047;margin:0 0 4px;">✨ 这 ${ents.length} 个号码已在下方「和数值号码分区表」里黄色亮起 <button type="button" onclick="gtLocate('${cid}')" style="font-size:11px;padding:1px 8px;border:1px solid #fde047;border-radius:6px;background:transparent;color:#fde047;cursor:pointer;margin-left:4px;">📍 定位到分区表</button><span style="color:#888;margin-left:6px;">再点一次这个格子取消</span></div>` : '';
+  box.innerHTML = hint + (sums.map(sm=>`<div style="margin:3px 0;"><b style="color:#ddd;font-size:13px;margin-right:6px;">和值${sm}</b>${ents.filter(e=>e.sum===sm).map(chip).join('')}</div>`).join('') || '<span style="color:#888;">无</span>');
+}
+function gtLocate(cid){
+  const det = document.querySelector(`details[data-cons="${cid}"]`); if(!det) return;
+  det.open = true;
+  const first = det.querySelector('td.gtHi');
+  (first || det).scrollIntoView({behavior:'smooth', block:'center'});
 }
 /* 共识投票（ML·DL·RL）：数据来自RL脚本返回的 consensus 字段 */
 /* 和数值号码分区表（仿彩票上的"3D游戏和数值号码分区表"）：不分位置，横向=和值0~27，纵向=单选/组选3/组选6。
@@ -2980,7 +3005,7 @@ function gtSwitch(id, mode){
     if(b){ b.style.background = (m===mode) ? '#7c3aed' : 'transparent'; b.style.color = (m===mode) ? '#fff' : '#aaa'; }
   });
 }
-function renderGroupTable(gt, rlGame){
+function renderGroupTable(gt, rlGame, consCid){
   if(!gt || !gt.sections) return '';
   const PUR = '#7c3aed';
   const gid = 'gt' + (++_gtSeq);
@@ -3002,7 +3027,7 @@ function renderGroupTable(gt, rlGame){
     if(!e) return `<td style="border:1px solid #222;"></td>`;
     const a = Math.max(0, Math.min(1, (e.z||0)/1.5));
     const bg = a > 0.05 ? `background:${PUR}${Math.round(25+a*110).toString(16).padStart(2,'0')};` : '';
-    return `<td style="position:relative;padding:2px 3px;text-align:center;min-width:34px;border:${e.pk?`2px solid ${PUR}`:'1px solid #333'};${bg}${e.pk?'color:#fff;':''}">`
+    return `<td data-d="${e.d}" style="position:relative;padding:2px 3px;text-align:center;min-width:34px;border:${e.pk?`2px solid ${PUR}`:'1px solid #333'};${bg}${e.pk?'color:#fff;':''}">`
       + (merged ? kindTag(e) : '')
       + `<div style="font-weight:700;font-size:11px;">${e.d}</div><div style="font-size:8.5px;color:#888;font-weight:400;">${e.p}</div>`
       + (e.rp!=null ? `<div style="font-size:8.5px;color:#4ade80;opacity:.8;">R${e.rp}</div>` : '')
@@ -3053,7 +3078,7 @@ function renderGroupTable(gt, rlGame){
   } else picks = `<div style="font-size:11px;color:#999;margin:4px 0;">没有共识和采样同时偏向的号码，今天不标最可能出现的号。</div>`;
 
   const btnStyle = 'font-size:11px;padding:3px 10px;border:1px solid #7c3aed;border-radius:6px;cursor:pointer;margin-right:6px;';
-  return `<details style="margin:8px 0;border:1px solid #333;border-radius:8px;padding:4px 8px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">🧩 和数值号码分区表（组选号码 · 共识概率×RL采样${gt.n_sampled||0}注联合信号，点开查看）</summary>`
+  return `<details ${consCid?`data-cons="${consCid}"`:''} style="margin:8px 0;border:1px solid #333;border-radius:8px;padding:4px 8px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">🧩 和数值号码分区表（组选号码 · 共识概率×RL采样${gt.n_sampled||0}注联合信号，点开查看）</summary>`
     + `<div data-nodl="1" style="margin:6px 0;display:flex;align-items:center;flex-wrap:wrap;gap:4px;">`
     +   `<button id="${gid}_btn_a" onclick="gtSwitch('${gid}','a')" style="${btnStyle}background:#7c3aed;color:#fff;">分区显示</button>`
     +   `<button id="${gid}_btn_b" onclick="gtSwitch('${gid}','b')" style="${btnStyle}background:transparent;color:#aaa;">合并全表（${mergedTotal}个号）</button>`
@@ -3110,12 +3135,13 @@ function renderConsensus(game, c, rlGame){
       });
       h += `<div style="font-size:10.5px;color:#888;margin:2px 0;">${gc.n_bets}注组选合计覆盖概率 <b>${gc.prob}%</b>（随机基准${gc.base}%）；对比上面直选${gc.direct_n}注合计 ${gc.direct_prob}%。组选一注覆盖组六6个/组三3个排列，所以同样的票数覆盖面更大（奖金也相应是直选的1/6、1/3）。</div>`;
     }
+    let consCid = '';
     const st = c.stratified;
     if(st?.matrix){
       h += `<div class="ball-label" style="margin:8px 0 3px;"><span style="font-size:12px;color:#666;">和值/跨度分层（共识概率 × RL采样${st.n_sampled||0}注 联合找信号：颜色越深=联合越显著，粗框是选中的${st.cells.length}格，每格选${st.cells[0]?.bets.length||0}注；和值段/跨度段各最多2格，没有显著高于随机的格就不选）：</span></div>`;
       // 概率矩阵：行=和值段，列=跨度段，高亮被选中的格
       const chosen = new Set((st.chosen||[]).map(x=>x.join(',')));
-      const cid = 'cc' + (++_consCellSeq);
+      const cid = consCid = 'cc' + (++_consCellSeq);
       window._consCells[cid] = {st, gt:c.group_table};
       h += `<div style="overflow-x:auto;"><table style="border-collapse:collapse;font-size:10px;color:#ccc;margin:3px 0;"><tr><td style="padding:2px 6px;color:#888;">和值＼跨度</td>${st.span_bands.map((b,ci)=>`<td style="padding:2px 6px;color:#888;text-align:center;">${b}${st.samp_col?`<div style="color:#f59e0b;font-size:9px;">采样${st.samp_col[ci]}</div>`:''}</td>`).join('')}</tr>`;
       st.matrix.forEach((row,r)=>{
@@ -3128,7 +3154,7 @@ function renderConsensus(game, c, rlGame){
       });
       h += `</table></div><div style="font-size:10.5px;color:#a78bfa;margin:3px 0;">👆 点格子看包含的号码（★=RL采样抽到）</div><div id="${cid}_box" style="border:1px dashed #555;border-radius:6px;padding:4px 8px;margin:3px 0;font-size:11px;color:#888;">还没选格子</div><div style="font-size:9.5px;color:#777;margin-bottom:3px;">格内：共识概率% /随机基准%，橙色=RL采样的注里落在这格的注数；紫色深浅=共识与采样联合的显著程度z（共识高于随机、采样也偏多的格最深；只有联合z达标且分布均匀才会被选中，粗框）</div>`;
     }
-    h += renderGroupTable(c.group_table, rlGame ? Object.assign({}, rlGame, {consensus:c}) : null);
+    h += renderGroupTable(c.group_table, rlGame ? Object.assign({}, rlGame, {consensus:c}) : null, consCid);
   } else {
     // ssq / kl8：共识球号榜（得票 + 平均提升倍数），再给共识推荐
     const tb = c.table||[];
