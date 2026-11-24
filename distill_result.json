@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-11-24 23:33:39",
+ "updated_at": "2026-11-25 01:12:30",
  "games": {
   "3d": {
    "game": "3d",
@@ -39,10 +39,10 @@
     "ln_q": 0.6946
    },
    "n_logged_periods": 96,
-   "n_versions": 203,
+   "n_versions": 204,
    "n_labeled": 95,
    "n_ml_snapshots": 168,
-   "n_dl_snapshots": 85,
+   "n_dl_snapshots": 86,
    "source_eval": {
     "rl": {
      "name": "RL",
@@ -119,12 +119,14 @@
    "evidence_basis": "开奖号码信号 1000 期滚动检验 z=0.24",
    "source": "blend",
    "sources_today": [
-    "ml"
+    "rl",
+    "ml",
+    "dl"
    ],
    "n_ml_today": 1,
-   "n_dl_today": 0,
+   "n_dl_today": 1,
    "base_qihao": "2026314",
-   "n_versions_today": 0,
+   "n_versions_today": 1,
    "picks": [
     {
      "d": "245",
@@ -226,10 +228,10 @@
     "ball_n": -0.4538
    },
    "n_logged_periods": 97,
-   "n_versions": 203,
+   "n_versions": 204,
    "n_labeled": 96,
    "n_ml_snapshots": 172,
-   "n_dl_snapshots": 89,
+   "n_dl_snapshots": 90,
    "source_eval": {
     "rl": {
      "name": "RL",
@@ -306,137 +308,139 @@
    "evidence_basis": "开奖号码信号 400 期滚动检验 z=-2.06",
    "source": "blend",
    "sources_today": [
-    "ml"
+    "rl",
+    "ml",
+    "dl"
    ],
    "n_ml_today": 1,
-   "n_dl_today": 0,
+   "n_dl_today": 1,
    "base_qihao": "2026314",
-   "n_versions_today": 0,
+   "n_versions_today": 1,
    "ranking": [
     {
-     "ball": 36,
-     "score": 2.534
+     "ball": 68,
+     "score": 2.254
     },
     {
-     "ball": 75,
-     "score": 1.656
+     "ball": 57,
+     "score": 2.186
     },
     {
-     "ball": 78,
-     "score": 1.654
+     "ball": 11,
+     "score": 1.904
     },
     {
-     "ball": 80,
-     "score": 1.63
+     "ball": 10,
+     "score": 1.812
     },
     {
-     "ball": 35,
-     "score": 1.593
+     "ball": 13,
+     "score": 1.684
     },
     {
-     "ball": 38,
-     "score": 1.558
+     "ball": 18,
+     "score": 1.653
     },
     {
      "ball": 66,
-     "score": 1.351
-    },
-    {
-     "ball": 76,
-     "score": 1.319
-    },
-    {
-     "ball": 68,
-     "score": 1.248
-    },
-    {
-     "ball": 40,
-     "score": 1.189
-    },
-    {
-     "ball": 34,
-     "score": 1.186
-    },
-    {
-     "ball": 70,
-     "score": 1.003
-    },
-    {
-     "ball": 28,
-     "score": 0.852
-    },
-    {
-     "ball": 62,
-     "score": 0.77
+     "score": 1.463
     },
     {
      "ball": 73,
-     "score": 0.695
+     "score": 1.377
+    },
+    {
+     "ball": 80,
+     "score": 1.301
+    },
+    {
+     "ball": 6,
+     "score": 1.294
+    },
+    {
+     "ball": 29,
+     "score": 1.274
+    },
+    {
+     "ball": 50,
+     "score": 1.269
+    },
+    {
+     "ball": 38,
+     "score": 1.202
     },
     {
      "ball": 48,
-     "score": 0.661
+     "score": 1.172
     },
     {
-     "ball": 47,
-     "score": 0.659
+     "ball": 75,
+     "score": 1.141
     },
     {
-     "ball": 33,
-     "score": 0.648
+     "ball": 8,
+     "score": 1.115
     },
     {
-     "ball": 64,
-     "score": 0.646
+     "ball": 70,
+     "score": 1.026
     },
     {
-     "ball": 39,
-     "score": 0.642
+     "ball": 62,
+     "score": 0.994
+    },
+    {
+     "ball": 54,
+     "score": 0.943
+    },
+    {
+     "ball": 26,
+     "score": 0.912
     }
    ],
    "picks_by_n": {
     "4": [
-     36,
-     75,
-     78,
-     80
+     10,
+     11,
+     57,
+     68
     ],
     "5": [
-     35,
-     36,
-     75,
-     78,
-     80
+     10,
+     11,
+     13,
+     57,
+     68
     ],
     "6": [
-     35,
-     36,
-     38,
-     75,
-     78,
-     80
+     10,
+     11,
+     13,
+     18,
+     57,
+     68
     ],
     "9": [
-     35,
-     36,
-     38,
+     10,
+     11,
+     13,
+     18,
+     57,
      66,
      68,
-     75,
-     76,
-     78,
+     73,
      80
     ],
     "10": [
-     35,
-     36,
-     38,
-     40,
+     6,
+     10,
+     11,
+     13,
+     18,
+     57,
      66,
      68,
-     75,
-     76,
-     78,
+     73,
      80
     ]
    }
